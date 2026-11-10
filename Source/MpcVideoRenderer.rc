@@ -1,0 +1,486 @@
+﻿// Microsoft Visual C++ generated resource script.
+//
+#pragma code_page(65001)
+
+#include "resource.h"
+
+#define APSTUDIO_READONLY_SYMBOLS
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 2 resource.
+//
+#include "winres.h"
+
+/////////////////////////////////////////////////////////////////////////////
+#undef APSTUDIO_READONLY_SYMBOLS
+
+/////////////////////////////////////////////////////////////////////////////
+// English (United States) resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENU)
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+#ifdef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// TEXTINCLUDE
+//
+
+1 TEXTINCLUDE 
+BEGIN
+    "resource.h\0"
+END
+
+2 TEXTINCLUDE 
+BEGIN
+    "#include ""winres.h""\r\n"
+    "\0"
+END
+
+3 TEXTINCLUDE 
+BEGIN
+    "#include ""res\\MpcVideoRenderer.rc2""\r\n"
+    "\0"
+END
+
+#endif    // APSTUDIO_INVOKED
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Dialog
+//
+
+IDD_MAINPROPPAGE DIALOGEX 0, 0, 352, 383
+STYLE DS_SETFONT | WS_CHILD
+FONT 8, "MS Shell Dlg", 400, 0, 0x0
+BEGIN
+    CONTROL         "Use Direct3D 11",IDC_CHECK1,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,10,4,68,10
+    LTEXT           "Texture format:",IDC_STATIC,10,20,53,8
+    COMBOBOX        IDC_COMBO1,73,18,86,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Show statistics",IDC_CHECK2,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,178,4,65,10
+    COMBOBOX        IDC_COMBO6,178,18,97,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    GROUPBOX        "DXVA2 and D3D11 video processor",IDC_STATIC1,5,35,162,101
+    LTEXT           "Use for:",IDC_STATIC2,10,47,27,8
+    CONTROL         "NV12",IDC_CHECK7,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,41,47,33,10
+    CONTROL         "P010/P016",IDC_CHECK8,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,78,47,51,10
+    CONTROL         "YUY2",IDC_CHECK9,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,133,47,33,10
+    CONTROL         "Other supported formats",IDC_CHECK4,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,41,60,97,10
+    LTEXT           "Deinterlacing:",IDC_STATIC,10,74,53,8
+    COMBOBOX        IDC_COMBO9,73,73,86,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Double the frame rate when deinterlacing",IDC_CHECK3,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,10,86,152,10
+    CONTROL         "Use for resizing",IDC_CHECK5,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,10,99,67,10
+    LTEXT           "RTX VSR:",IDC_STATIC7,10,112,90,8
+    COMBOBOX        IDC_COMBO8,102,111,62,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "RTX Video HDR",IDC_CHECK19,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,10,123,66,10
+    GROUPBOX        "Shader video processor",IDC_STATIC,5,139,162,107
+    LTEXT           "Chroma upsampling:",IDC_STATIC,10,153,72,8
+    COMBOBOX        IDC_COMBO5,83,151,76,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Upscaling:",IDC_STATIC,10,169,35,8
+    COMBOBOX        IDC_COMBO2,83,167,76,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Downscaling:",IDC_STATIC,10,185,44,8
+    COMBOBOX        IDC_COMBO3,83,183,76,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Use the ""Upscaling"" method to reducing the frame to 50%",IDC_CHECK6,
+                    "Button",BS_AUTOCHECKBOX | BS_MULTILINE | WS_TABSTOP,10,199,146,15
+    CONTROL         "Use dithering",IDC_CHECK10,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,10,218,59,10
+    CONTROL         "Use Blend deinterlacing for YUV 4:2:0",IDC_CHECK17,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,10,231,139,10
+    GROUPBOX        "HDR",IDC_STATIC,171,35,176,138
+    CONTROL         "Prefer Dolby Vision over PQ and HLG",IDC_CHECK18,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,178,47,135,10
+    COMBOBOX        IDC_COMBO10,217,58,80,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "HDR:",IDC_STATIC99,"Static",SS_LEFTNOWORDWRAP | WS_GROUP,178,59,37,8
+    EDITTEXT        IDC_EDIT_DISPLAYMAX,298,57,26,12,ES_AUTOHSCROLL | ES_NUMBER,WS_EX_RIGHT
+    CONTROL         "Nits",IDC_STATIC100,"Static",SS_LEFTNOWORDWRAP | WS_GROUP,325,59,16,8
+    LTEXT           "Dolby Vision:",IDC_STATIC_DVTM,178,74,46,8
+    COMBOBOX        IDC_COMBO_DVTM,226,72,71,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Measured peak",IDC_CHECK20,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,217,86,62,10
+    LTEXT           "Windows HDR:",IDC_STATIC5,178,101,51,8
+    COMBOBOX        IDC_COMBO7,232,99,110,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Subtitle and OSD brightness:",IDC_STATIC6,178,116,99,8
+    CONTROL         "",IDC_SLIDER1,"msctls_trackbar32",WS_TABSTOP | 0x400,279,115,63,12
+    LTEXT           "If passthrough is impossible or disabled, then:",IDC_STATIC,178,132,156,8
+    CONTROL         "Convert to SDR",IDC_CHECK14,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,178,144,67,10
+    LTEXT           "Method:",IDC_STATIC_SDRTM,252,146,26,8
+    COMBOBOX        IDC_COMBO_SDRTM,279,144,63,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "SDR display nits:",IDC_STATIC8,178,158,60,8
+    EDITTEXT        IDC_EDIT1,242,157,32,12,ES_AUTOHSCROLL | ES_READONLY | ES_NUMBER,WS_EX_RIGHT
+    CONTROL         "",IDC_SLIDER2,"msctls_trackbar32",WS_TABSTOP | 0x400,279,157,63,12
+    LTEXT           "Swap effect:",IDC_STATIC3,178,178,43,8
+    COMBOBOX        IDC_COMBO4,266,176,76,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Use exclusive fullscreen",IDC_CHECK11,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,178,191,93,10
+    CONTROL         "Wait for VBlank before Present",IDC_CHECK15,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,178,204,117,10
+    CONTROL         "Adjust the frame presentation time",IDC_CHECK13,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,178,217,133,10
+    CONTROL         "Reinitialize device when changing display",IDC_CHECK16,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,178,230,151,10
+    EDITTEXT        IDC_EDIT2,10,360,332,12,ES_READONLY | NOT WS_BORDER,WS_EX_RIGHT
+    GROUPBOX        "DLSS Multi Frame Generation Extended",IDC_STATIC,5,258,342,77
+    CONTROL         "Enable DLSS Multi Frame Generation (Auto)",IDC_MFG_MULTIPLIER,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,12,275,245,11
+    LTEXT           "Processing:",IDC_STATIC,12,298,74,9
+    COMBOBOX        IDC_MFG_PROCESSING_MODE,92,294,247,90,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Show VSR / MFG badges (3 seconds)",IDC_MFG_FEATURE_BADGES,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,12,313,235,11
+    PUSHBUTTON      "Default",IDC_BUTTON1,305,340,37,14
+END
+
+IDD_INFOPROPPAGE DIALOGEX 0, 0, 318, 153
+STYLE DS_SETFONT | WS_CHILD
+FONT 8, "MS Shell Dlg", 400, 0, 0x0
+BEGIN
+    EDITTEXT        IDC_EDIT1,5,4,308,130,ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_READONLY | WS_VSCROLL | WS_HSCROLL
+    EDITTEXT        IDC_EDIT2,5,140,308,12,ES_READONLY | NOT WS_BORDER,WS_EX_RIGHT
+END
+
+IDD_MFGPAGE DIALOGEX 0, 0, 350, 154
+STYLE DS_SETFONT | WS_CHILD
+FONT 9, "Segoe UI", 400, 0, 0x0
+BEGIN
+    GROUPBOX "DLSS Multi Frame Generation Extended",IDC_STATIC,7,5,336,60
+    CONTROL "Enable DLSS Multi Frame Generation (Auto)",IDC_MFG_MULTIPLIER,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,15,24,260,12
+    LTEXT "Auto follows source timing and display refresh rate.",IDC_STATIC,15,43,319,12
+    GROUPBOX "Live status / diagnostic",IDC_STATIC,7,70,336,75
+    EDITTEXT IDC_MFG_STATUS,15,84,319,53,ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL
+END
+
+IDD_SETTINGSPAGE DIALOGEX 0, 0, 480, 228
+STYLE DS_SETFONT | WS_CHILD
+FONT 8, "MS Shell Dlg", 400, 0, 0x0
+BEGIN
+    CONTROL         "",IDC_SECTION_TABS,"SysTabControl32",WS_TABSTOP,5,5,470,200
+    LTEXT           "",IDC_EDIT2,5,212,360,8
+    PUSHBUTTON      "Default",IDC_BUTTON1,435,209,40,14
+END
+
+IDD_SECTION_SOURCE DIALOGEX 0, 0, 460, 180
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
+FONT 8, "MS Shell Dlg", 400, 0, 0x0
+BEGIN
+    LTEXT           "The rendering engine, its precision, and which video formats the GPU's video processor converts.",IDC_STATIC_DESC_SOURCE,7,4,446,8
+    GROUPBOX        "Rendering",IDC_CARD_DECODING,7,16,222,52
+    CONTROL         "Use Direct3D 11 (recommended)",IDC_CHECK1,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,30,208,10
+    LTEXT           "Bit depth",IDC_STATIC,14,48,56,8
+    COMBOBOX        IDC_COMBO1,74,46,148,120,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    GROUPBOX        "GPU video processor",IDC_STATIC1,7,74,222,50
+    CONTROL         "NV12",IDC_CHECK7,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,88,100,10
+    CONTROL         "P010/P016",IDC_CHECK8,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,118,88,104,10
+    CONTROL         "YUY2",IDC_CHECK9,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,104,100,10
+    CONTROL         "Other supported formats",IDC_CHECK4,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,118,104,104,10
+    GROUPBOX        "Deinterlacing",IDC_STATIC2,235,16,218,72
+    LTEXT           "Hardware",IDC_STATIC,242,32,40,8
+    COMBOBOX        IDC_COMBO9,286,30,160,100,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Double the frame rate when deinterlacing",IDC_CHECK3,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,242,50,204,10
+    CONTROL         "Blend fields when the shaders convert (4:2:0)",IDC_CHECK17,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,242,66,204,10
+END
+
+IDD_SECTION_CHROMA DIALOGEX 0, 0, 460, 180
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
+FONT 8, "MS Shell Dlg", 400, 0, 0x0
+BEGIN
+    LTEXT           "Restoring full colour resolution from 4:2:0 and 4:2:2 video.",IDC_STATIC_DESC_CHROMA,7,4,446,8
+    GROUPBOX        "Chroma upsampling",IDC_CARD_CHROMA,7,16,446,78
+    LTEXT           "Method",IDC_STATIC40,14,32,40,8
+    COMBOBOX        IDC_COMBO5,58,30,170,140,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Use this method instead of the video processor's chroma upsampling",IDC_CHECK27,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,50,300,10
+    LTEXT           "Better 4:4:4 colour detail, while the video processor keeps converting and resizing. RTX Video Super Resolution cannot run on the 4:4:4 picture it then receives.",IDC_STATIC,22,66,424,20
+END
+
+IDD_SECTION_SCALING DIALOGEX 0, 0, 460, 180
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
+FONT 8, "MS Shell Dlg", 400, 0, 0x0
+BEGIN
+    LTEXT           "Resizing the picture to the window. One enlarger runs at a time: DLSS SR, the video processor or the shaders.",IDC_STATIC_DESC_SCALING,7,4,446,8
+    GROUPBOX        "Resizing",IDC_CARD_RESIZING,7,16,222,160
+    CONTROL         "Use the video processor for resizing",IDC_CHECK5,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,30,208,10
+    LTEXT           "Not available while Dolby Vision is playing.",IDC_STATIC_VPDOVI_NOTE,22,42,200,8
+    LTEXT           "Video Super Resolution",IDC_STATIC7,22,56,96,8
+    COMBOBOX        IDC_COMBO8,140,54,82,80,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Needs the video processor resizing. Not available with DLSS SR or the chroma replacement.",IDC_STATIC_SUPERRES_NOTE,22,70,200,20
+    LTEXT           "Upscaling",IDC_STATIC39,14,94,46,8
+    COMBOBOX        IDC_COMBO2,64,92,158,170,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Use a lighter filter for small enlargements",IDC_CHECK29,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,22,108,200,10
+    COMBOBOX        IDC_COMBO16,64,120,158,170,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Under 5 %, slightly cropped 4K film on a 4K screen, where a neural upscaler gains nothing visible.",IDC_STATIC_SMALL_NOTE,22,136,200,16
+    LTEXT           "Downscaling",IDC_STATIC41,14,158,46,8
+    COMBOBOX        IDC_COMBO3,64,156,158,100,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    GROUPBOX        "NVIDIA DLSS Super Resolution (experimental)",IDC_STATIC35,235,16,218,110
+    CONTROL         "Use DLSS Super Resolution for upscaling",IDC_CHECK25,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,242,30,204,10
+    CONTROL         "Also run when no enlarging is needed (DLAA)",IDC_CHECK28,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,242,44,204,10
+    LTEXT           "Needs a high-end RTX card at native 4K.",IDC_STATIC_DLAA_NOTE,250,58,196,8
+    LTEXT           "Preset",IDC_STATIC36,242,74,28,8
+    COMBOBOX        IDC_COMBO15,274,72,172,110,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "DLL",IDC_STATIC37,242,92,18,8
+    EDITTEXT        IDC_EDIT9,262,90,160,12,ES_AUTOHSCROLL
+    PUSHBUTTON      "...",IDC_BUTTON4,426,90,20,12
+    LTEXT           "",IDC_STATIC38,242,108,204,8,SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS
+END
+
+IDD_SECTION_DETAIL DIALOGEX 0, 0, 460, 180
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
+FONT 8, "MS Shell Dlg", 400, 0, 0x0
+BEGIN
+    LTEXT           "Cleaning the decoded video, before anything else; finishing touches after resizing.",IDC_STATIC_DESC_DETAIL,7,4,446,8
+    GROUPBOX        "Artifact removal",IDC_CARD_CLEANING,7,16,222,92
+    LTEXT           "Deblocking",IDC_STATIC_DEBLOCK,14,32,40,8
+    COMBOBOX        IDC_DEBLOCK,56,30,166,90,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Strength",IDC_STATIC_DEBLOCK_LEVEL,22,48,32,8
+    CONTROL         "",IDC_DEBLOCK_LEVEL,"msctls_trackbar32",WS_TABSTOP | 0x400,56,46,148,14
+    LTEXT           "3",IDC_DEBLOCK_LEVEL_TEXT,208,48,14,8
+    CONTROL         "Debanding",IDC_DEBAND,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,64,208,10
+    LTEXT           "Strength",IDC_STATIC_DEBAND_LEVEL,22,80,32,8
+    CONTROL         "",IDC_DEBAND_LEVEL,"msctls_trackbar32",WS_TABSTOP | 0x400,56,78,148,14
+    LTEXT           "3",IDC_DEBAND_LEVEL_TEXT,208,80,14,8
+    LTEXT           "",IDC_STATIC_CLEAN_NOTE,14,96,208,8
+    GROUPBOX        "Sharpening",IDC_CARD_SHARPENING,235,16,218,58
+    LTEXT           "Method",IDC_STATIC_SHARPEN,242,32,38,8
+    COMBOBOX        IDC_SHARPEN,284,30,162,90,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Intensity",IDC_STATIC_SHARPEN_LEVEL,242,52,38,8
+    CONTROL         "",IDC_SHARPEN_LEVEL,"msctls_trackbar32",WS_TABSTOP | 0x400,284,50,144,14
+    LTEXT           "3",IDC_SHARPEN_LEVEL_TEXT,432,52,14,8
+    GROUPBOX        "Dithering",IDC_STATIC,235,80,218,28
+    CONTROL         "Use dithering",IDC_CHECK10,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,242,92,204,10
+    GROUPBOX        "Channel logo",IDC_CARD_LOGO,7,114,446,62
+    CONTROL         "Hide the channel logo",IDC_HIDE_LOGO,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,128,100,10
+    LTEXT           "Margin",IDC_STATIC_LOGO_MARGIN,120,128,26,8
+    CONTROL         "",IDC_LOGO_MARGIN,"msctls_trackbar32",WS_TABSTOP | 0x400,146,126,104,14
+    LTEXT           "1 px",IDC_LOGO_MARGIN_TEXT,254,128,26,8
+    PUSHBUTTON      "Find the logo",IDC_LOGO_FIND,286,126,76,14
+    PUSHBUTTON      "Forget the logos",IDC_LOGO_FORGET,370,126,76,14
+    LTEXT           "Logo",IDC_STATIC_LOGO_LIST,14,146,22,8
+    COMBOBOX        IDC_LOGO_LIST,38,144,212,100,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "",IDC_LOGO_STATUS,14,162,432,10
+END
+
+IDD_SECTION_DLSSNR DIALOGEX 0, 0, 460, 180
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
+FONT 8, "MS Shell Dlg", 400, 0, 0x0
+BEGIN
+    LTEXT           "NVIDIA DLSS 5 neural rendering on each picture. Needs an NVIDIA RTX card, Direct3D 11 and the 64-bit filter.",IDC_STATIC_DESC_DLSSNR,7,4,446,8
+    GROUPBOX        "DLSS 5 NR",IDC_CARD_SESSION,7,16,222,80
+    CONTROL         "Enable DLSS 5 NR",IDC_DLSSNR_ENABLE,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,30,100,10
+    CONTROL         "Apply after upscaling",IDC_CHECK23,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,118,30,104,10
+    LTEXT           "Toggle key",IDC_STATIC29,14,48,44,8
+    COMBOBOX        IDC_COMBO13,62,46,160,110,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "DLL",IDC_STATIC27,14,66,18,8
+    EDITTEXT        IDC_EDIT7,34,64,166,12,ES_AUTOHSCROLL
+    PUSHBUTTON      "...",IDC_BUTTON2,204,64,18,12
+    LTEXT           "",IDC_STATIC28,14,82,208,8,SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS
+    GROUPBOX        "Temporal stabilizer (NVIDIA Optical Flow)",IDC_STATIC31,7,100,222,76
+    LTEXT           "Strength",IDC_STATIC32,14,116,40,8
+    CONTROL         "",IDC_SLIDER7,"msctls_trackbar32",WS_TABSTOP | 0x400,56,114,120,14
+    EDITTEXT        IDC_EDIT8,180,115,42,12,ES_AUTOHSCROLL | ES_READONLY,WS_EX_RIGHT
+    LTEXT           "Optical Flow resolution",IDC_STATIC_FLOW_DIVIDER,14,132,208,8
+    CONTROL         "",IDC_SLIDER10,"msctls_trackbar32",WS_TABSTOP | 0x400,56,142,120,14
+    EDITTEXT        IDC_EDIT12,180,143,42,12,ES_AUTOHSCROLL | ES_READONLY,WS_EX_RIGHT
+    GROUPBOX        "Network",IDC_STATIC30,235,16,218,160
+    LTEXT           "Style",IDC_STATIC21,242,32,24,8
+    COMBOBOX        IDC_COMBO11,268,30,60,60,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Preset",IDC_STATIC22,334,32,26,8
+    COMBOBOX        IDC_COMBO12,362,30,58,60,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Auto mask",IDC_CHECK21,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,242,48,80,10
+    LTEXT           "Intensity",IDC_STATIC23,242,68,44,8
+    CONTROL         "",IDC_SLIDER3,"msctls_trackbar32",WS_TABSTOP | 0x400,288,66,120,14
+    EDITTEXT        IDC_EDIT3,410,67,36,12,ES_AUTOHSCROLL | ES_READONLY,WS_EX_RIGHT
+    LTEXT           "Local tone",IDC_STATIC24,242,84,44,8
+    CONTROL         "",IDC_SLIDER4,"msctls_trackbar32",WS_TABSTOP | 0x400,288,82,120,14
+    EDITTEXT        IDC_EDIT4,410,83,36,12,ES_AUTOHSCROLL | ES_READONLY,WS_EX_RIGHT
+    LTEXT           "Detail",IDC_STATIC25,242,100,44,8
+    CONTROL         "",IDC_SLIDER5,"msctls_trackbar32",WS_TABSTOP | 0x400,288,98,120,14
+    EDITTEXT        IDC_EDIT5,410,99,36,12,ES_AUTOHSCROLL | ES_READONLY,WS_EX_RIGHT
+    LTEXT           "Skin detail",IDC_STATIC26,242,116,44,8
+    CONTROL         "",IDC_SLIDER6,"msctls_trackbar32",WS_TABSTOP | 0x400,288,114,120,14
+    EDITTEXT        IDC_EDIT6,410,115,36,12,ES_AUTOHSCROLL | ES_READONLY,WS_EX_RIGHT
+    LTEXT           "Working size",IDC_STATIC_DLSSNR_SCALE,242,132,44,8
+    CONTROL         "",IDC_SLIDER9,"msctls_trackbar32",WS_TABSTOP | 0x400,288,130,120,14
+    EDITTEXT        IDC_EDIT11,410,131,36,12,ES_AUTOHSCROLL | ES_READONLY,WS_EX_RIGHT
+    PUSHBUTTON      "Default",IDC_BUTTON3,404,154,42,14
+END
+
+IDD_SECTION_HDR DIALOGEX 0, 0, 460, 180
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
+FONT 8, "MS Shell Dlg", 400, 0, 0x0
+BEGIN
+    LTEXT           "How HDR video (HDR10, HLG, Dolby Vision) is sent to the display, and the conversion of SDR video to HDR.",IDC_STATIC_DESC_HDR,7,4,446,8
+    GROUPBOX        "HDR video",IDC_CARD_HDRSOURCE,7,16,222,122
+    CONTROL         "Prefer Dolby Vision over PQ and HLG",IDC_CHECK18,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,30,208,10
+    LTEXT           "HDR output",IDC_STATIC99,14,50,44,8
+    COMBOBOX        IDC_COMBO10,60,48,106,110,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    EDITTEXT        IDC_EDIT_DISPLAYMAX,170,48,30,12,ES_AUTOHSCROLL | ES_NUMBER,WS_EX_RIGHT
+    LTEXT           "Nits",IDC_STATIC100,204,50,18,8
+    CONTROL         "Measured peak",IDC_CHECK20,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,60,64,140,10
+    LTEXT           "Dolby Vision",IDC_STATIC_DVTM,14,82,44,8
+    COMBOBOX        IDC_COMBO_DVTM,60,80,106,110,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Windows HDR",IDC_STATIC5,14,100,56,8
+    COMBOBOX        IDC_COMBO7,74,98,148,110,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Subtitle and OSD brightness",IDC_STATIC6,14,120,106,8
+    CONTROL         "",IDC_SLIDER1,"msctls_trackbar32",WS_TABSTOP | 0x400,124,118,98,14
+    GROUPBOX        "If HDR output is impossible or off",IDC_CARD_FALLBACK,235,16,218,70
+    CONTROL         "Convert to SDR",IDC_CHECK14,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,242,30,204,10
+    LTEXT           "Method",IDC_STATIC_SDRTM,250,50,62,8
+    COMBOBOX        IDC_COMBO_SDRTM,316,48,80,110,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "SDR brightness",IDC_STATIC8,250,68,62,8
+    EDITTEXT        IDC_EDIT1,316,66,30,12,ES_AUTOHSCROLL | ES_READONLY | ES_NUMBER,WS_EX_RIGHT
+    CONTROL         "",IDC_SLIDER2,"msctls_trackbar32",WS_TABSTOP | 0x400,350,66,96,14
+    GROUPBOX        "SDR to HDR",IDC_CARD_DRIVER,235,92,218,36
+    CONTROL         "RTX Video HDR",IDC_CHECK19,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,242,108,204,10
+END
+
+IDD_SECTION_PRESENT DIALOGEX 0, 0, 460, 180
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
+FONT 8, "MS Shell Dlg", 400, 0, 0x0
+BEGIN
+    LTEXT           "How and when each picture is sent to the screen, the statistics, and the picture's delay against the sound.",IDC_STATIC_DESC_PRESENT,7,4,446,8
+    GROUPBOX        "Presentation",IDC_CARD_PRESENT,7,16,222,110
+    LTEXT           "Swap effect",IDC_STATIC3,14,32,50,8
+    COMBOBOX        IDC_COMBO4,68,30,154,70,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Use exclusive fullscreen",IDC_CHECK11,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,50,208,10
+    CONTROL         "Reinitialize device when changing display",IDC_CHECK16,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,64,208,10
+    CONTROL         "Render ahead: a refresh chosen for each picture",IDC_CHECK26,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,14,78,208,10
+    CONTROL         "Wait for VBlank before Present",IDC_CHECK15,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,24,92,198,10
+    CONTROL         "Adjust the frame presentation time",IDC_CHECK13,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,24,106,198,10
+    GROUPBOX        "Statistics",IDC_STATIC_HEAD_STATS,235,16,218,54
+    CONTROL         "Show statistics",IDC_CHECK2,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,242,30,204,10
+    LTEXT           "Size",IDC_STATIC,242,50,24,8
+    COMBOBOX        IDC_COMBO6,270,48,176,80,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    GROUPBOX        "Audio sync",IDC_STATIC_HEAD_SOUND,235,74,218,52
+    LTEXT           "Video delay",IDC_STATIC_VIDEO_DELAY,242,90,44,8
+    CONTROL         "",IDC_SLIDER8,"msctls_trackbar32",WS_TABSTOP | 0x400,288,88,116,14
+    EDITTEXT        IDC_EDIT10,408,89,38,12,ES_AUTOHSCROLL | ES_READONLY,WS_EX_RIGHT
+    LTEXT           "Positive: picture later, for a late sound.",IDC_STATIC,242,108,204,8
+END
+
+IDD_SECTION_PRESETS DIALOGEX 0, 0, 460, 180
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
+FONT 8, "MS Shell Dlg", 400, 0, 0x0
+BEGIN
+    LTEXT           "Ten saved sets of settings. Each has a name and a keyboard shortcut that applies it during playback.",IDC_STATIC_DESC_PRESETS,7,4,446,8
+    LTEXT           "1",IDC_STATIC,9,20,10,8
+    EDITTEXT        IDC_PRESET_NAME1,20,18,166,12,ES_AUTOHSCROLL
+    COMBOBOX        IDC_PRESET_MOD1,192,18,76,120,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "+",IDC_STATIC,271,20,6,8
+    COMBOBOX        IDC_PRESET_KEY1,279,18,66,160,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Save",IDC_PRESET_SAVE1,353,18,44,12
+    PUSHBUTTON      "Load",IDC_PRESET_LOAD1,401,18,44,12
+    LTEXT           "2",IDC_STATIC,9,34,10,8
+    EDITTEXT        IDC_PRESET_NAME2,20,32,166,12,ES_AUTOHSCROLL
+    COMBOBOX        IDC_PRESET_MOD2,192,32,76,120,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "+",IDC_STATIC,271,34,6,8
+    COMBOBOX        IDC_PRESET_KEY2,279,32,66,160,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Save",IDC_PRESET_SAVE2,353,32,44,12
+    PUSHBUTTON      "Load",IDC_PRESET_LOAD2,401,32,44,12
+    LTEXT           "3",IDC_STATIC,9,48,10,8
+    EDITTEXT        IDC_PRESET_NAME3,20,46,166,12,ES_AUTOHSCROLL
+    COMBOBOX        IDC_PRESET_MOD3,192,46,76,120,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "+",IDC_STATIC,271,48,6,8
+    COMBOBOX        IDC_PRESET_KEY3,279,46,66,160,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Save",IDC_PRESET_SAVE3,353,46,44,12
+    PUSHBUTTON      "Load",IDC_PRESET_LOAD3,401,46,44,12
+    LTEXT           "4",IDC_STATIC,9,62,10,8
+    EDITTEXT        IDC_PRESET_NAME4,20,60,166,12,ES_AUTOHSCROLL
+    COMBOBOX        IDC_PRESET_MOD4,192,60,76,120,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "+",IDC_STATIC,271,62,6,8
+    COMBOBOX        IDC_PRESET_KEY4,279,60,66,160,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Save",IDC_PRESET_SAVE4,353,60,44,12
+    PUSHBUTTON      "Load",IDC_PRESET_LOAD4,401,60,44,12
+    LTEXT           "5",IDC_STATIC,9,76,10,8
+    EDITTEXT        IDC_PRESET_NAME5,20,74,166,12,ES_AUTOHSCROLL
+    COMBOBOX        IDC_PRESET_MOD5,192,74,76,120,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "+",IDC_STATIC,271,76,6,8
+    COMBOBOX        IDC_PRESET_KEY5,279,74,66,160,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Save",IDC_PRESET_SAVE5,353,74,44,12
+    PUSHBUTTON      "Load",IDC_PRESET_LOAD5,401,74,44,12
+    LTEXT           "6",IDC_STATIC,9,90,10,8
+    EDITTEXT        IDC_PRESET_NAME6,20,88,166,12,ES_AUTOHSCROLL
+    COMBOBOX        IDC_PRESET_MOD6,192,88,76,120,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "+",IDC_STATIC,271,90,6,8
+    COMBOBOX        IDC_PRESET_KEY6,279,88,66,160,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Save",IDC_PRESET_SAVE6,353,88,44,12
+    PUSHBUTTON      "Load",IDC_PRESET_LOAD6,401,88,44,12
+    LTEXT           "7",IDC_STATIC,9,104,10,8
+    EDITTEXT        IDC_PRESET_NAME7,20,102,166,12,ES_AUTOHSCROLL
+    COMBOBOX        IDC_PRESET_MOD7,192,102,76,120,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "+",IDC_STATIC,271,104,6,8
+    COMBOBOX        IDC_PRESET_KEY7,279,102,66,160,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Save",IDC_PRESET_SAVE7,353,102,44,12
+    PUSHBUTTON      "Load",IDC_PRESET_LOAD7,401,102,44,12
+    LTEXT           "8",IDC_STATIC,9,118,10,8
+    EDITTEXT        IDC_PRESET_NAME8,20,116,166,12,ES_AUTOHSCROLL
+    COMBOBOX        IDC_PRESET_MOD8,192,116,76,120,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "+",IDC_STATIC,271,118,6,8
+    COMBOBOX        IDC_PRESET_KEY8,279,116,66,160,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Save",IDC_PRESET_SAVE8,353,116,44,12
+    PUSHBUTTON      "Load",IDC_PRESET_LOAD8,401,116,44,12
+    LTEXT           "9",IDC_STATIC,9,132,10,8
+    EDITTEXT        IDC_PRESET_NAME9,20,130,166,12,ES_AUTOHSCROLL
+    COMBOBOX        IDC_PRESET_MOD9,192,130,76,120,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "+",IDC_STATIC,271,132,6,8
+    COMBOBOX        IDC_PRESET_KEY9,279,130,66,160,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Save",IDC_PRESET_SAVE9,353,130,44,12
+    PUSHBUTTON      "Load",IDC_PRESET_LOAD9,401,130,44,12
+    LTEXT           "10",IDC_STATIC,9,146,10,8
+    EDITTEXT        IDC_PRESET_NAME10,20,144,166,12,ES_AUTOHSCROLL
+    COMBOBOX        IDC_PRESET_MOD10,192,144,76,120,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "+",IDC_STATIC,271,146,6,8
+    COMBOBOX        IDC_PRESET_KEY10,279,144,66,160,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Save",IDC_PRESET_SAVE10,353,144,44,12
+    PUSHBUTTON      "Load",IDC_PRESET_LOAD10,401,144,44,12
+    LTEXT           "Save stores all options, applied or not. Load puts it back into the page: click Apply to use it. Not part of presets: the DLL paths, the DLSS 5 NR toggle key, Show statistics and the whole Presentation tab.",IDC_STATIC_PRESETS_NOTE,9,160,444,16
+END
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// DESIGNINFO
+//
+
+#ifdef APSTUDIO_INVOKED
+GUIDELINES DESIGNINFO
+BEGIN
+    IDD_MAINPROPPAGE, DIALOG
+    BEGIN
+        LEFTMARGIN, 5
+        RIGHTMARGIN, 347
+        VERTGUIDE, 10
+        VERTGUIDE, 73
+        VERTGUIDE, 171
+        VERTGUIDE, 178
+        VERTGUIDE, 342
+        TOPMARGIN, 4
+        BOTTOMMARGIN, 273
+    END
+
+    IDD_INFOPROPPAGE, DIALOG
+    BEGIN
+        LEFTMARGIN, 5
+        RIGHTMARGIN, 313
+        TOPMARGIN, 4
+        BOTTOMMARGIN, 152
+    END
+END
+#endif    // APSTUDIO_INVOKED
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// String Table
+//
+
+STRINGTABLE
+BEGIN
+    IDS_MAINPROPPAGE_TITLE  "Settings"
+    IDS_INFOPROPPAGE_TITLE  "Information"
+    IDS_SETTINGSPAGE_TITLE  "MFG"
+END
+
+#endif    // English (United States) resources
+/////////////////////////////////////////////////////////////////////////////
+
+
+
+#ifndef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 3 resource.
+//
+#include "res\MpcVideoRenderer.rc2"
+
+/////////////////////////////////////////////////////////////////////////////
+#endif    // not APSTUDIO_INVOKED
+
