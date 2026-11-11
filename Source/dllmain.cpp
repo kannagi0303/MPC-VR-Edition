@@ -42,7 +42,7 @@ const AMOVIESETUP_PIN sudpPins[] = {
 };
 
 const AMOVIESETUP_FILTER sudFilter[] = {
-	{&__uuidof(CMpcVideoRenderer), L"MPC-VR-MFG", MERIT_DO_NOT_USE, (UINT)std::size(sudpPins), sudpPins, CLSID_LegacyAmFilterCategory},
+	{&__uuidof(CMpcVideoRenderer), L"MPC-VR-Edition", MERIT_DO_NOT_USE, (UINT)std::size(sudpPins), sudpPins, CLSID_LegacyAmFilterCategory},
 };
 
 CFactoryTemplate g_Templates[] = {

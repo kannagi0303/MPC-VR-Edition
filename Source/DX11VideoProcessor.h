@@ -36,6 +36,7 @@
 #include <atomic>
 #include <mutex>
 #include "Mfg/Session.h"
+#include "DLSS/DlssSR.h"
 #include "Mfg/FrameQueue.h"
 #include "Mfg/LiveFlowGroups.h"
 #include "Mfg/LiveFlowGroupPacing.h"
@@ -339,6 +340,9 @@ private:
 	bool m_bFullScreen = false;
 
 	int m_iVPSuperRes = SUPERRES_Disable;
+	CDlssSR m_dlssSR;
+	const wchar_t* m_dlssSRInputStatus = nullptr;
+	Tex2D_t m_dlssSRSource;
 	bool m_bVPUseSuperRes = false; // but it is not exactly
 
 	bool m_bVPRTXVideoHDR = false;
@@ -537,7 +541,8 @@ private:
 	HRESULT FinalPass(const Tex2D_t& Tex, ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect);
 
 	void DrawSubtitles(ID3D11Texture2D* pRenderTarget);
-	HRESULT Process(ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, const bool second);
+	HRESULT Process(ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, const bool second, bool allowDlssSR = true);
+	Tex2D_t* TryDlssSR(const CRect& srcRect, const CRect& dstRect);
 
 	HRESULT AlphaBlt(ID3D11ShaderResourceView* pShaderResource, ID3D11Texture2D* pRenderTarget,
 					 ID3D11Buffer* pVertexBuffer, D3D11_VIEWPORT* pViewPort,

@@ -82,6 +82,9 @@
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="DX11Helper.cpp" />
     <ClCompile Include="DLSS\DlssOpticalFlow.cpp" />
+    <ClCompile Include="DLSS\DlssSR.cpp">
+      <AdditionalIncludeDirectories>$(SolutionDir)vendor\nvidia\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
     <ClCompile Include="DX11VideoProcessor.cpp" />
     <ClCompile Include="DX9Helper.cpp" />
     <ClCompile Include="DX9VideoProcessor.cpp" />
@@ -121,6 +124,7 @@
     <ClInclude Include="DisplayConfig.h" />
     <ClInclude Include="DX11Helper.h" />
     <ClInclude Include="DLSS\DlssOpticalFlow.h" />
+    <ClInclude Include="DLSS\DlssSR.h" />
     <ClInclude Include="DLSS\NvOF\nvOpticalFlowCommon.h" />
     <ClInclude Include="DLSS\NvOF\nvOpticalFlowD3D11.h" />
     <ClInclude Include="DLSS\NgxRuntime.h" />

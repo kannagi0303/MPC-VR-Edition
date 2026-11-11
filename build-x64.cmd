@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 
-rem MPC-VR-MFG x64 Release build.
+rem MPC-VR-Edition x64 Release build.
 rem Default: rebuild the whole solution (including PropPage.cpp and .rc resources).
 rem Optional: "quick" uses MSBuild incremental compilation.
 
@@ -70,16 +70,16 @@ if not exist "vendor\nvidia\lib\nvsdk_ngx_s.lib" (
     goto :fail
 )
 
-if not exist "artifacts\build" mkdir "artifacts\build"
-if not exist "artifacts\build" (
-    echo [ERROR] Could not create artifacts\build.
+if not exist "_bin\logs" mkdir "_bin\logs"
+if not exist "_bin\logs" (
+    echo [ERROR] Could not create _bin\logs.
     goto :fail
 )
 
-set "LOGFILE=%CD%\artifacts\build\x64-release.log"
+set "LOGFILE=%CD%\_bin\logs\x64-release.log"
 echo.
 echo ================================================
-echo   MPC-VR-MFG - Release x64 - %ACTION%
+echo   MPC-VR-Edition - Release x64 - %ACTION%
 echo ================================================
 echo Solution: "%CD%\MpcVideoRenderer.sln"
 echo Log:      "%LOGFILE%"
@@ -100,8 +100,8 @@ if not exist "%FILTER%" (
 )
 
 rem Produce a clean, self-contained local distribution after a successful build.
-rem The verified NVIDIA runtime is obtained from local cache or NVIDIA's official
-rem pinned release. Registration is deliberately never run by this build.
+rem The verified NVIDIA runtimes come from the local cache or official pinned releases.
+rem Registration is deliberately never run by this build.
 if not exist "build-support\package-release.ps1" (
     echo [ERROR] Distribution packaging script is missing.
     goto :fail

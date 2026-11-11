@@ -179,7 +179,7 @@ static void ReadSettings(CRegKey& key, Settings_t& sets)
 	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_VPSuperResolution, dw)) {
 		// Old Always (5) now maps to the highest supported threshold.
 		sets.iVPSuperRes = dw == SUPERRES_Always ? SUPERRES_1440p
-			: discard<int>(dw, SUPERRES_Disable, 0, SUPERRES_1440p);
+			: discard<int>(dw, SUPERRES_Disable, 0, SUPERRES_DLSS_SR);
 	}
 #ifdef _WIN64
 	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_VPRTXVideoHDR, dw)) {
@@ -569,7 +569,7 @@ static LRESULT CALLBACK ParentWndProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM
 //
 
 CMpcVideoRenderer::CMpcVideoRenderer(LPUNKNOWN pUnk, HRESULT* phr)
-	: CBaseVideoRenderer2(__uuidof(this), L"MPC-VR-MFG", pUnk, phr)
+	: CBaseVideoRenderer2(__uuidof(this), L"MPC-VR-Edition", pUnk, phr)
 {
 	DLog(L"CMpcVideoRenderer::CMpcVideoRenderer()");
 
@@ -2104,7 +2104,8 @@ STDMETHODIMP_(void) CMpcVideoRenderer::SetSettings(const Settings_t& setings)
 	// Keep both legacy callers and saved settings compatible with the
 	// streamlined Off/Auto UI and the removal of the VSR Always option.
 	m_Sets.iMfgMultiplier = m_Sets.iMfgMultiplier >= 2 && m_Sets.iMfgMultiplier <= 7 ? 7u : 0u;
-	m_Sets.iVPSuperRes = std::clamp(m_Sets.iVPSuperRes, int(SUPERRES_Disable), int(SUPERRES_1440p));
+	m_Sets.iVPSuperRes = m_Sets.iVPSuperRes == SUPERRES_Always ? SUPERRES_1440p
+		: discard<int>(m_Sets.iVPSuperRes, SUPERRES_Disable, SUPERRES_Disable, SUPERRES_DLSS_SR);
 	mfg::EnforceScope(m_Sets);
 	m_VideoProcessor->Configure(m_Sets);
 
@@ -2703,7 +2704,7 @@ STDMETHODIMP CMpcVideoRenderer::GetString(LPCSTR field, LPWSTR* value, int* char
 	std::wstring str;
 
 	if (!strcmp(field, "name")) {
-		str = L"MPC-VR-MFG";
+		str = L"MPC-VR-Edition";
 	}
 	else if (!strcmp(field, "version")) {
 		str = _CRT_WIDE(VERSION_STR);

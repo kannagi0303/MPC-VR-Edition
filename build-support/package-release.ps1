@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Stop'
 
 $ProgressPreference = 'SilentlyContinue'
 
@@ -34,7 +34,7 @@ function Get-Sha256Hex {
 
 
 
-$root = Split-Path -Parent $PSScriptRoot
+$root = (Get-Item -LiteralPath (Split-Path -Parent $PSScriptRoot)).FullName
 
 $compiled = Join-Path $root '_bin\Filter_x64'
 
@@ -64,123 +64,63 @@ foreach ($required in @($ax,$shim,$install,$uninstall64,$gplLicense,$nvidiaLicen
 
 
 
-# Runtime::Open requires precisely this reviewed binary, not just a same-name DLL.
-
-$expected = 'FF6E90EB78B827927DFF5B4ECC6B1C870C2E9BCA29ED9F48C7D348CC9E170B82'
-
-$runtimeCandidates = @(
-
-    (Join-Path $root 'runtime\dlss\nvngx_dlssg.dll'),
-
-    (Join-Path $compiled 'dlss\nvngx_dlssg.dll')
-
-)
-
-$runtime = $null
-
-foreach ($candidate in $runtimeCandidates) {
-
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-
-        if ((Get-Sha256Hex -FilePath $candidate).ToUpperInvariant() -eq $expected) {
-
-            $runtime = $candidate
-
-            Write-Host ('[INFO] Using verified local NVIDIA MFG runtime: ' + $candidate)
-
-            break
-
-        }
-
-        Write-Host ('[WARN] Ignoring a different NVIDIA MFG DLL: ' + $candidate)
-
-    }
-
-}
-
-
-
-if ($null -eq $runtime) {
-
-    # Pin to NVIDIA's official 310.9.1 release, matching Source/Mfg/Runtime.cpp.
-
-    # Never obtain a different-version DLL or silently skip the checksum.
-
-    $url = 'https://raw.githubusercontent.com/NVIDIA/DLSS/v310.9.1/lib/Windows_x86_64/rel/nvngx_dlssg.dll'
+function Get-NvidiaRuntime {
+    param(
+        [string]$FileName,
+        [string]$Version,
+        [string]$Revision,
+        [string]$ExpectedHash
+    )
 
     $cacheFolder = Join-Path $root 'runtime\dlss'
-
-    $null = New-Item -ItemType Directory -Path $cacheFolder -Force
-
-    $cacheFile = Join-Path $cacheFolder 'nvngx_dlssg.dll'
-
-    Write-Host '[INFO] Downloading pinned NVIDIA DLSS-G 310.9.1 runtime from NVIDIA/DLSS...'
-
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
-
-        $temporary = $cacheFile + '.download-' + [Guid]::NewGuid().ToString('N')
-
-        try {
-
-            Invoke-WebRequest -Uri $url -OutFile $temporary -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
-
-            if ((Get-Sha256Hex -FilePath $temporary).ToUpperInvariant() -ne $expected) {
-
-                throw 'Downloaded runtime SHA-256 mismatch (required by MFG).'
-
+    $cacheFile = Join-Path $cacheFolder $FileName
+    foreach ($candidate in @($cacheFile, (Join-Path $compiled ('dlss\' + $FileName)))) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            if ((Get-Sha256Hex -FilePath $candidate) -eq $ExpectedHash) {
+                Write-Host ('[INFO] Using verified local NVIDIA runtime: ' + $candidate)
+                return $candidate
             }
-
-            if (Test-Path -LiteralPath $cacheFile) {
-
-                # A mismatched old cache must not accidentally be reused.
-
-                Remove-Item -LiteralPath $cacheFile -Force
-
-            }
-
-            Move-Item -LiteralPath $temporary -Destination $cacheFile
-
-            $runtime = $cacheFile
-
-            break
-
-        } catch {
-
-            if (Test-Path -LiteralPath $temporary) {
-
-                Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
-
-            }
-
-            if ($attempt -ge 3) {
-
-                throw ('Could not obtain the exact NVIDIA runtime from the official source. ' +
-
-                    'Build output remains in _bin. Put the matching licensed 310.9.1 DLL in runtime\dlss. ' +
-
-                    'Last error: ' + $_.Exception.Message)
-
-            }
-
-            Write-Host ('[WARN] Runtime download attempt ' + $attempt + ' failed; retrying...')
-
-            Start-Sleep -Seconds (2 * $attempt)
-
+            Write-Warning ('Ignoring a different NVIDIA runtime: ' + $candidate)
         }
-
     }
 
+    $url = "https://raw.githubusercontent.com/NVIDIA/DLSS/$Revision/lib/Windows_x86_64/rel/$FileName"
+    $null = New-Item -ItemType Directory -Path $cacheFolder -Force
+    Write-Host "[INFO] Downloading NVIDIA $FileName $Version..."
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $temporary = $cacheFile + '.download-' + [Guid]::NewGuid().ToString('N')
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $temporary -UseBasicParsing -TimeoutSec 120
+            if ((Get-Sha256Hex -FilePath $temporary) -ne $ExpectedHash) {
+                throw "SHA-256 mismatch for $FileName."
+            }
+            Move-Item -LiteralPath $temporary -Destination $cacheFile -Force
+            return $cacheFile
+        } catch {
+            if ($attempt -ge 3) {
+                throw "Could not obtain NVIDIA $FileName $Version. Build output remains in _bin. Put the matching DLL in runtime\dlss. Last error: $($_.Exception.Message)"
+            }
+            Write-Warning "Download attempt $attempt failed for $FileName; retrying..."
+            Start-Sleep -Seconds (2 * $attempt)
+        } finally {
+            if (Test-Path -LiteralPath $temporary) {
+                Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
 }
 
-
-
-if ((Get-Sha256Hex -FilePath $runtime).ToUpperInvariant() -ne $expected) {
-
-    throw 'Runtime verification failed before staging the release.'
-
+# MFG requires precisely the binary reviewed by Source/Mfg/Runtime.cpp.
+$runtimes = @(
+    @{ FileName = 'nvngx_dlssg.dll'; Version = '310.9.1'; Revision = 'v310.9.1'
+       ExpectedHash = 'FF6E90EB78B827927DFF5B4ECC6B1C870C2E9BCA29ED9F48C7D348CC9E170B82' },
+    @{ FileName = 'nvngx_dlss.dll'; Version = '310.9.16'; Revision = '9981c6350dc58c0ce21f024fd65e31e851c31689'
+       ExpectedHash = 'D00B5B0AB29C3CA101B70C3A5ECB3A01B7EF33766A3383A28A18623083E6123E' }
+)
+foreach ($runtime in $runtimes) {
+    $runtimeSource = Get-NvidiaRuntime @runtime
+    $runtime.Source = $runtimeSource
 }
-
-
 
 # A fresh staging directory avoids leaving a partly populated dist/ on failure.
 
@@ -190,6 +130,15 @@ $stage = Join-Path $root ('dist.stage-' + [Guid]::NewGuid().ToString('N'))
 
 $old = Join-Path $root ('dist.previous-' + [Guid]::NewGuid().ToString('N'))
 
+foreach ($path in @($dist, $stage, $old)) {
+    if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($path)) -ne $root) {
+        throw ('Distribution path is outside the repository: ' + $path)
+    }
+    if ((Test-Path -LiteralPath $path) -and
+        ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw ('Distribution path is a junction or symlink: ' + $path)
+    }
+}
 $previousMoved = $false
 
 $published = $false
@@ -204,7 +153,13 @@ try {
 
     Copy-Item -LiteralPath $shim -Destination (Join-Path $dlss 'mpcvrmfg_nvngx.dll') -ErrorAction Stop
 
-    Copy-Item -LiteralPath $runtime -Destination (Join-Path $dlss 'nvngx_dlssg.dll') -ErrorAction Stop
+    foreach ($runtime in $runtimes) {
+        $target = Join-Path $dlss $runtime.FileName
+        Copy-Item -LiteralPath $runtime.Source -Destination $target
+        if ((Get-Sha256Hex -FilePath $target) -ne $runtime.ExpectedHash) {
+            throw ('Staged NVIDIA runtime has the wrong SHA-256: ' + $runtime.FileName)
+        }
+    }
 
     Copy-Item -LiteralPath $install -Destination (Join-Path $stage 'Install_MPCVR_64.cmd') -ErrorAction Stop
 
@@ -213,12 +168,6 @@ try {
     Copy-Item -LiteralPath $gplLicense -Destination (Join-Path $stage 'LICENSE.md') -ErrorAction Stop
 
     Copy-Item -LiteralPath $nvidiaLicense -Destination (Join-Path $dlss 'LICENSE-NVIDIA.txt') -ErrorAction Stop
-
-    if ((Get-Sha256Hex -FilePath (Join-Path $dlss 'nvngx_dlssg.dll')).ToUpperInvariant() -ne $expected) {
-
-        throw 'Staged NVIDIA runtime has the wrong SHA-256.'
-
-    }
 
     if (Test-Path -LiteralPath $dist) {
 

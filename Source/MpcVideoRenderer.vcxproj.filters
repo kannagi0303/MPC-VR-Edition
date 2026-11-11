@@ -48,6 +48,9 @@
     <ClCompile Include="DLSS\DlssOpticalFlow.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DLSS\DlssSR.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DX11VideoProcessor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -157,6 +160,9 @@
     </ClInclude>
     <ClInclude Include="DLSS\DlssOpticalFlow.h">
       <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\DlssSR.h">
+      <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="DLSS\NvOF\nvOpticalFlowCommon.h">
       <Filter>Source Files</Filter>

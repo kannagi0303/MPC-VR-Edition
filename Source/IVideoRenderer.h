@@ -42,6 +42,7 @@ enum :int {
 	SUPERRES_1080p,
 	SUPERRES_1440p,
 	SUPERRES_Always,  // Legacy registry value; mapped to SUPERRES_1440p in settings
+	SUPERRES_DLSS_SR,
 	SUPERRES_COUNT
 };
 

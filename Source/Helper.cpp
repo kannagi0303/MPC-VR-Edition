@@ -54,8 +54,8 @@ LPCWSTR GetNameAndVersion()
 	// The displayed upstream release and this edition's version are independent
 	// of VERSION_STR/REV_NUM, which identify the locally built binary.
 	static const std::wstring version =
-		L"MPC Video Renderer " _CRT_WIDE(MPCVR_UPSTREAM_RELEASE_VERSION)
-		L" \u00B7 MFG Edition v" _CRT_WIDE(MPCVR_MFG_EDITION_VERSION)
+		L"MPC Video Renderer Edition v" _CRT_WIDE(MPCVR_EDITION_VERSION)
+		L" \u00B7 Based on " _CRT_WIDE(MPCVR_UPSTREAM_RELEASE_VERSION)
 #ifdef _WIN64
 		L" (x64)";
 #else

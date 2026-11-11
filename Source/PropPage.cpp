@@ -98,7 +98,9 @@ void CVRMainPPage::SetControls()
 	SendDlgItemMessageW(IDC_COMBO9, CB_SETCURSEL, m_SetsPP.iVPDeinterlacing, 0);
 	CheckDlgButton(IDC_CHECK3, m_SetsPP.bDeintDouble          ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK5, m_SetsPP.bVPScaling            ? BST_CHECKED : BST_UNCHECKED);
-	SendDlgItemMessageW(IDC_COMBO8, CB_SETCURSEL, std::min(m_SetsPP.iVPSuperRes, int(SUPERRES_1440p)), 0);
+	const int superResIndex = m_SetsPP.iVPSuperRes == SUPERRES_DLSS_SR
+		? SUPERRES_Always : std::min(m_SetsPP.iVPSuperRes, int(SUPERRES_1440p));
+	SendDlgItemMessageW(IDC_COMBO8, CB_SETCURSEL, superResIndex, 0);
 	CheckDlgButton(IDC_CHECK19, m_SetsPP.bVPRTXVideoHDR       ? BST_CHECKED : BST_UNCHECKED);
 
 	if (m_SetsPP.bHdrPassthrough) {
@@ -265,10 +267,11 @@ HRESULT CVRMainPPage::OnActivate()
 	SendDlgItemMessageW(IDC_COMBO9, CB_ADDSTRING, 0, (LPARAM)L"HACK future frames");
 
 	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"Disable");
-	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"for SD");
-	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"for \x2264 720p");
-	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"for \x2264 1080p");
-	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"for \x2264 1440p");
+	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"RTX VSR for SD");
+	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"RTX VSR \x2264 720p");
+	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"RTX VSR \x2264 1080p");
+	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"RTX VSR \x2264 1440p");
+	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"DLSS SR");
 
 	SendDlgItemMessageW(IDC_COMBO7, CB_ADDSTRING, 0, (LPARAM)L"Do not change");
 	SendDlgItemMessageW(IDC_COMBO7, CB_ADDSTRING, 0, (LPARAM)L"Allow turn on (fullscreen)");
@@ -341,13 +344,12 @@ HRESULT CVRMainPPage::OnActivate()
 		"Disable it if you want to use shaders for resizing.");
 	AddHint(IDC_COMBO8,
 		L"Available for Direct3D 11 with video processor resizing.\n"
-		L"Select the highest input resolution for which RTX VSR is requested.\n"
-		L"The NVIDIA driver may still decline or skip processing.\n"
-		L"Requires supported NVIDIA RTX hardware and drivers (x64).\n"
-		L"Requires D3D11 video processing.");
+		L"RTX VSR requests driver upscaling up to the selected source size.\n"
+		L"DLSS SR upscales progressive SDR video and uses dlss\\nvngx_dlss.dll.\n"
+		L"Requires supported NVIDIA RTX hardware and drivers (x64).");
 	AddHint(IDC_MFG_PROCESSING_MODE,
 		L"Quality keeps VSR before MFG. Performance performs source-size MFG and post-MFG VSR.\n"
-		L"Requires active RTX VSR; otherwise existing safe scaling fallback applies.\n"
+		L"DLSS SR always runs on source frames before MFG.\n"
 		L"Fully restart MPC-BE after changing processing mode.");
 	AddHint(IDC_MFG_FEATURE_BADGES,
 		L"Brief, icon-only VSR and MFG activation indicators.\n"
@@ -561,6 +563,7 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 			}
 			if (nID == IDC_COMBO8) {
 				lValue = SendDlgItemMessageW(IDC_COMBO8, CB_GETCURSEL, 0, 0);
+				if (lValue == SUPERRES_Always) lValue = SUPERRES_DLSS_SR;
 				if (lValue != m_SetsPP.iVPSuperRes) {
 					m_SetsPP.iVPSuperRes = lValue;
 					SetDirty();

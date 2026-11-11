@@ -1,14 +1,14 @@
-# MPC Video Renderer MFG Edition
+# MPC Video Renderer Edition
 
 This is a personal edition of [**MPC Video Renderer 0.11.1.2636**](https://github.com/Aleksoid1978/VideoRenderer/releases/tag/0.11.1), made for my own video playback needs.
 
-The main change is support for **NVIDIA DLSS Multi Frame Generation (MFG)**. It generates extra frames between the original video frames to make motion look smoother.
+**NVIDIA DLSS Multi Frame Generation (MFG)** adds frames for smoother playback. **DLSS Super Resolution (DLSS SR)** upscales video.
 
 This edition keeps the original renderer's features, including RTX Video Super Resolution (VSR). **MFG can also work together with VSR.**
 
 It can work with DirectShow players. Full support is available in [MPC-BE](https://github.com/Aleksoid1978/MPC-BE).
 
-**Only an x64 version is provided**, because the MFG and RTX VSR components used in this project require x64.
+**Windows x64 only.**
 
 ---
 
@@ -60,6 +60,12 @@ MFG uses GPU resources to generate extra frames. Higher resolutions and more gen
 I tested different ways to reduce GPU usage while keeping playback smooth.
 
 ### Image Quality
+
+The **Super resolution** menu lets you choose RTX Video Super Resolution or **DLSS SR**.
+
+The local build (`build-x64.cmd`) puts the [NVIDIA DLSS SR runtime](https://github.com/NVIDIA/DLSS/releases/tag/v310.9.16) in `dist/dlss/nvngx_dlss.dll`. Choose Direct3D 11 and enable video processor resizing.
+
+DLSS SR works on progressive 8-bit SDR video when the output is larger than the source. It runs before MFG when MFG is enabled. If DLSS SR is unavailable, playback uses regular scaling.
 
 MFG and RTX VSR can work together, but **the processing order affects image quality and GPU usage**.
 

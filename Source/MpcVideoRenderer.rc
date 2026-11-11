@@ -71,8 +71,8 @@ BEGIN
     CONTROL         "Double the frame rate when deinterlacing",IDC_CHECK3,
                     "Button",BS_AUTOCHECKBOX | WS_TABSTOP,10,86,152,10
     CONTROL         "Use for resizing",IDC_CHECK5,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,10,99,67,10
-    LTEXT           "RTX VSR:",IDC_STATIC7,10,112,90,8
-    COMBOBOX        IDC_COMBO8,102,111,62,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Super resolution:",IDC_STATIC7,10,112,64,8
+    COMBOBOX        IDC_COMBO8,76,111,88,83,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     CONTROL         "RTX Video HDR",IDC_CHECK19,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,10,123,66,10
     GROUPBOX        "Shader video processor",IDC_STATIC,5,139,162,107
     LTEXT           "Chroma upsampling:",IDC_STATIC,10,153,72,8

@@ -676,6 +676,8 @@ bool CDX11VideoProcessor::Initialized() const
 
 void CDX11VideoProcessor::ReleaseVP()
 {
+	m_dlssSR.Reset();
+	m_dlssSRSource.Release();
     // A media-format change also invalidates the dedicated post-MFG VP.
     if(m_mfgPostVsrReady || m_mfgPostVsrBroken) StopMfg();
 	DLog(L"CDX11VideoProcessor::ReleaseVP()");
@@ -3771,7 +3773,42 @@ void CDX11VideoProcessor::DrawSubtitles(ID3D11Texture2D* pRenderTarget)
 	}
 }
 
-HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, const bool second)
+Tex2D_t* CDX11VideoProcessor::TryDlssSR(const CRect& srcRect, const CRect& dstRect)
+{
+	if (m_iVPSuperRes != SUPERRES_DLSS_SR) {
+		return nullptr;
+	}
+	if (m_VendorId != PCIV_NVIDIA || !m_D3D11VP.IsReady() || !m_bVPScaling || m_srcParams.CDepth != 8 ||
+	    m_bInterlaced || m_SampleFormat != D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE ||
+	    SourceIsHDR() || m_bVPUseRTXVideoHDR || m_iRotation || m_bFlip || m_resizePending ||
+	    srcRect.IsRectEmpty() || dstRect.Width() <= srcRect.Width() || dstRect.Height() <= srcRect.Height() ||
+	    dstRect.Width() > 7680 || dstRect.Height() > 4320 ||
+	    dstRect.Width() > 4 * srcRect.Width() || dstRect.Height() > 4 * srcRect.Height()) {
+		m_dlssSRInputStatus = L"requires NVIDIA D3D11 VP and a progressive 8-bit SDR upscale";
+		return nullptr;
+	}
+
+	m_dlssSRInputStatus = nullptr;
+	const UINT width = srcRect.Width(), height = srcRect.Height();
+	auto* input = m_dlssSR.Prepare(m_pDevice, width, height, dstRect.Width(), dstRect.Height());
+	if (!input) {
+		return nullptr;
+	}
+	const CRect nativeRect(0, 0, width, height);
+	if (FAILED(m_dlssSRSource.CheckCreate(m_pDevice, m_D3D11OutputFmt, width, height, Tex2D_DefaultShaderRTarget)) ||
+	    FAILED(D3D11VPPass(m_dlssSRSource.pTexture, srcRect, nativeRect, false)) ||
+	    FAILED(TextureCopyRect(m_dlssSRSource, input->pTexture, nativeRect, nativeRect, m_pPS_Simple, nullptr, 0, false))) {
+		m_dlssSRInputStatus = L"source conversion failed";
+		return nullptr;
+	}
+	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+	ID3D11ShaderResourceView* empty = nullptr;
+	m_pDeviceContext->PSSetShaderResources(0, 1, &empty);
+	const float frameTimeMs = m_rtAvgTimePerFrame > 0 ? float(m_rtAvgTimePerFrame / 10000.0) : 41.7f;
+	return m_dlssSR.Evaluate(m_rtStart, frameTimeMs);
+}
+
+HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, const bool second, const bool allowDlssSR)
 {
 	HRESULT hr = S_OK;
 	m_bDitherUsed = false;
@@ -3782,7 +3819,20 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 
 	const UINT numSteps = GetPostScaleSteps();
 
-	if (m_D3D11VP.IsReady()) {
+	const bool srWasActive = m_dlssSR.Active();
+	auto* srOutput = allowDlssSR ? TryDlssSR(srcRect, dstRect) : nullptr;
+	if (allowDlssSR && !srOutput && srWasActive) {
+		m_dlssSR.ResetHistory();
+	}
+	if (allowDlssSR && srWasActive != bool(srOutput) && m_mfgMultiplier) {
+		StopMfg(false);
+		m_mfg.ResetHistory();
+	}
+	if (srOutput) {
+		pInputTexture = srOutput;
+		rSrc.SetRect(0, 0, srOutput->desc.Width, srOutput->desc.Height);
+	}
+	else if (m_D3D11VP.IsReady()) {
 		if (!(m_iSwapEffect == SWAPEFFECT_Discard && (m_VendorId == PCIV_AMDATI || m_VendorId == PCIV_INTEL))) {
 			const bool bNeedShaderTransform =
 				(m_TexConvertOutput.desc.Width != dstRect.Width() || m_TexConvertOutput.desc.Height != dstRect.Height() || m_bFlip
@@ -3834,7 +3884,7 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 			m_bVPScalingUseShaders = rSrc.Width() != dstRect.Width() || rSrc.Height() != dstRect.Height();
 		}
 
-		if (rSrc != dstRect || rotation != 0) {
+		if (srOutput || rSrc != dstRect || rotation != 0) {
 			hr = ResizeShaderPass(*pInputTexture, pRT, rSrc, dstRect, rotation);
 		} else {
 			pTex = pInputTexture; // Hmm
@@ -4130,7 +4180,7 @@ HRESULT CDX11VideoProcessor::GetCurentImage(long *pDIBImage)
 	auto pSub11CallBack = m_pFilter->m_pSub11CallBack;
 	m_pFilter->m_pSub11CallBack = nullptr;
 
-	hr = Process(pRGB32Texture2D, m_srcRect, imageRect, false);
+	hr = Process(pRGB32Texture2D, m_srcRect, imageRect, false, false);
 
 	m_pFilter->m_pSub11CallBack = pSub11CallBack;
 
@@ -4263,6 +4313,15 @@ HRESULT CDX11VideoProcessor::GetVPInfo(std::wstring& str)
 {
 	str = L"DirectX 11";
 	str += std::format(L"\nGraphics adapter: {}", m_strAdapterDescription);
+	if (m_iVPSuperRes == SUPERRES_DLSS_SR) {
+		if (m_dlssSRInputStatus) {
+			str += std::format(L"\nDLSS SR        : Inactive ({}); {}x{} to {}x{}, {}-bit, VP scaling {}",
+				m_dlssSRInputStatus, m_srcRect.Width(), m_srcRect.Height(),
+				m_videoRect.Width(), m_videoRect.Height(), m_srcParams.CDepth, m_bVPScaling);
+		} else {
+			str += std::format(L"\nDLSS SR        : {}", m_dlssSR.Status());
+		}
+	}
 	str.append(L"\nVideoProcessor  : ");
 	if (m_D3D11VP.IsReady()) {
 		D3D11_VIDEO_PROCESSOR_CAPS caps;
@@ -4562,6 +4621,12 @@ void CDX11VideoProcessor::Configure(const Settings_t& requested)
 	}
 
 	if (config.iVPSuperRes != m_iVPSuperRes) {
+		if (m_iVPSuperRes == SUPERRES_DLSS_SR || config.iVPSuperRes == SUPERRES_DLSS_SR) {
+			StopMfg(false);
+			m_mfg.ResetHistory();
+			m_dlssSR.Reset();
+			m_dlssSRSource.Release();
+		}
 		m_iVPSuperRes = config.iVPSuperRes;
 		if(m_VendorId==PCIV_NVIDIA)changeVP=true;
 		changeSuperRes = true;
@@ -4700,6 +4765,7 @@ void CDX11VideoProcessor::SetStereo3dTransform(int value)
 
 void CDX11VideoProcessor::Flush()
 {
+	m_dlssSR.ResetHistory();
 	StopMfg(false);m_mfg.ResetHistory();
 	if (m_D3D11VP.IsReady()) {
 		m_D3D11VP.ResetFrameOrder();
@@ -5226,7 +5292,8 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget)
 		// diagnostic counters still run internally for future troubleshooting.
 		// DXGI/DWM submissions are not a guarantee of scan-out FPS.
 		const unsigned effective = m_mfgEffectiveMultiplier.load(std::memory_order_relaxed);
-		const wchar_t* processing = m_mfgProcessingMode == 1 ? L"Performance" : L"Quality";
+		const wchar_t* processing = m_mfgProcessingMode == 1 && m_iVPSuperRes != SUPERRES_DLSS_SR
+			? L"Performance" : L"Quality";
 		str += effective >= 2
 			? std::format(L"\nMFG            : Auto x{} ({})", effective, processing)
 			: std::format(L"\nMFG            : Auto ({}, initializing)", processing);
@@ -5239,6 +5306,9 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget)
 	}
 
 	str.append(m_strStatsInputFmt);
+	if (m_iVPSuperRes == SUPERRES_DLSS_SR) {
+		str.append(m_dlssSR.Active() ? L"\nDLSS SR        : Active" : L"\nDLSS SR        : Inactive");
+	}
 	if (m_Dovi.bValid && m_Dovi.bHasMMR) {
 		str.append(L", MMR");
 	}
