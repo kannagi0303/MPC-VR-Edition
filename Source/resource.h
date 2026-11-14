@@ -32,6 +32,10 @@
 #define IDC_MFG_STATUS                 5009
 #define IDC_MFG_PROCESSING_MODE        5011
 #define IDC_MFG_FEATURE_BADGES        5012
+#define IDC_DLSS_SR_SOURCE_LIMIT      5013
+#define IDC_MFG_LOW_MOTION                5020
+#define IDC_USE_ZIPDEPTH                  5021
+#define IDC_SHOW_DEPTH_OVERLAY            5023
 #define IDD_SECTION_SOURCE              4002
 #define IDD_SECTION_CHROMA              4003
 #define IDD_SECTION_SCALING             4004
@@ -412,7 +416,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        4010
 #define _APS_NEXT_COMMAND_VALUE         40001
-#define _APS_NEXT_CONTROL_VALUE         1371
+#define _APS_NEXT_CONTROL_VALUE         1372
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

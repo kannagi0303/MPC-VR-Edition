@@ -34,6 +34,9 @@
 #include "SubPic/XySubPicQueueImpl.h"
 
 #define WM_SWITCH_FULLSCREEN (WM_APP + 0x1000)
+// The video-window thread owns the label. Streaming threads only post state
+// changes and never block on UI painting while holding renderer locks.
+static const UINT WM_VR_STARTUP_OVERLAY = WM_APP + 0x3A2;
 
 // MPCVR-Plus keeps its settings apart from the original renderer's (TakeSettingsOver).
 #define OPT_REGKEY_VIDEORENDERER           L"Software\\MPC-VR-MFG"
@@ -98,7 +101,7 @@
 #define OPT_DlssNRWorkingScale             L"DlssNRWorkingScale"
 #define OPT_DlssNRFlowDivider              L"DlssNRFlowDivider"
 #define OPT_DlssSR                         L"DlssSRUpscaling"
-#define OPT_DlssSRPreset                   L"DlssSRPreset"
+#define OPT_DlssSRSourceLimit              L"DlssSRSourceLimit"
 #define OPT_DlssSRDllPath                  L"DlssSRDllPath"
 #define OPT_DlssSRDlaa                     L"DlssSRDlaa"
 #define OPT_UpscalingSmall                 L"UpscalingSmall"
@@ -127,6 +130,9 @@ static void ReadSettings(CRegKey& key, Settings_t& sets)
 	if (ERROR_SUCCESS == key.QueryDWORDValue(L"MfgMultiplier", dw)) {
 		// Migrate legacy fixed x2-x6 to the sole supported Auto mode.
 		sets.iMfgMultiplier = dw >= 2 && dw <= 7 ? 7u : 0u;
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(L"MfgLowMotion", dw)) {
+		sets.bMfgLowMotion = dw != 0;
 	}
 	if (ERROR_SUCCESS == key.QueryDWORDValue(L"MfgProcessingMode", dw)) {
 		sets.iMfgProcessingMode = dw <= 1 ? dw : 0;
@@ -338,9 +344,14 @@ static void ReadSettings(CRegKey& key, Settings_t& sets)
 	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssSRDlaa, dw)) {
 		sets.bDlssSRDlaa = !!dw;
 	}
-	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssSRPreset, dw)) {
-		sets.iDlssSRPreset = ((int)dw >= DLSSSR_PRESET_J && (int)dw <= DLSSSR_PRESET_M) ? (int)dw : DLSSSR_PRESET_DEF;
-	}
+    if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssSRSourceLimit, dw)) {
+        sets.iDlssSRSourceLimit = dw <= DLSSSR_SOURCE_1440p ? static_cast<int>(dw) : DLSSSR_SOURCE_Disable;
+        sets.bDlssSR = sets.iDlssSRSourceLimit != DLSSSR_SOURCE_Disable;
+    } else {
+        // Upgrade older checkbox-based configurations without losing SR.
+        sets.iDlssSRSourceLimit = sets.bDlssSR ? DLSSSR_SOURCE_1440p : DLSSSR_SOURCE_Disable;
+    }
+	mfg::NormalizeDlssSR(sets);
 	{
 		ULONG nChars = std::size(sets.szDlssSRDllPath);
 		if (ERROR_SUCCESS != key.QueryStringValue(OPT_DlssSRDllPath, sets.szDlssSRDllPath, &nChars)) {
@@ -349,6 +360,17 @@ static void ReadSettings(CRegKey& key, Settings_t& sets)
 		sets.szDlssSRDllPath[std::size(sets.szDlssSRDllPath) - 1] = L'\0';
 	}
 #endif
+	if (key.QueryDWORDValue(L"UseZipDepth", dw) == ERROR_SUCCESS) {
+		sets.bUseZipDepth = dw != 0;
+	} else {
+		// Either previously enabled consumer opts into the shared switch.
+		const bool mfgDepth = key.QueryDWORDValue(L"MfgZipDepth", dw) == ERROR_SUCCESS && dw != 0;
+		const bool srDepth = key.QueryDWORDValue(L"DlssSRDepthMode", dw) == ERROR_SUCCESS && dw == 2;
+		sets.bUseZipDepth = mfgDepth || srDepth;
+	}
+	if (key.QueryDWORDValue(L"ShowDepthOverlay", dw) == ERROR_SUCCESS) {
+		sets.bShowDepthOverlay = dw != 0;
+	}
 	// Render ahead is set on the main page and covers the mpv prescalers as well,
 	// so it is not x64 only like the rest of DLSS.
 	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssRenderAhead, dw)) {
@@ -372,6 +394,9 @@ static void WriteSettings(CRegKey& key, const Settings_t& sets)
 {
 	key.SetDWORDValue(L"MfgMultiplier", sets.iMfgMultiplier);
 	key.SetDWORDValue(L"MfgProcessingMode", sets.iMfgProcessingMode);
+	key.SetDWORDValue(L"MfgLowMotion", sets.bMfgLowMotion);
+	key.SetDWORDValue(L"UseZipDepth", sets.bUseZipDepth);
+	key.SetDWORDValue(L"ShowDepthOverlay", sets.bShowDepthOverlay);
 	key.SetDWORDValue(L"ShowFeatureBadges", sets.bShowFeatureBadges);
 	key.SetDWORDValue(OPT_UseD3D11,            sets.bUseD3D11);
 	key.SetDWORDValue(OPT_ShowStatistics,      sets.bShowStats);
@@ -436,8 +461,8 @@ static void WriteSettings(CRegKey& key, const Settings_t& sets)
 	key.SetDWORDValue(OPT_DlssNRToggleKey,     sets.iDlssNRToggleKey);
 	key.SetStringValue(OPT_DlssNRDllPath,      sets.szDlssNRDllPath);
 	key.SetDWORDValue(OPT_DlssSR,              sets.bDlssSR);
+    key.SetDWORDValue(OPT_DlssSRSourceLimit,   sets.iDlssSRSourceLimit);
 	key.SetDWORDValue(OPT_DlssSRDlaa,          sets.bDlssSRDlaa);
-	key.SetDWORDValue(OPT_DlssSRPreset,        sets.iDlssSRPreset);
 	key.SetStringValue(OPT_DlssSRDllPath,      sets.szDlssSRDllPath);
 #endif
 	key.SetDWORDValue(OPT_DlssRenderAhead,     sets.bDlssRenderAhead);
@@ -1103,6 +1128,8 @@ HRESULT CMpcVideoRenderer::DoRenderSample(IMediaSample* pSample)
 
 	if (SUCCEEDED(hr)) {
 		m_bValidBuffer = true;
+		// Preroll prepares the source and GPU resources, but does not mean a
+		// picture was presented. The overlay stays until OnVideoPresented().
 	}
 
 	if (m_Stepping && !(--m_Stepping)) {
@@ -1110,6 +1137,18 @@ HRESULT CMpcVideoRenderer::DoRenderSample(IMediaSample* pSample)
 	}
 
 	return hr;
+}
+
+// Called only after a real video frame has successfully reached the swapchain,
+// either via the ordinary DX11 renderer or the asynchronous MFG presenter.
+// Do not take renderer or UI locks here: both paths can call this on GPU threads.
+void CMpcVideoRenderer::OnVideoPresented()
+{
+	if (m_filterState == State_Stopped) return;
+	if (m_bStartupOverlayPending.exchange(false, std::memory_order_acq_rel)) {
+		const HWND hwnd = m_hWndWindow;
+		if (hwnd) PostMessageW(hwnd, WM_VR_STARTUP_OVERLAY, FALSE, 0);
+	}
 }
 
 // A note on the thread itself, for whoever looks at a frozen player from outside.
@@ -1324,27 +1363,25 @@ HRESULT CMpcVideoRenderer::Receive(IMediaSample* pSample)
 		return hr;
 	}
 
-	// We realize the palette in "PrepareRender()" so we have to give away the
-	// filter lock here.
+	// PrepareReceive has stored the first sample, but the graph has not yet
+	// been told that this renderer is ready. Complete the paused poster draw
+	// (including lazy DLSS SR and MFG NGX initialization) BEFORE Ready().
+	// Otherwise MPC-BE can start its audio clock while these expensive GPU
+	// resources are still being created on the first running video sample.
 	if (m_State == State_Paused) {
-		// no need to use InterlockedExchange
 		m_bInReceive = FALSE;
 		{
-			// We must hold both these locks
-			CAutoLock cVideoLock(&m_InterfaceLock);
-			if (m_State == State_Stopped)
-				return NOERROR;
-
-			m_bInReceive = TRUE;
+			CAutoLock cRendererLock(&m_RendererLock);
+			DoRenderSample(m_pMediaSample);
 		}
-		Ready();
-	}
-
-	if (m_State == State_Paused) {
-		m_bInReceive = FALSE;
-
-		CAutoLock cRendererLock(&m_RendererLock);
-		DoRenderSample(m_pMediaSample);
+		{
+			// Keep the original CBaseRenderer handshake and lock ordering:
+			// never hold RendererLock while acquiring InterfaceLock.
+			CAutoLock cVideoLock(&m_InterfaceLock);
+			if (m_State == State_Stopped) return NOERROR;
+			m_bInReceive = TRUE;
+			Ready();
+		}
 	}
 
 	// Having set an advise link with the clock we sit and wait. We may be
@@ -1486,7 +1523,13 @@ STDMETHODIMP CMpcVideoRenderer::Run(REFERENCE_TIME rtStart)
 	}
 
 	CAutoLock cVideoLock(&m_InterfaceLock);
+	const bool starting = m_filterState == State_Stopped;
+	m_featureStatusPlaybackRun.fetch_add(1, std::memory_order_relaxed);
 	m_filterState = State_Running;
+	if (starting) {
+		CAutoLock cRendererLock(&m_RendererLock);
+		BeginStartupOverlay();
+	}
 	m_bClockStalled = false;
 	NoteWhoKeepsTime();
 
@@ -1497,9 +1540,22 @@ STDMETHODIMP CMpcVideoRenderer::Pause()
 {
 	DLog(L"CMpcVideoRenderer::Pause()");
 
+	const auto previous = m_filterState;
 	m_filterState = State_Paused;
+	if (previous == State_Stopped) {
+		CAutoLock cRendererLock(&m_RendererLock);
+		BeginStartupOverlay();
+	}
 
-	return CBaseVideoRenderer2::Pause();
+	const HRESULT hr = CBaseVideoRenderer2::Pause();
+	if (SUCCEEDED(hr) && previous == State_Running) {
+		CAutoLock cRendererLock(&m_RendererLock);
+		if (m_filterState == State_Paused && m_bValidBuffer &&
+			m_VideoProcessor->Type() == VP_DX11 && m_Sets.bShowFeatureBadges) {
+			Redraw();
+		}
+	}
+	return hr;
 }
 
 STDMETHODIMP CMpcVideoRenderer::Stop()
@@ -1508,6 +1564,9 @@ STDMETHODIMP CMpcVideoRenderer::Stop()
 
 	m_filterState = State_Stopped;
 	m_bValidBuffer = false;
+	m_bStartupOverlayPending.store(false, std::memory_order_release);
+	// Stopped is not initialization; don't keep (or resurrect) the label.
+	if (m_hWndWindow) PostMessageW(m_hWndWindow, WM_VR_STARTUP_OVERLAY, FALSE, 0);
 
 	{
 		CAutoLock cRendererLock(&m_RendererLock);
@@ -2108,6 +2167,9 @@ STDMETHODIMP_(void) CMpcVideoRenderer::SetSettings(const Settings_t& setings)
 		: discard<int>(m_Sets.iVPSuperRes, SUPERRES_Disable, SUPERRES_Disable, SUPERRES_DLSS_SR);
 	mfg::EnforceScope(m_Sets);
 	m_VideoProcessor->Configure(m_Sets);
+	if (!m_Sets.bShowFeatureBadges && m_bStartupOverlayPending.exchange(false, std::memory_order_acq_rel)) {
+		if (m_hWndWindow) PostMessageW(m_hWndWindow, WM_VR_STARTUP_OVERLAY, FALSE, 0);
+	}
 
 	// Picking a different key takes effect immediately; this is a no-op when
 	// the key and the thread are unchanged.
@@ -2146,7 +2208,13 @@ STDMETHODIMP CMpcVideoRenderer::SaveSettings()
 	if (read != ERROR_SUCCESS) return HRESULT_FROM_WIN32(read);
 	DWORD savedMode = 0;
 	if (key.QueryDWORDValue(L"MfgProcessingMode", savedMode) != ERROR_SUCCESS) return E_FAIL;
-	return saved == snapshot.iMfgMultiplier && savedMode == snapshot.iMfgProcessingMode ? S_OK : E_FAIL;
+	DWORD savedZipDepth = 0;
+	if (key.QueryDWORDValue(L"UseZipDepth", savedZipDepth) != ERROR_SUCCESS) return E_FAIL;
+	DWORD savedDepthOverlay = 0;
+	if (key.QueryDWORDValue(L"ShowDepthOverlay", savedDepthOverlay) != ERROR_SUCCESS) return E_FAIL;
+	return saved == snapshot.iMfgMultiplier && savedMode == snapshot.iMfgProcessingMode &&
+		savedZipDepth == static_cast<DWORD>(snapshot.bUseZipDepth) &&
+		savedDepthOverlay == static_cast<DWORD>(snapshot.bShowDepthOverlay) ? S_OK : E_FAIL;
 }
 
 // ISubRender (DX9)
@@ -2779,8 +2847,88 @@ void CMpcVideoRenderer::DoAfterChangingDevice()
 	}
 }
 
+const wchar_t* CMpcVideoRenderer::FeatureStatusText(bool dlssSR, bool vsr, bool mfg)
+{
+	if (dlssSR) return mfg ? L"DLSS SR | MFG" : L"DLSS SR";
+	if (vsr) return mfg ? L"VSR | MFG" : L"VSR";
+	return mfg ? L"MFG" : L"";
+}
+
+void CMpcVideoRenderer::BeginStartupOverlay()
+{
+	if (!m_Sets.bShowFeatureBadges || m_VideoProcessor->Type() != VP_DX11) return;
+	const bool dlssSR = m_Sets.bDlssSR;
+	const bool vsr = m_Sets.iVPSuperRes > SUPERRES_Disable &&
+		m_Sets.iVPSuperRes != SUPERRES_DLSS_SR;
+	const auto* text = FeatureStatusText(dlssSR, vsr, m_Sets.iMfgMultiplier >= 2);
+	if (!*text) return;
+	m_startupFeatureText.store(text, std::memory_order_relaxed);
+	m_bStartupOverlayPending.store(true, std::memory_order_release);
+	if (m_hWndWindow) PostMessageW(m_hWndWindow, WM_VR_STARTUP_OVERLAY, TRUE, 0);
+}
+
+void CMpcVideoRenderer::ResizeStartupOverlay(HWND hwnd)
+{
+	if (!m_hStartupOverlay || GetParent(m_hStartupOverlay) != hwnd) return;
+	RECT client{};
+	if (!GetClientRect(hwnd, &client)) return;
+	// Compatible with older Windows builds; no GetDpiForWindow import needed.
+	HDC dc = GetDC(hwnd);
+	const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
+	if (dc) ReleaseDC(hwnd, dc);
+	const int margin = MulDiv(14, dpi, 96);
+	const int available = std::max(0, int(client.right - client.left) - 2 * margin);
+	const int width = std::min(MulDiv(145, dpi, 96), available);
+	const int height = MulDiv(28, dpi, 96);
+	SetWindowPos(m_hStartupOverlay, HWND_TOP, margin, margin, width, height,
+	             SWP_NOACTIVATE);
+}
+
 LRESULT CMpcVideoRenderer::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+	if (uMsg == WM_CREATE) {
+		// The label is a native child window, not a video/MFG OSD. It can
+		// paint on the black area before the first GPU frame exists.
+		// A solid child surface (not WS_EX_TRANSPARENT) is needed above the
+		// swapchain's black frames. The stock font avoids a separate GDI object
+		// and teardown work each time MPC-BE opens/closes a video window.
+		m_hStartupOverlay = CreateWindowExW(0, L"STATIC", L"",
+			WS_CHILD | SS_CENTER | SS_CENTERIMAGE | SS_NOPREFIX, 0, 0, 0, 0,
+			hwnd, nullptr, g_hInst, nullptr);
+		if (m_hStartupOverlay) {
+			ResizeStartupOverlay(hwnd);
+			if (m_bStartupOverlayPending.load(std::memory_order_acquire)) {
+				SetWindowTextW(m_hStartupOverlay, m_startupFeatureText.load(std::memory_order_relaxed));
+				ShowWindow(m_hStartupOverlay, SW_SHOWNOACTIVATE);
+			}
+		}
+		return 0;
+	}
+	if (uMsg == WM_SIZE) {
+		ResizeStartupOverlay(hwnd);
+	}
+	if (uMsg == WM_VR_STARTUP_OVERLAY) {
+		if (m_hStartupOverlay && GetParent(m_hStartupOverlay) == hwnd) {
+			// Use the current state, not a potentially stale queued command.
+			const bool show = m_bStartupOverlayPending.load(std::memory_order_acquire);
+			if (show) SetWindowTextW(m_hStartupOverlay, m_startupFeatureText.load(std::memory_order_relaxed));
+			ShowWindow(m_hStartupOverlay, show ? SW_SHOWNOACTIVATE : SW_HIDE);
+			if (show) SetWindowPos(m_hStartupOverlay, HWND_TOP, 0, 0, 0, 0,
+				SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+		}
+		return 0;
+	}
+	if (uMsg == WM_CTLCOLORSTATIC && reinterpret_cast<HWND>(lParam) == m_hStartupOverlay) {
+		HDC dc = reinterpret_cast<HDC>(wParam);
+		SetTextColor(dc, RGB(235, 238, 242));
+		SetBkColor(dc, RGB(0, 0, 0));
+		return reinterpret_cast<LRESULT>(GetStockObject(BLACK_BRUSH));
+	}
+	if (uMsg == WM_DESTROY && hwnd == m_hWndWindow) {
+		// Windows destroys children automatically. No cross-thread wait or
+		// extra DestroyWindow call is needed during player shutdown.
+		m_hStartupOverlay = nullptr;
+	}
 	if (uMsg == WM_VR_REMAKE) {
 		return reinterpret_cast<LRESULT>(CreateVideoWindow(wParam != 0));
 	}

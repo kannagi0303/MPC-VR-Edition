@@ -17,17 +17,21 @@ class Runtime {
     std::unique_ptr<Impl> impl_;
     std::wstring status_;
 public:
+    enum class Evaluation { Accepted, LowerMultiplier, Failed };
+
     Runtime();
     ~Runtime();
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
-    bool Open(ID3D12Device* device, const std::wstring& directory);
+    bool Open(ID3D12Device* device);
     bool Create(ID3D12GraphicsCommandList* list, unsigned width, unsigned height, DXGI_FORMAT format);
-    bool Evaluate(ID3D12GraphicsCommandList* list, ID3D12Resource* color, ID3D12Resource* depth,
+    Evaluation Evaluate(ID3D12GraphicsCommandList* list, ID3D12Resource* color, ID3D12Resource* depth,
         ID3D12Resource* motion, const std::array<ID3D12Resource*, MaxGenerated>& outputs,
         const std::array<ID3D12Resource*, MaxGenerated>& disabled, unsigned multiplier, bool reset);
     void Close();
     unsigned Maximum() const;
+    unsigned SelectMultiplier(unsigned requested, bool allowRetry) const;
+    void CompleteMultiplierRetry(unsigned multiplier, bool valid);
     const std::wstring& Status() const { return status_; }
 };
 }

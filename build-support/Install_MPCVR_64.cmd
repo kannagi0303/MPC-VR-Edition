@@ -10,7 +10,7 @@ if errorlevel 1 goto failed
 
 echo.
 echo    Installation succeeded.
-echo    Please keep MPCVRMFG64.ax and its dlss folder in this location.
+echo    Please keep MPCVRMFG64.ax and its edition folder in this location.
 echo.
 goto done
 

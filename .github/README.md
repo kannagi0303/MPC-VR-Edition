@@ -1,88 +1,95 @@
 # MPC Video Renderer Edition
 
-This is a personal edition of [**MPC Video Renderer 0.11.1.2636**](https://github.com/Aleksoid1978/VideoRenderer/releases/tag/0.11.1), made for my own video playback needs.
+- Based on [MPC Video Renderer 0.11.1.2636](https://github.com/Aleksoid1978/VideoRenderer/releases/tag/0.11.1).
+- **Windows x64 only.**<br>
+  Works with players that support MPC Video Renderer.
 
-**NVIDIA DLSS Multi Frame Generation (MFG)** adds frames for smoother playback. **DLSS Super Resolution (DLSS SR)** upscales video.
+## Edition Features
 
-This edition keeps the original renderer's features, including RTX Video Super Resolution (VSR). **MFG can also work together with VSR.**
-
-It can work with DirectShow players. Full support is available in [MPC-BE](https://github.com/Aleksoid1978/MPC-BE).
-
-**Windows x64 only.**
-
----
+- **NVIDIA DLSS**
+  - **Multi Frame Generation (MFG)**<br>
+    Adds frames for smoother motion.
+  - **Super Resolution (SR)**<br>
+    Upscales video.
+  - **DLAA**<br>
+    Smooths edges without changing the video size.
+- **Repeat detection**<br>
+  Finds repeated frames so MFG can fill the gap.
+- **Processing order**<br>
+  Choose whether to upscale or add frames first.
+- **ZipDepth**<br>
+  Uses the GPU to estimate depth from video.
 
 ## Installation
 
-Download and extract the latest release.
+### Install
 
-- Run `Install_MPCVR_64.cmd` to register the renderer.
-- Run `Uninstall_MPCVR_64.cmd` to unregister it.
+1. Download and extract the [release](https://github.com/kannagi0303/MPC-VR-Edition/releases).
+2. Run `Install_MPCVR_64.cmd` as administrator.
+3. Keep the extracted files in place.
 
-Keep the extracted files in the same location after registration.
+### Uninstall
+
+Run `Uninstall_MPCVR_64.cmd` as administrator.
 
 > **Important**
 >
-> This edition uses the **same DirectShow CLSID as the original MPC Video Renderer**.
->
-> Registering this edition replaces the original renderer's x64 registration. Both versions cannot be registered separately at the same time.
->
-> To switch back to the original version, unregister this edition and register the original MPC Video Renderer again.
+> Edition and the original MPC Video Renderer<br>
+> use the same DirectShow CLSID.<br>
+> Only one can be registered at a time.
 
----
+## How It Works
 
-## About This Edition
+Choose **Direct3D 11** in the renderer settings.<br>
+Turn on the features you want under **Edition Extended**.
 
-### Why I Made This
+### Frame generation and timing
 
-I wanted to use DLSS frame generation for video playback while keeping the player and renderer I already use.
+MFG uses video timestamps and the display refresh rate<br>
+to decide how many frames to add.<br>
+It gives priority to original frames and can skip late generated frames.
 
-### Frame Generation
+The renderer can skip repeated frames when MFG can fill the gap.<br>
+The low-motion option reduces GPU work when there is little movement.
 
-To keep things simple, MFG **automatically adjusts the frame generation multiplier** based on the video frame rate and display refresh rate.
+### Upscaling and processing order
 
-The goal is to generate enough frames for smoother playback without unnecessary GPU work.
+DLSS SR upscales supported 8-bit SDR video.<br>
+If the renderer processes the video at its original resolution,<br>
+it uses DLAA to smooth edges.
 
-### Frame Timing
+On supported videos, DLSS SR or RTX Video Super Resolution<br>
+can run before or after MFG.<br>
+Upscaling first gives MFG a larger image to work with.<br>
+Running MFG first can let it work at the original video size.
 
-Generating more frames is not enough. **The original frames must stay in order**, and all frames must appear at the right time.
+### Depth estimation
 
-The renderer uses **presentation timestamps (PTS)** to track video timing. It can also estimate the frame rate when the source frame rate changes.
+When enabled, ZipDepth uses DirectML to estimate depth on the GPU.<br>
+DLSS SR, DLAA, and MFG can share the estimate.<br>
+They use flat depth while an estimate is unavailable.
 
-Good frame timing helps reduce stuttering, uneven motion, and unnecessary frame drops.
+## References
 
-### GPU Performance
+- [NVIDIA DLSS](https://github.com/NVIDIA/DLSS)
+- [ZipDepth model credits and license](../build-support/models/LICENSE-ZipDepth.txt)
+- [Playback guide](../build-support/README.dist.md)
+- [ZipDepth converter guide](../tools/zipdepth-convert.md)
+- [Windows x64 build script](../build-x64.cmd)
+- [Project license](LICENSE.md)
 
-I develop and test this edition on an **NVIDIA GeForce RTX 4060 Ti 16GB**.
+## About the Author
 
-MFG uses GPU resources to generate extra frames. Higher resolutions and more generated frames can increase GPU usage.
+### [かんなぎ (Kannagi)](https://github.com/kannagi0303)
 
-I tested different ways to reduce GPU usage while keeping playback smooth.
+I started this project to try DLSS<br>
+with the player and renderer I already use.<br>
+I paid close attention to camera pans.<br>
+I also watched how evenly frames appeared.<br>
+I wanted to reduce GPU work while keeping playback smooth.
 
-### Image Quality
+I mainly test with MPC-BE on Windows 11,<br>
+an RTX 4060 Ti 16 GB, and a 4K 60 Hz display.
 
-The **Super resolution** menu lets you choose RTX Video Super Resolution or **DLSS SR**.
-
-The local build (`build-x64.cmd`) puts the [NVIDIA DLSS SR runtime](https://github.com/NVIDIA/DLSS/releases/tag/v310.9.16) in `dist/dlss/nvngx_dlss.dll`. Choose Direct3D 11 and enable video processor resizing.
-
-DLSS SR works on progressive 8-bit SDR video when the output is larger than the source. It runs before MFG when MFG is enabled. If DLSS SR is unavailable, playback uses regular scaling.
-
-MFG and RTX VSR can work together, but **the processing order affects image quality and GPU usage**.
-
-**Quality — VSR before MFG**
-
-VSR improves the original frames before MFG generates extra frames. This gives MFG clearer images to work with and may reduce artifacts in generated frames.
-
-*However, this method usually uses more GPU resources.*
-
-**Performance — MFG before VSR**
-
-MFG generates extra frames first, then VSR improves the result. When the source resolution is low, MFG can work with smaller images and may use fewer GPU resources.
-
-*However, generated frames may have more artifacts. The performance benefit also depends on the source resolution.*
-
-Both methods have their advantages. The better choice depends on the video and GPU performance.
-
----
-
-[License](LICENSE.md)
+I also work on [yt-dlp-gui](https://github.com/kannagi0303/yt-dlp-gui),<br>
+[yt-dlp-gui-v2](https://github.com/kannagi0303/yt-dlp-gui-v2), and [RelayGate](https://github.com/kannagi0303/RelayGate).

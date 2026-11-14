@@ -1,4 +1,4 @@
-﻿/*
+/*
 * (C) 2019-2025 see Authors.txt
 *
 * This file is part of MPC-BE.
@@ -203,6 +203,8 @@ public:
 		return m_InputDecoderViews[num];
 	}
 
+	void ClearSamples() { m_Samples.clear(); }
+
 	void PushSample(IMediaSample* pSample) {
 		m_Samples.emplace_back(pSample);
 		if (m_Samples.size() > m_InputViews.size()) {
@@ -246,6 +248,7 @@ private:
 	VideoInputData m_VideoInputData;
 	UINT m_nInputFrameOrField = 0;
 	bool m_bPresentFrame      = false;
+	bool m_bDecoderInput      = false;
 	bool m_bUseFutureFrames   = false;
 	UINT m_nPastFrames        = 0;
 	UINT m_nFutureFrames      = 0;
@@ -288,7 +291,7 @@ public:
 	BOOL IsPqSupported() { return m_bConvSupportedG2084; }
 
 	ID3D11Texture2D* GetNextInputTexture(const D3D11_VIDEO_FRAME_FORMAT vframeFormat);
-	void SetInputVideoData(ID3D11Texture2D* pTexture, IMediaSample* pSample, UINT ArraySlice, const D3D11_VIDEO_FRAME_FORMAT vframeFormat);
+	HRESULT SetInputVideoData(ID3D11Texture2D* pTexture, IMediaSample* pSample, UINT ArraySlice, const D3D11_VIDEO_FRAME_FORMAT vframeFormat);
 	void ResetFrameOrder();
 
 	HRESULT SetRectangles(const RECT * pSrcRect, const RECT* pDstRect);

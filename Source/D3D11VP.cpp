@@ -1,4 +1,4 @@
-﻿/*
+/*
 * (C) 2019-2026 see Authors.txt
 *
 * This file is part of MPC-BE.
@@ -389,7 +389,10 @@ HRESULT CD3D11VP::InitVideoProcessor(
 void CD3D11VP::ReleaseVideoProcessor()
 {
 	m_VideoTextures.Clear();
+	m_VideoInputData.ClearInputDecoderViews();
+	m_VideoInputData.GetTexture().Release();
 	m_VideoInputData.Clear();
+	m_bDecoderInput = false;
 
 	m_pVideoProcessor.Release();
 
@@ -452,6 +455,10 @@ HRESULT CD3D11VP::InitInputTextures(ID3D11Device* pDevice, const bool bShaderWri
 
 ID3D11Texture2D* CD3D11VP::GetNextInputTexture(const D3D11_VIDEO_FRAME_FORMAT vframeFormat)
 {
+	if (m_bDecoderInput) {
+		ResetFrameOrder();
+		m_bDecoderInput = false;
+	}
 	if (m_VideoTextures.Size()) {
 		if (vframeFormat == D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE) {
 			m_nInputFrameOrField++;
@@ -474,36 +481,21 @@ ID3D11Texture2D* CD3D11VP::GetNextInputTexture(const D3D11_VIDEO_FRAME_FORMAT vf
 	return *m_VideoTextures.GetTexture();
 }
 
-void CD3D11VP::SetInputVideoData(ID3D11Texture2D* pTexture, IMediaSample* pSample, UINT ArraySlice, const D3D11_VIDEO_FRAME_FORMAT vframeFormat)
+HRESULT CD3D11VP::SetInputVideoData(ID3D11Texture2D* pTexture, IMediaSample* pSample, UINT ArraySlice, const D3D11_VIDEO_FRAME_FORMAT vframeFormat)
 {
-	if (m_VideoTextures.Size()) {
-		m_VideoTextures.Clear();
-	}
-
-	if (m_VideoInputData.Size()) {
-		if (vframeFormat == D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE) {
-			m_nInputFrameOrField++;
-		}
-		else {
-			m_nInputFrameOrField += 2;
-		}
-		if (!m_bPresentFrame) {
-			m_bPresentFrame = true;
-		}
-		else if (m_bUseFutureFrames && m_nFutureFrames < m_RateConvCaps.FutureFrames) {
-			m_nFutureFrames++;
-		}
-		else if (m_nPastFrames < m_RateConvCaps.PastFrames) {
-			m_nPastFrames++;
-		}
-
-		m_VideoInputData.Rotate();
-	}
+	if (!pTexture || !pSample) return E_POINTER;
+	if (!m_VideoInputData.Size()) return E_NOT_VALID_STATE;
 
 	auto& texture = m_VideoInputData.GetTexture();
-	if (texture.p != pTexture) {
-		texture = pTexture;
-		m_VideoInputData.ClearInputDecoderViews();
+	if (!m_bDecoderInput || texture.p != pTexture) {
+		// History from an upload ring or another decoder pool cannot supply
+		// reference views for this sample.
+		ResetFrameOrder();
+		m_bDecoderInput = true;
+		if (texture.p != pTexture) {
+			texture = pTexture;
+			m_VideoInputData.ClearInputDecoderViews();
+		}
 	}
 
 	auto& inputDecoderView = m_VideoInputData.GetInputDecoderView(ArraySlice);
@@ -511,13 +503,29 @@ void CD3D11VP::SetInputVideoData(ID3D11Texture2D* pTexture, IMediaSample* pSampl
 		D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputViewDesc = {};
 		inputViewDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
 		inputViewDesc.Texture2D.ArraySlice = ArraySlice;
-		auto hr = m_pVideoDevice->CreateVideoProcessorInputView(texture, m_pVideoProcessorEnum, &inputViewDesc, &inputDecoderView);
-		DLogIf(FAILED(hr), L"CD3D11VP::SetInputVideoData() : CreateVideoProcessorInputView() failed with error {}", HR2Str(hr));
+		const auto hr = m_pVideoDevice->CreateVideoProcessorInputView(texture, m_pVideoProcessorEnum, &inputViewDesc, &inputDecoderView);
+		if (FAILED(hr)) {
+			DLog(L"CD3D11VP::SetInputVideoData() : CreateVideoProcessorInputView() failed with error {}", HR2Str(hr));
+			return hr;
+		}
 	}
 
+	m_nInputFrameOrField += vframeFormat == D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE ? 1 : 2;
+	if (!m_bPresentFrame) {
+		m_bPresentFrame = true;
+	}
+	else if (m_bUseFutureFrames && m_nFutureFrames < m_RateConvCaps.FutureFrames) {
+		m_nFutureFrames++;
+	}
+	else if (m_nPastFrames < m_RateConvCaps.PastFrames) {
+		m_nPastFrames++;
+	}
+
+	m_VideoInputData.Rotate();
 	m_VideoInputData.PushSample(pSample);
 	m_VideoInputData.SetInputView(inputDecoderView.p);
 	m_nLastArraySlice = ArraySlice;
+	return S_OK;
 }
 
 CD3D11VP::HeldFrame CD3D11VP::HoldFrame()
@@ -527,11 +535,11 @@ CD3D11VP::HeldFrame CD3D11VP::HoldFrame()
 		return frame;
 	}
 
-	if (m_VideoTextures.Size()) {
+	if (!m_bDecoderInput && m_VideoTextures.Size()) {
 		// An uploaded frame: the newest copy is at the back of the ring.
 		frame.pTexture = *m_VideoTextures.GetTexture();
 	}
-	else if (m_VideoInputData.GetLastSample()) {
+	else if (m_bDecoderInput && m_VideoInputData.GetLastSample()) {
 		// Decoder output is used in place; holding the sample keeps its surface.
 		frame.pTexture   = m_VideoInputData.GetTexture();
 		frame.pSample    = m_VideoInputData.GetLastSample();
@@ -576,6 +584,7 @@ void CD3D11VP::ResetFrameOrder()
 	m_bPresentFrame      = false;
 	m_nPastFrames        = 0;
 	m_nFutureFrames      = 0;
+	m_VideoInputData.ClearSamples();
 }
 
 void CD3D11VP::GetVPParams(D3D11_VIDEO_PROCESSOR_CAPS& caps, UINT& rateConvIndex, D3D11_VIDEO_PROCESSOR_RATE_CONVERSION_CAPS& rateConvCaps)
@@ -1064,11 +1073,11 @@ HRESULT CD3D11VP::Process(ID3D11Texture2D* pRenderTarget, const D3D11_VIDEO_FRAM
 		}
 	};
 
-	if (m_VideoTextures.Size()) {
-		FillStreamData(m_VideoTextures);
-	}
-	else if (m_VideoInputData.Size()) {
+	if (!m_bPresentFrame) return E_NOT_VALID_STATE;
+	if (m_bDecoderInput) {
 		FillStreamData(m_VideoInputData);
+	} else {
+		FillStreamData(m_VideoTextures);
 	}
 
 	hr = m_pVideoContext->VideoProcessorBlt(m_pVideoProcessor, pOutputView, StreamData.InputFrameOrField, 1, &StreamData);

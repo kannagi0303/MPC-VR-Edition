@@ -45,6 +45,11 @@ inline std::wstring ModuleDir()
 	return DirOf(buf);
 }
 
+inline std::wstring EditionDir()
+{
+	return ModuleDir() + L"\\edition";
+}
+
 // The driver's NGX runtime, _nvngx.dll, loaded: the one the installed driver names in
 // the registry. Only when it names none, the newest the driver store holds -- a store
 // keeps the packages of drivers that were replaced, and the first it lists is the

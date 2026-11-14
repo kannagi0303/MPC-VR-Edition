@@ -1,4 +1,4 @@
-/*
+﻿/*
  * (C) 2018-2026 see Authors.txt
  *
  * This file is part of MPC-BE.
@@ -88,6 +88,9 @@ void CVRMainPPage::SetControls()
 
 	ComboBox_SelectByItemData(m_hWnd, IDC_COMBO1, m_SetsPP.iTexFormat);
 	CheckDlgButton(IDC_MFG_MULTIPLIER, m_SetsPP.iMfgMultiplier >= 2 ? BST_CHECKED : BST_UNCHECKED);
+	CheckDlgButton(IDC_MFG_LOW_MOTION, m_SetsPP.bMfgLowMotion ? BST_CHECKED : BST_UNCHECKED);
+	CheckDlgButton(IDC_USE_ZIPDEPTH, m_SetsPP.bUseZipDepth ? BST_CHECKED : BST_UNCHECKED);
+	CheckDlgButton(IDC_SHOW_DEPTH_OVERLAY, m_SetsPP.bShowDepthOverlay ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_MFG_FEATURE_BADGES, m_SetsPP.bShowFeatureBadges ? BST_CHECKED : BST_UNCHECKED);
 	ComboBox_SelectByItemData(m_hWnd, IDC_MFG_PROCESSING_MODE, m_SetsPP.iMfgProcessingMode);
 
@@ -98,9 +101,8 @@ void CVRMainPPage::SetControls()
 	SendDlgItemMessageW(IDC_COMBO9, CB_SETCURSEL, m_SetsPP.iVPDeinterlacing, 0);
 	CheckDlgButton(IDC_CHECK3, m_SetsPP.bDeintDouble          ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK5, m_SetsPP.bVPScaling            ? BST_CHECKED : BST_UNCHECKED);
-	const int superResIndex = m_SetsPP.iVPSuperRes == SUPERRES_DLSS_SR
-		? SUPERRES_Always : std::min(m_SetsPP.iVPSuperRes, int(SUPERRES_1440p));
-	SendDlgItemMessageW(IDC_COMBO8, CB_SETCURSEL, superResIndex, 0);
+	SendDlgItemMessageW(IDC_COMBO8, CB_SETCURSEL, m_SetsPP.iVPSuperRes, 0);
+    ComboBox_SelectByItemData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT, m_SetsPP.iDlssSRSourceLimit);
 	CheckDlgButton(IDC_CHECK19, m_SetsPP.bVPRTXVideoHDR       ? BST_CHECKED : BST_UNCHECKED);
 
 	if (m_SetsPP.bHdrPassthrough) {
@@ -168,7 +170,7 @@ void CVRMainPPage::EnableControls()
 		GetDlgItem(IDC_SLIDER1).EnableWindow(bEnable);
 #ifdef _WIN64
 		GetDlgItem(IDC_STATIC7).EnableWindow(bEnable && m_SetsPP.bVPScaling);
-		GetDlgItem(IDC_COMBO8).EnableWindow(bEnable && m_SetsPP.bVPScaling);
+		GetDlgItem(IDC_COMBO8).EnableWindow(bEnable && m_SetsPP.bVPScaling && !m_SetsPP.bDlssSR);
 #else
 		GetDlgItem(IDC_STATIC7).EnableWindow(FALSE);
 		GetDlgItem(IDC_COMBO8).EnableWindow(FALSE);
@@ -191,6 +193,13 @@ void CVRMainPPage::EnableControls()
 	const BOOL bMfgEnabled = m_SetsPP.bUseD3D11 && m_SetsPP.iMfgMultiplier >= 2 && IsWindows10OrGreater();
 	GetDlgItem(IDC_MFG_MULTIPLIER).EnableWindow(m_SetsPP.bUseD3D11 && IsWindows10OrGreater());
 	GetDlgItem(IDC_MFG_PROCESSING_MODE).EnableWindow(bMfgEnabled);
+	GetDlgItem(IDC_MFG_LOW_MOTION).EnableWindow(bMfgEnabled);
+	const BOOL canUseZipDepth = m_SetsPP.bUseD3D11 && IsWindows10OrGreater() &&
+		(bMfgEnabled || m_SetsPP.bDlssSR);
+	GetDlgItem(IDC_USE_ZIPDEPTH).EnableWindow(canUseZipDepth);
+	GetDlgItem(IDC_SHOW_DEPTH_OVERLAY).EnableWindow(canUseZipDepth && m_SetsPP.bUseZipDepth);
+	const BOOL canUseDlssSR = m_SetsPP.bUseD3D11 && IsWindows10OrGreater();
+	GetDlgItem(IDC_DLSS_SR_SOURCE_LIMIT).EnableWindow(canUseDlssSR);
 }
 
 HRESULT CVRMainPPage::OnConnect(IUnknown *pUnk)
@@ -271,7 +280,11 @@ HRESULT CVRMainPPage::OnActivate()
 	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"RTX VSR \x2264 720p");
 	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"RTX VSR \x2264 1080p");
 	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"RTX VSR \x2264 1440p");
-	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"DLSS SR");
+    ComboBox_AddStringData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT, L"Disable", DLSSSR_SOURCE_Disable);
+    ComboBox_AddStringData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT, L"DLSS for SD", DLSSSR_SOURCE_SD);
+    ComboBox_AddStringData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT, L"DLSS \x2264 720p", DLSSSR_SOURCE_720p);
+    ComboBox_AddStringData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT, L"DLSS \x2264 1080p", DLSSSR_SOURCE_1080p);
+    ComboBox_AddStringData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT, L"DLSS \x2264 1440p", DLSSSR_SOURCE_1440p);
 
 	SendDlgItemMessageW(IDC_COMBO7, CB_ADDSTRING, 0, (LPARAM)L"Do not change");
 	SendDlgItemMessageW(IDC_COMBO7, CB_ADDSTRING, 0, (LPARAM)L"Allow turn on (fullscreen)");
@@ -327,9 +340,9 @@ HRESULT CVRMainPPage::OnActivate()
 	ComboBox_AddStringData(m_hWnd, IDC_COMBO_SDRTM, L"Measured", SDRTM_Measured);
 
 	ComboBox_AddStringData(m_hWnd, IDC_MFG_PROCESSING_MODE,
-		L"Quality - RTX VSR then MFG", 0);
+		L"Upscale then MFG", 0);
 	ComboBox_AddStringData(m_hWnd, IDC_MFG_PROCESSING_MODE,
-		L"Performance - MFG then RTX VSR", 1);
+		L"MFG then upscale", 1);
 
 	// The public MFG setting is now a checkbox. The internal Auto cadence
 	// algorithm remains unchanged (Off=0, Auto=7).
@@ -345,16 +358,26 @@ HRESULT CVRMainPPage::OnActivate()
 	AddHint(IDC_COMBO8,
 		L"Available for Direct3D 11 with video processor resizing.\n"
 		L"RTX VSR requests driver upscaling up to the selected source size.\n"
-		L"DLSS SR upscales progressive SDR video and uses dlss\\nvngx_dlss.dll.\n"
-		L"Requires supported NVIDIA RTX hardware and drivers (x64).");
+		L"DLSS Super Resolution takes priority when enabled.");
+	AddHint(IDC_DLSS_SR_SOURCE_LIMIT,
+        L"Apply DLSS only at or below the selected source resolution (same limits as RTX VSR).\n"
+        L"Target is always the display-fit resolution. DLAA is used at 1:1; otherwise DLSS SR.\n"
+        L"Forward/backward Optical Flow validation is requested automatically.\n"
+        L"Requires NVIDIA RTX, 8-bit SDR and edition\\nvngx_dlss.dll. The processing order controls the MFG slot.");
 	AddHint(IDC_MFG_PROCESSING_MODE,
-		L"Quality keeps VSR before MFG. Performance performs source-size MFG and post-MFG VSR.\n"
-		L"DLSS SR always runs on source frames before MFG.\n"
-		L"Fully restart MPC-BE after changing processing mode.");
+		L"Choose whether to upscale before or after MFG. Both orders support RTX VSR and DLSS SR.\n"
+		L"After-MFG upscaling uses the native-size path when the video and output support it.\n"
+		L"The new order applies immediately. Pending original frames are presented before the route changes; a brief pause is possible.");
+	AddHint(IDC_USE_ZIPDEPTH,
+		L"Use ZipDepth for DLSS SR, DLAA and MFG whenever enabled and supported.\n"
+		L"Flat depth is used while an estimate is unavailable.");
+	AddHint(IDC_SHOW_DEPTH_OVERLAY,
+		L"Blend the ZipDepth grayscale map into the video at 95% opacity before DLSS SR or MFG.");
+	AddHint(IDC_MFG_LOW_MOTION,
+		L"Skips interpolation when sustained low image difference and recent optical flow both indicate low motion. Repeat replacement takes priority. Progressive SDR NV12/P010 only.");
 	AddHint(IDC_MFG_FEATURE_BADGES,
-		L"Brief, icon-only VSR and MFG activation indicators.\n"
-		L"VSR indicates the renderer accepted the driver VSR path; it is not proof of AI processing.\n"
-		L"MFG appears after generated frames have actually been submitted.");
+		L"Show DLSS SR, VSR and MFG status.\n"
+		L"Keep it visible while paused. Show it for 5 seconds after starting, resuming or resizing.");
 	AddHint(IDC_MFG_MULTIPLIER,
 		L"Enable automatic DLSS Multi Frame Generation (Auto).\n"
 		L"Requires Direct3D 11, compatible NVIDIA RTX hardware and drivers.");
@@ -502,6 +525,21 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 				return (LRESULT)1;
 			}
 
+			if (nID == IDC_USE_ZIPDEPTH) {
+				m_SetsPP.bUseZipDepth = IsDlgButtonChecked(IDC_USE_ZIPDEPTH) == BST_CHECKED;
+				EnableControls();
+				SetDirty();
+				return (LRESULT)1;
+			}
+			if (nID == IDC_SHOW_DEPTH_OVERLAY) {
+				SetDirty();
+				return (LRESULT)1;
+			}
+			if (nID == IDC_MFG_LOW_MOTION) {
+				m_SetsPP.bMfgLowMotion = IsDlgButtonChecked(IDC_MFG_LOW_MOTION) == BST_CHECKED;
+				SetDirty();
+				return (LRESULT)1;
+			}
 			if (nID == IDC_MFG_FEATURE_BADGES) {
 				m_SetsPP.bShowFeatureBadges = IsDlgButtonChecked(IDC_MFG_FEATURE_BADGES) == BST_CHECKED;
 				SetDirty();
@@ -526,6 +564,18 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 		}
 
 		if (action == CBN_SELCHANGE) {
+            if (nID == IDC_DLSS_SR_SOURCE_LIMIT) {
+                const LRESULT choice = ComboBox_GetCurItemData(m_hWnd, nID);
+                if (choice >= DLSSSR_SOURCE_Disable && choice <= DLSSSR_SOURCE_1440p &&
+                    m_SetsPP.iDlssSRSourceLimit != choice) {
+                    m_SetsPP.iDlssSRSourceLimit = static_cast<int>(choice);
+                    m_SetsPP.bDlssSR = choice != DLSSSR_SOURCE_Disable;
+                    m_SetsPP.bDlssSRDlaa = m_SetsPP.bDlssSR;
+                    EnableControls();
+                    SetDirty();
+                }
+                return (LRESULT)1;
+            }
 			if (nID == IDC_MFG_PROCESSING_MODE) {
 				lValue = ComboBox_GetCurItemData(m_hWnd, nID);
 				if ((lValue == 0 || lValue == 1) && m_SetsPP.iMfgProcessingMode != static_cast<unsigned>(lValue)) {
@@ -563,8 +613,7 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 			}
 			if (nID == IDC_COMBO8) {
 				lValue = SendDlgItemMessageW(IDC_COMBO8, CB_GETCURSEL, 0, 0);
-				if (lValue == SUPERRES_Always) lValue = SUPERRES_DLSS_SR;
-				if (lValue != m_SetsPP.iVPSuperRes) {
+				if (lValue != CB_ERR && lValue != m_SetsPP.iVPSuperRes) {
 					m_SetsPP.iVPSuperRes = lValue;
 					SetDirty();
 				}
@@ -731,10 +780,15 @@ HRESULT CVRMainPPage::OnApplyChanges()
 	// actual control on Apply, including when Windows did not send a selection
 	// notification.  Reject a missing selection instead of interpreting -1 as
 	// a multiplier or overwriting another saved preference.
-	Settings_t oldSettings;
-	m_pVideoRenderer->GetSettings(oldSettings);
-
+	m_SetsPP.bMfgLowMotion = IsDlgButtonChecked(IDC_MFG_LOW_MOTION) == BST_CHECKED;
+	m_SetsPP.bUseZipDepth = IsDlgButtonChecked(IDC_USE_ZIPDEPTH) == BST_CHECKED;
+	m_SetsPP.bShowDepthOverlay = IsDlgButtonChecked(IDC_SHOW_DEPTH_OVERLAY) == BST_CHECKED;
 	m_SetsPP.bShowFeatureBadges = IsDlgButtonChecked(IDC_MFG_FEATURE_BADGES) == BST_CHECKED;
+    const LRESULT srLimit = ComboBox_GetCurItemData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT);
+    if (srLimit < DLSSSR_SOURCE_Disable || srLimit > DLSSSR_SOURCE_1440p) return E_INVALIDARG;
+    m_SetsPP.iDlssSRSourceLimit = static_cast<int>(srLimit);
+    m_SetsPP.bDlssSR = srLimit != DLSSSR_SOURCE_Disable;
+    m_SetsPP.bDlssSRDlaa = m_SetsPP.bDlssSR;
 	const UINT mfgState = IsDlgButtonChecked(IDC_MFG_MULTIPLIER);
 	if (mfgState != BST_CHECKED && mfgState != BST_UNCHECKED) return E_INVALIDARG;
 	m_SetsPP.iMfgMultiplier = mfgState == BST_CHECKED ? 7u : 0u;
@@ -744,10 +798,8 @@ HRESULT CVRMainPPage::OnApplyChanges()
 	m_pVideoRenderer->SetSettings(m_SetsPP);
 	const HRESULT saved = m_pVideoRenderer->SaveSettings();
 	if (FAILED(saved)) return saved;
-	if (oldSettings.iMfgProcessingMode != m_SetsPP.iMfgProcessingMode) {
-		MessageBoxW(L"DLSS MFG processing mode will apply after restarting MPC-BE.",
-			L"DLSS Multi Frame Generation", MB_OK | MB_ICONINFORMATION);
-	}
+	// The renderer switches at the old timeline boundary in Configure().
+	// Do not prompt for a player restart when Apply has already committed it.
 
 	m_oldSDRDisplayNits = m_SetsPP.iSDRDisplayNits;
 

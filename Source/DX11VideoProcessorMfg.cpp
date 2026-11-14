@@ -4,11 +4,12 @@
 #include "DX11VideoProcessor.h"
 // No NR/SR/Plus enhancement shared header is needed.
 #include "VideoRenderer.h"
-#include "DLSS/NgxRuntime.h"
 #include "Mfg/DisplayCadence.h"
 #include "Times.h"
 #include "Mfg/CadenceTrace.h"
+#include <algorithm>
 #include <limits>
+#include <vector>
 #include <cwchar>
 extern bool g_bPresent;
 namespace {
@@ -60,14 +61,14 @@ bool AdaptiveAheadEnabled() {
 }
 }
 
-bool CDX11VideoProcessor::MfgPostVsrRequested() const {
-    if (m_mfgProcessingMode != 1 || m_srcRectHeight <= 0) return false;
-    // NGX can internally scale to MPCVR_MFG_MAX_HEIGHT. The dedicated
-    // post-VSR VP requires real and generated frames to share source size.
-    // Keep the Golden path if a user-selected MFG cap is smaller.
+bool CDX11VideoProcessor::MfgPostUpscaleRequested() const {
+    if (!UpscaleAt(UpscaleSlot::AfterMfg) || m_srcRectHeight <= 0) return false;
+    // If the user manually caps MPCVR_MFG_MAX_HEIGHT, the dedicated
+    // post upscaler requires real and generated frames to stay within
+    // that same source-size envelope. The default path is uncapped.
     wchar_t text[16]{};
     const DWORD n=GetEnvironmentVariableW(L"MPCVR_MFG_MAX_HEIGHT",text,_countof(text));
-    UINT cap=1440;
+    UINT cap=std::numeric_limits<UINT>::max();
     if(n>0 && n<_countof(text)) {
         wchar_t* end=nullptr;
         const unsigned long value=std::wcstoul(text,&end,10);
@@ -90,7 +91,7 @@ void CDX11VideoProcessor::ResetMfgPostVsr() {
 }
 
 bool CDX11VideoProcessor::EnsureMfgPostVsr() {
-    if (m_mfgProcessingMode != 1 || m_mfgPostVsrBroken || !m_D3D11VP.IsReady() ||
+    if (!UpscaleAt(UpscaleSlot::AfterMfg) || m_mfgPostVsrBroken || !m_D3D11VP.IsReady() ||
         !m_bVPUseSuperRes || m_VendorId != PCIV_NVIDIA ||
         m_srcDXGIFormat == DXGI_FORMAT_UNKNOWN || !m_srcWidth || !m_srcHeight ||
         !m_srcRectWidth || !m_srcRectHeight || m_srcParams.CDepth != 8) return false;
@@ -134,14 +135,151 @@ bool CDX11VideoProcessor::EnsureMfgPostVsr() {
     return true;
 }
 
-void CDX11VideoProcessor::StopMfg(bool release) {
-    // Presenter never blocks on RendererLock, so joining under it is safe.
-    m_mfgThread.Stop();
+void CDX11VideoProcessor::DiscardMfgPreparedFrame() {
     m_mfgPreparedFrame.reset();
     m_mfgPreparedOriginalPending.store(0,std::memory_order_relaxed);
     m_mfgPreparedTexture.Release();
     m_mfgPreparedDesc = {};
     m_mfgPreparationBroken = false;
+}
+
+void CDX11VideoProcessor::SwitchMfgUpscaleSlot(unsigned requestedMode) {
+    // Configure() is called with RendererLock held. The presentation worker
+    // uses TryLock and therefore cannot be joined while inside a draw here.
+    // Stop it without calling StopMfg(): that would discard queued originals.
+    m_mfgThread.Stop();
+
+    struct PendingSource {
+        mfg::QueuedFrame frame;
+        bool prepared = false;
+    };
+    std::vector<PendingSource> pending;
+    unsigned discardedGenerated = 0;
+    if (m_mfgPreparedFrame) {
+        if (m_mfgPreparedFrame->index == mfg::MaxGenerated)
+            pending.push_back({*m_mfgPreparedFrame, true});
+        else
+            ++discardedGenerated;
+    }
+    {
+        std::lock_guard guard(m_mfgQueueLock);
+        discardedGenerated += m_mfgLiveFlowGroups.PendingGenerated() + m_mfgQueue.PendingGenerated();
+        // Only one scheduler is active in any session. Query both so the
+        // optional Live Flow rollback mode also preserves source snapshots.
+        for (const auto& original : m_mfgLiveFlowGroups.PendingOriginalFrames())
+            pending.push_back({original, false});
+        for (const auto& original : m_mfgQueue.PendingOriginalFrames())
+            pending.push_back({original, false});
+    }
+    std::stable_sort(pending.begin(), pending.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.frame.timestamp < rhs.frame.timestamp;
+    });
+
+    // Complete the old route before changing its VSR/NGX state. The source
+    // snapshots do not reference recyclable DLSSG banks. Generated phases
+    // are intentionally skipped at this reconfiguration boundary.
+    unsigned presented = 0;
+    unsigned failed = 0;
+    for (const auto& source : pending) {
+        HRESULT hr = E_FAIL;
+        if (m_pDXGISwapChain1 && m_pFilter->m_filterState == State_Running &&
+            !m_videoRect.IsRectEmpty()) {
+            if (source.prepared) {
+                hr = FinishMfgPresent(m_mfgPreparedTexture, source.frame.timestamp);
+            } else if (source.frame.original && source.frame.original->texture && source.frame.original->view) {
+                const mfg::FrameSurface surface{source.frame.original->texture.Get(),
+                                                source.frame.original->view.Get()};
+                // Drain uses a plain display pass: do not evaluate NGX
+                // against a soon-to-be-reset temporal history. This is also
+                // safe when switching AWAY from a failing post-SR route.
+                CComPtr<ID3D11Texture2D> back;
+                hr = m_pDXGISwapChain1->GetBuffer(0, IID_PPV_ARGS(&back));
+                if (SUCCEEDED(hr))
+                    hr = RenderMfgVideo(surface, source.frame.nativeInput, back,
+                                        source.frame.timestamp, true);
+                if (SUCCEEDED(hr))
+                    hr = FinishMfgPresent(back, source.frame.timestamp);
+            }
+        }
+        if (SUCCEEDED(hr)) {
+            ++presented;
+            m_mfgRealPresents.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            ++failed;
+        }
+    }
+    if (!pending.empty() || discardedGenerated)
+        DLog(L"MFG live upscale switch: {} original frames presented ({} failed), {} generated phases skipped",
+            presented, failed, discardedGenerated);
+    if (discardedGenerated) {
+        m_mfgSkipped.fetch_add(discardedGenerated, std::memory_order_relaxed);
+        m_mfgLostGenerated.fetch_add(discardedGenerated, std::memory_order_relaxed);
+    }
+    if (failed)
+        m_mfgLostReal.fetch_add(failed, std::memory_order_relaxed);
+
+    // One active route and one NGX SR feature; no simultaneous pre/post AI.
+    // The presenter is already stopped and the old originals are retired.
+    StopMfg(true);
+    m_dlssSR.ResetHistory();
+    m_mfgProcessingMode = requestedMode;
+    ResetFeatureStatus();
+}
+
+void CDX11VideoProcessor::ResetMfgFrameAnalysis() {
+    m_mfgDecodedDifference.Reset();
+    m_mfgPendingRepeats.store(0, std::memory_order_relaxed);
+    m_mfgRepeatHold = false;
+    m_mfgLowMotionActive = false;
+    m_mfgLowMotionStreak = 0;
+    m_mfgQuietFlowCredit = 0;
+    m_mfgQuietFlowPts = -1;
+    m_mfgOriginalPrime.reset();
+}
+
+bool CDX11VideoProcessor::MfgDepthSourceEligible() const {
+    return !SourceIsHDR() && !m_bVPUseRTXVideoHDR && !m_Dovi.bValid &&
+        !m_iRotation && !m_bFlip && m_srcRectWidth > 0 && m_srcRectHeight > 0;
+}
+
+bool CDX11VideoProcessor::MfgFrameAnalysisEligible() const {
+    return m_mfgMultiplier == mfg::AutoMultiplier &&
+        m_pFilter->m_filterState == State_Running && !m_pFilter->m_bClockStalled &&
+        !m_bInterlaced && m_SampleFormat == D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE &&
+        !SourceIsHDR() && !m_Dovi.bValid && !m_pPSHalfOUtoInterlace &&
+        (m_srcDXGIFormat == DXGI_FORMAT_NV12 || m_srcDXGIFormat == DXGI_FORMAT_P010);
+}
+
+std::wstring CDX11VideoProcessor::MfgFrameAnalysisStatus() const {
+    const bool available = MfgFrameAnalysisEligible();
+    const wchar_t* state = !available ? L"unavailable" : m_mfgRepeatHold ? L"holding still picture" : L"detecting";
+    auto status = std::format(L"\nMFG repeats    : {} ({} repeats bypassed)", state, m_mfgRepeatsBypassed);
+    if (m_mfgMultiplier == mfg::AutoMultiplier) {
+        const auto slots = m_mfgRepeatTiming.Slots();
+        status += slots ? std::format(L"\nMFG timing     : {} refresh slots", slots)
+                        : L"\nMFG timing     : source timing";
+        if (const auto period = m_mfgRepeatTiming.Period(); slots && period > 0)
+            status += std::format(L" (repeat smoothing, {:.2f} ms mean)", double(period) / 10000.0);
+    }
+    if (m_mfgLowMotionEnabled) {
+        const wchar_t* state = !available ? L"unavailable" : m_mfgLowMotionActive ? L"saving" : L"watching";
+        status += std::format(L"\nMFG low motion : {} ({} saved, {} flow vetoes)",
+            state, m_mfgLowMotionSaved, m_mfgLowMotionVetoes);
+    }
+    return status;
+}
+
+void CDX11VideoProcessor::StopMfg(bool release) {
+    ResetMfgFrameAnalysis();
+    m_mfgRepeatTiming.Reset();
+    if (release) m_mfgDecodedDifference = {};
+    // Presenter never blocks on RendererLock, so joining under it is safe.
+    m_mfgThread.Stop();
+    if (m_dlssSRAfterMfg) {
+        m_dlssSR.ResetHistory();
+        m_dlssSRAfterMfg = false;
+    }
+    DiscardMfgPreparedFrame();
     m_mfgPrepareLeadUs.store(0,std::memory_order_relaxed);
     m_mfgPrepareLastDrawUs.store(0,std::memory_order_relaxed);
     m_mfgPrepareReadyMarginUs.store(0,std::memory_order_relaxed);
@@ -167,11 +305,14 @@ void CDX11VideoProcessor::StopMfg(bool release) {
         m_mfgDxgiAvailable=false;
     }
     m_mfgEffectiveMultiplier.store(0, std::memory_order_relaxed);
+    m_mfgTargetSlots = 0;
     m_mfgBudgetCandidate=0;
     m_mfgBudgetStreak=0;
     if(release) {
+        m_mfgOriginalsReplaced=0;
         m_mfg.Reset();m_mfgPresentFailed=false;m_mfgInputModeKnown=false;
         m_mfgLastPostVsrInput=false;
+        m_mfgLastVideoOnlyInput = false;
         m_mfgAutoEpoch=m_mfgAutoLastPts=-1;
         ResetMfgPostVsr();m_mfgPostVsrBroken=false;
     }
@@ -190,17 +331,113 @@ bool CDX11VideoProcessor::NextMfg(int64_t& deadline) {
     m_mfgPrepareLeadUs.store(int64_t(prepareMs*1000.0),std::memory_order_relaxed);
     const auto prepareTicks=int64_t(prepareMs*GetPreciseTicksPerSecond()/1000.0);
     std::lock_guard guard(m_mfgQueueLock);
-    return LiveFlowCoreEnabled() ? m_mfgLiveFlowGroups.Next(deadline,std::max(leadTicks,prepareTicks))
+    return LiveFlowCoreEnabled() ? m_mfgLiveFlowGroups.Next(deadline,std::max(leadTicks,prepareTicks),leadTicks)
                                  : m_mfgQueue.Next(deadline,leadTicks);
 }
-bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image,REFERENCE_TIME timestamp,bool nativeInput,bool postVsrInput) {
+bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timestamp, bool& overlayInputHandled,
+    bool nativeInput, bool postVsrInput, bool videoOnlyInput) {
     if(m_mfgThread.Failed())m_mfgPresentFailed=true;
     if(m_mfgPresentFailed) {StopMfg(false);return false;}
     if(m_mfg.Failed())return false;
     const unsigned requested=m_mfgMultiplier.load(std::memory_order_relaxed);
     const double refreshHz=m_dRefreshPeriodMs>0.0 ? 1000.0/m_dRefreshPeriodMs : 0.0;
-    const double sourceFps=m_pFilter->m_FrameStats.GetAverageFps();
+    const auto inputPeriod=m_pFilter->m_FrameStats.GetAverageFrameDuration();
+    const double sourceFps=inputPeriod>0 ? 1e7/double(inputPeriod) : 0.0;
     const bool autoMode=requested==mfg::AutoMultiplier;
+    const unsigned maxMultiplier = m_mfg.MaxAvailableMultiplier();
+    const bool routeChanged = m_mfgInputModeKnown && (m_mfgLastNativeInput != nativeInput ||
+        m_mfgLastPostVsrInput != postVsrInput || m_mfgLastVideoOnlyInput != videoOnlyInput);
+    const bool checkFrames = MfgFrameAnalysisEligible() && !routeChanged;
+    const auto priorOriginalPts = m_mfgAutoLastPts;
+    bool repeatBridge = false;
+    unsigned repeats = 0;
+    bool timingEligible = false;
+    bool resumeAfterSaving = false;
+    bool lowMotionCandidate = false;
+    if (checkFrames) {
+        const auto difference = m_mfgDecodedDifference.Take(m_pDeviceContext, timestamp, m_mfgLowMotionEnabled);
+        if (mfg::SourceCadenceTrace().Enabled()) {
+            mfg::SourceCadenceTrace().Record("repeat_compare", GetPreciseTick(), timestamp, -1,
+                0, unsigned(difference), 0, 0, 0, false, 0, m_mfgDecodedDifference.ReadbackResult());
+        }
+        const bool comparable = priorOriginalPts >= 0 && timestamp > priorOriginalPts;
+        const bool duplicate = comparable && difference == mfg::FrameDifference::Duplicate;
+        const bool changed = difference == mfg::FrameDifference::Different || difference == mfg::FrameDifference::LowMotion;
+        // Bound the window for bridging repeats. After a long hold, keep
+        // presenting the still original so subtitles and OSD can advance.
+        const auto duration = std::clamp<REFERENCE_TIME>(
+            inputPeriod, 0, 2'500'000);
+        // Allow jitter around the estimated duration, including alternating
+        // short and long VFR samples at the end of a confirmed repeat run.
+        const auto bridgeLimit = std::clamp<REFERENCE_TIME>(duration * 3 + duration / 2, 800'000, 2'500'000);
+        const auto span = timestamp - priorOriginalPts;
+        const auto nextFrameDuration = m_sampleDuration > 0
+            ? std::min<REFERENCE_TIME>(m_sampleDuration, 2'500'000) : duration;
+        const bool shortSpan = span + nextFrameDuration <= bridgeLimit;
+        const bool repeatFits = duplicate && !m_mfgRepeatHold && shortSpan &&
+            mfg::RepeatFitsDisplayBudget(priorOriginalPts, timestamp, nextFrameDuration,
+                m_mfgAutoEpoch, refreshHz, maxMultiplier);
+        if (repeatFits) {
+            m_mfgPendingRepeats.fetch_add(1, std::memory_order_relaxed);
+            ++m_mfgRepeatsBypassed;
+            if (mfg::SourceCadenceTrace().Enabled()) {
+                mfg::SourceCadenceTrace().Record("repeat_bypassed", GetPreciseTick(), timestamp, -1,
+                    0, mfg::MaxGenerated, 0, 0, 0, false, 0, 0);
+            }
+            return true;
+        }
+
+        repeats = m_mfgPendingRepeats.exchange(0, std::memory_order_relaxed);
+        const bool repeatPending = repeats != 0;
+        // A busy readback cannot classify this sample, but the preceding
+        // repeats were already confirmed. Keep this sample as an original and
+        // preserve NGX history across the bounded gap, as on a normal frame
+        // with a busy readback. A classified cut still resets history.
+        const bool readbackBusy = difference == mfg::FrameDifference::Unknown &&
+            m_mfgDecodedDifference.ReadbackResult() == DXGI_ERROR_WAS_STILL_DRAWING;
+        // A repeat retained for the budget can close a pending gap. Keep the
+        // same cadence rules for that shorter span.
+        repeatBridge = repeatPending && (changed || readbackBusy || duplicate) && span > 0 && span <= bridgeLimit;
+        resumeAfterSaving = m_mfgLowMotionActive && changed && comparable && !repeatPending && span <= 2'500'000;
+        lowMotionCandidate = m_mfgLowMotionEnabled && comparable && !repeatPending && !duplicate &&
+            (difference == mfg::FrameDifference::LowMotion || difference == mfg::FrameDifference::Duplicate);
+        constexpr unsigned EnterSavingAfter = 3;
+        constexpr unsigned QuietFlowCredits = 3;
+        constexpr int64_t MaxQuietFlowAge = 1'250'000; // 125 ms
+        m_mfgLowMotionStreak = lowMotionCandidate ? std::min(m_mfgLowMotionStreak + 1, EnterSavingAfter) : 0;
+        if (lowMotionCandidate) {
+            const auto flow = m_mfg.TakeFlowMotion(priorOriginalPts);
+            if (flow == mfg::FlowMotion::Quiet) {
+                m_mfgQuietFlowCredit = QuietFlowCredits;
+                m_mfgQuietFlowPts = priorOriginalPts;
+            } else if (flow == mfg::FlowMotion::Active) {
+                m_mfgQuietFlowCredit = 0;
+                ++m_mfgLowMotionVetoes;
+            }
+            if (flow != mfg::FlowMotion::Unknown && mfg::SourceCadenceTrace().Enabled()) {
+                mfg::SourceCadenceTrace().Record(flow == mfg::FlowMotion::Quiet ? "low_motion_flow_quiet" : "low_motion_flow_veto",
+                    GetPreciseTick(), timestamp, -1, 0, mfg::MaxGenerated, 0, 0, 0, false, 0, 0);
+            }
+        }
+        if (!lowMotionCandidate || timestamp - m_mfgQuietFlowPts > MaxQuietFlowAge)
+            m_mfgQuietFlowCredit = 0;
+        m_mfgLowMotionActive = m_mfgLowMotionStreak == EnterSavingAfter && m_mfgQuietFlowCredit > 0;
+        if (difference == mfg::FrameDifference::Cut && m_useZipDepth) {
+            m_zipDepth.MarkSceneCut(timestamp);
+        }
+        if (difference == mfg::FrameDifference::Cut || m_mfgRepeatHold || (repeatPending && !repeatBridge)) {
+            m_mfg.ResetHistory();
+        }
+        // A repeat kept for lack of generation capacity still occupies its
+        // original slot. Keep interpolation active for the adjoining spans.
+        m_mfgRepeatHold = duplicate && (m_mfgRepeatHold || !shortSpan);
+        timingEligible = difference != mfg::FrameDifference::Cut &&
+            !duplicate && (!repeatPending || repeatBridge) && !m_mfgLowMotionActive && !m_mfgRepeatHold;
+        m_mfgDecodedDifference.KeepCurrent(timestamp);
+    } else {
+        if (m_mfgPendingRepeats.load(std::memory_order_relaxed) || m_mfgRepeatHold) m_mfg.ResetHistory();
+        ResetMfgFrameAnalysis();
+    }
     if (autoMode) {
         // Do not treat a speed change or seek as one enormous interpolation interval.
         if(m_mfgAutoLastPts<0 || timestamp<=m_mfgAutoLastPts ||
@@ -209,9 +446,12 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image,REFERENCE_TIME timesta
             m_mfgAutoLastPts=-1;
         }
     }
+    const auto timing = m_mfgRepeatTiming.Observe(m_mfgAutoLastPts, timestamp,
+        inputPeriod, repeats, timingEligible, autoMode ? m_mfgAutoEpoch : -1, refreshHz, maxMultiplier);
+    const unsigned targetSlots = !autoMode ? 0 : timing.slots ? timing.slots
+        : mfg::AutoDisplaySlots(timing.Start(m_mfgAutoLastPts),timing.End(timestamp),m_mfgAutoEpoch,refreshHz);
     const unsigned proposed=autoMode
-        ? std::min(mfg::AutoCadenceMultiplier(m_mfgAutoLastPts,timestamp,m_mfgAutoEpoch,refreshHz),
-                   m_mfg.MaxAvailableMultiplier())
+        ? std::min(targetSlots ? targetSlots : 2u, maxMultiplier)
         : mfg::DisplayBudgetMultiplier(requested,sourceFps,refreshHz);
     if(autoMode) m_mfgAutoLastPts=timestamp;
     unsigned effective=m_mfgEffectiveMultiplier.load(std::memory_order_relaxed);
@@ -234,26 +474,88 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image,REFERENCE_TIME timesta
     // renderer fallback would clear pending originals or invert PTS order.
     // A same-sized texture can change meaning when a display mode toggles.
     // Do not interpolate across native-video and full-backbuffer layouts.
-    if (m_mfgInputModeKnown && (m_mfgLastNativeInput != nativeInput ||
-        m_mfgLastPostVsrInput != postVsrInput)) {
+    if (routeChanged) {
         StopMfg(false);
         m_mfg.ResetHistory();
+        m_mfgRepeatTiming.Observe(-1, timestamp, inputPeriod, 0, false, m_mfgAutoEpoch, refreshHz, maxMultiplier);
     }
     m_mfgInputModeKnown=true;
     m_mfgLastNativeInput=nativeInput;
     m_mfgLastPostVsrInput=postVsrInput;
+    m_mfgLastVideoOnlyInput = videoOnlyInput;
+    const bool savedEvaluation = m_mfgLowMotionActive && effective >= 2;
+    if (savedEvaluation) --m_mfgQuietFlowCredit;
+    if (m_mfgRepeatHold || m_mfgLowMotionActive) {
+        effective = 1;
+        m_mfgEffectiveMultiplier.store(effective, std::memory_order_relaxed);
+    }
+    m_mfgTargetSlots = targetSlots;
+    // The source snapshot excludes subtitles and OSD. Full-backbuffer
+    // input needs a picture rect so black bars are excluded from estimation.
+    std::optional<mfg::DepthInput> depth;
+    if (m_useZipDepth && MfgDepthSourceEligible()) {
+        RECT picture = m_videoRect;
+        if (nativeInput || videoOnlyInput) {
+            D3D11_TEXTURE2D_DESC desc{};
+            image->GetDesc(&desc);
+            picture = {0, 0, LONG(desc.Width), LONG(desc.Height)};
+        }
+        if (nativeInput || videoOnlyInput || m_renderRect == m_videoRect) {
+            const SIZE modelSize{LONG(m_srcRect.Width()), LONG(m_srcRect.Height())};
+            if (!overlayInputHandled) {
+                auto* cleanSource = nativeInput ? m_mfgNativeInput.pShaderResource.p :
+                    (videoOnlyInput ? m_processingTexture.pShaderResource.p : nullptr);
+                overlayInputHandled = BlendSourceDepthOverlay(image, cleanSource, CRect(picture), timestamp);
+            }
+            depth.emplace(mfg::DepthInput{m_zipDepth, picture, modelSize, !overlayInputHandled});
+        }
+    }
+
     mfg::Batch batch;
     const auto generateStart=int64_t(GetPreciseTick());
-    const bool generated=effective<2
-        ? m_mfg.CaptureOriginal(image,timestamp,batch)
-        : m_mfg.Generate(m_pDevice,m_pDeviceContext,image,effective,timestamp,NgxRuntime::ModuleDir()+L"\\dlss",batch);
+    bool generated;
+    if (effective < 2) {
+        generated = m_mfg.CaptureOriginal(image, timestamp, batch, depth ? &*depth : nullptr);
+    } else {
+        bool primed = true;
+        if ((repeatBridge || resumeAfterSaving) && m_mfgOriginalPrime) {
+            // The original-only path did not update NGX. Restore the last
+            // retained source only when interpolation is needed again.
+            mfg::Batch anchor;
+            primed = m_mfg.Generate(m_pDevice, m_pDeviceContext, m_mfgOriginalPrime->texture.Get(),
+                2, priorOriginalPts, anchor);
+        }
+        // Retry on a normal source interval, where a refusal cannot leave a
+        // gap from an already bypassed repeat.
+        const unsigned requestedMultiplier = autoMode && !repeatBridge
+            ? std::min(std::max(effective, targetSlots), mfg::MaxMultiplier) : effective;
+        generated = primed && m_mfg.Generate(m_pDevice, m_pDeviceContext, image,
+            requestedMultiplier, timestamp, batch, false, lowMotionCandidate, depth ? &*depth : nullptr);
+        if (generated) {
+            effective = std::min(requestedMultiplier, m_mfg.MaxAvailableMultiplier());
+            m_mfgEffectiveMultiplier.store(effective, std::memory_order_relaxed);
+        }
+    }
+    m_mfgOriginalPrime = checkFrames && effective < 2 && !m_mfgRepeatHold ? batch.original : nullptr;
     const auto generateEnd=int64_t(GetPreciseTick());
     if (generateEnd>generateStart) m_mfgGenerateTicks.fetch_add(uint64_t(generateEnd-generateStart),std::memory_order_relaxed);
     m_mfgGenerateCount.fetch_add(1,std::memory_order_relaxed);
     if(!generated) {
         StopMfg(false);DLog(L"MFG unavailable: {}",m_mfg.Status());return false;
     }
+    // The timing of an interpolated interval belongs to this pair only.
+    // NGX can report another start after its own history reset.
+    const mfg::PresentationTiming batchTiming{
+        batch.previous == priorOriginalPts ? timing.previous : -1, timing.current,
+        batch.previous == priorOriginalPts ? timing.slots : 0};
     CRefTime stream;if(FAILED(m_pFilter->StreamTime(stream))) {StopMfg();return false;}
+    if (savedEvaluation) {
+        ++m_mfgLowMotionSaved;
+        if (mfg::SourceCadenceTrace().Enabled()) {
+            mfg::SourceCadenceTrace().Record("low_motion_saved", GetPreciseTick(), timestamp, stream,
+                batch.serial, mfg::MaxGenerated, 1, 0, 0, false, 0, 0);
+        }
+    }
     wchar_t trace[2]{};
     if(GetEnvironmentVariableW(L"MPCVR_MFG_TRACE",trace,2))
         fprintf(stderr,"MFG_READY stamp=%lld stream=%lld lead_us=%lld generated=%u ahead=%d path=%s\n",timestamp,REFERENCE_TIME(stream),(timestamp-REFERENCE_TIME(stream))/10,batch.generated,GetRenderAhead(),nativeInput ? "source-first" : "legacy");
@@ -261,12 +563,11 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image,REFERENCE_TIME timesta
     // Manager-inspired work-ahead control, grounded in actual DirectShow PTS:
     // if a generated frame becomes ready too close to its deadline, ask the
     // upstream renderer for a little more read-ahead on *future* samples.
-    // Never move frame deadlines or prioritize a generated frame over a real one.
+    // Measure lead against the same presentation times that the queue uses.
     if (AdaptiveAheadEnabled() && batch.generated>0 && batch.previous>=0 &&
         batch.current>batch.previous && batch.current-batch.previous<=2500000) {
-        const double spanMs=double(batch.current-batch.previous)/10000.0;
-        const double leadMs=(double(batch.previous) +
-            double(batch.current-batch.previous)/double(batch.generated+1) +
+        const double spanMs=double(batchTiming.End(batch.current)-batchTiming.Start(batch.previous))/10000.0;
+        const double leadMs=(double(batchTiming.Phase(batch.previous,batch.current,1,batch.generated+1)) +
             double(m_rtVideoDelay) - double(REFERENCE_TIME(stream)))/10000.0;
         if (std::isfinite(leadMs)) {
             m_mfgReadyLeadUs.store(int64_t(std::clamp(leadMs,-1000.0,1000.0)*1000.0),std::memory_order_relaxed);
@@ -286,9 +587,9 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image,REFERENCE_TIME timesta
         const auto lost=LiveFlowCoreEnabled()
             ? m_mfgLiveFlowGroups.Add(batch,qpc,stream,GetPreciseTicksPerSecond(),m_rtVideoDelay,
                 m_dRefreshPeriodMs>0?1000./m_dRefreshPeriodMs:0.,nativeInput,m_mfg.BankCount(),autoMode,
-                DynamicSourceTimingEnabled())
+                DynamicSourceTimingEnabled(), repeatBridge, batchTiming)
             : m_mfgQueue.Add(batch,qpc,stream,GetPreciseTicksPerSecond(),m_rtVideoDelay,
-                m_dRefreshPeriodMs>0?1000./m_dRefreshPeriodMs:0.,nativeInput,m_mfg.BankCount(),autoMode);
+                m_dRefreshPeriodMs>0?1000./m_dRefreshPeriodMs:0.,nativeInput,m_mfg.BankCount(),autoMode,batchTiming);
         if(lost.Total()) {
             m_mfgSkipped.fetch_add(lost.Total(),std::memory_order_relaxed);
             m_mfgLostReal.fetch_add(lost.real,std::memory_order_relaxed);
@@ -296,6 +597,7 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image,REFERENCE_TIME timesta
             m_mfgDroppedOnAdd.fetch_add(lost.Total(),std::memory_order_relaxed);
         }
     }
+    m_mfgInputs.fetch_add(1, std::memory_order_relaxed);
     // Observation-only: source arrival at this point is AFTER NGX submit,
     // not raw decoder arrival. Never use these rows to alter video timing.
     if(mfg::SourceCadenceTrace().Enabled())
@@ -324,6 +626,7 @@ bool CDX11VideoProcessor::PresentMfg() {
     const int64_t leadTicks=int64_t(leadMs*qpcFrequency/1000.0);
     const bool prepare=LiveFlowCoreEnabled() && DisplayPreparationEnabled() && !m_mfgPreparationBroken;
     const int64_t prepareTicks=prepare ? int64_t(mfg::DisplayPreparation::LeadMs(hz)*qpcFrequency/1000.0) : 0;
+    const mfg::GeneratedReady generatedReady=[this](uint64_t serial,unsigned phase){return m_mfg.Ready(serial,phase);};
     const auto now=int64_t(GetPreciseTick());
     std::optional<mfg::QueuedFrame> frame;
     bool alreadyPrepared=false;
@@ -342,22 +645,19 @@ bool CDX11VideoProcessor::PresentMfg() {
             std::optional<mfg::QueuedFrame> candidate;
             {
                 std::lock_guard guard(m_mfgQueueLock);
-                candidate=m_mfgLiveFlowGroups.PeekReady(now,prepareTicks,
-                    [this](uint64_t serial,unsigned phase){return m_mfg.Ready(serial,phase);},
-                    leadTicks);
+                candidate=m_mfgLiveFlowGroups.PeekReady(now,prepareTicks,generatedReady,leadTicks);
             }
-            if(candidate) {
-                const auto surface=candidate->index==mfg::MaxGenerated
-                    ? mfg::FrameSurface{candidate->original ? candidate->original->texture.Get() : nullptr,
-                                        candidate->original ? candidate->original->view.Get() : nullptr}
-                    : m_mfg.Frame(candidate->serial,candidate->index);
+            // Prefer decides an original's fate in the submit
+            // window. Precomposing it would commit a frame one refresh early.
+            if(candidate && candidate->index!=mfg::MaxGenerated) {
+                const auto surface=m_mfg.Frame(candidate->serial,candidate->index);
                 HRESULT drawn=E_FAIL;
                 const int64_t drawStarted=int64_t(GetPreciseTick());
                 CComPtr<ID3D11Texture2D> back;
                 if(surface.texture && surface.view &&
                    SUCCEEDED(m_pDXGISwapChain1->GetBuffer(0,IID_PPV_ARGS(&back)))) {
                     drawn=EnsureMfgPreparedTexture(back);
-                    if(SUCCEEDED(drawn)) drawn=RenderMfgVideo(surface,candidate->nativeInput,m_mfgPreparedTexture);
+                    if(SUCCEEDED(drawn)) drawn=RenderMfgVideo(surface,candidate->nativeInput,m_mfgPreparedTexture,candidate->timestamp);
                 }
                 if(SUCCEEDED(drawn)) {
                     const int64_t drawFinished=int64_t(GetPreciseTick());
@@ -373,9 +673,7 @@ bool CDX11VideoProcessor::PresentMfg() {
                         // Drawing may take milliseconds; recomputing 'now'
                         // could skip the selected phase and pop an ORIGINAL
                         // before the staged image has been committed.
-                        accepted=m_mfgLiveFlowGroups.TakeDue(now,lost,prepareTicks,
-                            [this](uint64_t serial,unsigned phase){return m_mfg.Ready(serial,phase);},
-                            leadTicks);
+                        accepted=m_mfgLiveFlowGroups.TakeDue(now,lost,prepareTicks,generatedReady,leadTicks);
                         if(lost.Total()) {
                             m_mfgSkipped.fetch_add(lost.Total(),std::memory_order_relaxed);
                             m_mfgLostReal.fetch_add(lost.real,std::memory_order_relaxed);
@@ -403,6 +701,7 @@ bool CDX11VideoProcessor::PresentMfg() {
                     // Unexpected schedule change: do not present the wrong
                     // image. RendererLock normally prevents this race.
                     ++m_mfgPrepareFallbacks;
+                    if (m_dlssSRAfterMfg) m_dlssSR.ResetHistory();
                 } else {
                     // Leave the original/group queued and use the existing
                     // direct compose at its deadline. Avoid repeat attempts
@@ -433,10 +732,17 @@ bool CDX11VideoProcessor::PresentMfg() {
         {
             std::lock_guard guard(m_mfgQueueLock);
             mfg::QueueDrops lost;
+            const auto submitNow=int64_t(GetPreciseTick());
+            const auto refreshTicks=hz>0.0 && qpcFrequency>0.0 ? int64_t(qpcFrequency/hz) : 0;
             frame=LiveFlowCoreEnabled()
-                ? m_mfgLiveFlowGroups.TakeDue(int64_t(GetPreciseTick()),lost,leadTicks,
-                    [this](uint64_t serial,unsigned phase){return m_mfg.Ready(serial,phase);})
-                : m_mfgQueue.TakeDue(int64_t(GetPreciseTick()),lost,leadTicks);
+                ? m_mfgLiveFlowGroups.TakeReplacement(submitNow,leadTicks,refreshTicks,MfgOriginalProtection,lost,generatedReady)
+                : m_mfgQueue.TakeReplacement(submitNow,leadTicks,refreshTicks,MfgOriginalProtection,lost,generatedReady);
+            m_mfgOriginalsReplaced+=lost.real;
+            if(!frame) {
+                frame=LiveFlowCoreEnabled()
+                    ? m_mfgLiveFlowGroups.TakeDue(submitNow,lost,leadTicks,generatedReady)
+                    : m_mfgQueue.TakeDue(submitNow,lost,leadTicks,generatedReady);
+            }
             if(lost.Total()) {
                 m_mfgSkipped.fetch_add(lost.Total(),std::memory_order_relaxed);
                 m_mfgLostReal.fetch_add(lost.real,std::memory_order_relaxed);
@@ -524,19 +830,26 @@ HRESULT CDX11VideoProcessor::EnsureMfgPreparedTexture(ID3D11Texture2D* reference
     return S_OK;
 }
 
-HRESULT CDX11VideoProcessor::RenderMfgVideo(const mfg::FrameSurface& surface,bool nativeInput,ID3D11Texture2D* target) {
+HRESULT CDX11VideoProcessor::RenderMfgVideo(const mfg::FrameSurface& surface,bool nativeInput,ID3D11Texture2D* target,REFERENCE_TIME timestamp,bool bypassUpscale) {
     if(!surface.texture || !surface.view || !target) return E_POINTER;
     Tex2D_t texture;texture.pTexture=surface.texture;texture.pShaderResource=surface.view;
     surface.texture->GetDesc(&texture.desc);
     D3D11_TEXTURE2D_DESC presentDesc{};target->GetDesc(&presentDesc);
     const CRect sourceRect(0,0,texture.desc.Width,texture.desc.Height);
     const CRect displayRect(0,0,presentDesc.Width,presentDesc.Height);
-    if(nativeInput) {
+    if (nativeInput || m_mfgLastVideoOnlyInput) {
         CComPtr<ID3D11RenderTargetView> rtv;
         HRESULT hr=m_pDevice->CreateRenderTargetView(target,nullptr,&rtv);
         if(FAILED(hr)) return hr;
         const FLOAT black[4]={0,0,0,1};
         m_pDeviceContext->ClearRenderTargetView(rtv,black);
+        if (m_mfgLastVideoOnlyInput || bypassUpscale) {
+            // During a live mode change the old source snapshots are shown
+            // without evaluating either AI upscaler; only the chosen routing
+            // slot of the NEXT timeline may perform AI processing.
+            return ResizeShaderPass(texture, target, sourceRect, m_videoRect, 0);
+        }
+        const auto processingRect = ProcessingRect();
         if(m_mfgLastPostVsrInput && m_mfgPostVsrReady && !m_mfgPostVsrBroken) {
             ID3D11Texture2D* vpInput=surface.texture;
             if(texture.desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM) {
@@ -555,7 +868,15 @@ HRESULT CDX11VideoProcessor::RenderMfgVideo(const mfg::FrameSurface& surface,boo
             if(SUCCEEDED(hr)) {
                 // Avoid input/output render-target hazards after the RGBA draw.
                 m_pDeviceContext->OMSetRenderTargets(0,nullptr,nullptr);
-                hr=m_mfgPostVsrVP.ProcessExternal(vpInput,0,target,sourceRect,m_videoRect);
+                if (m_processingSize.cx > 0 && SUCCEEDED(m_processingTexture.CheckCreate(m_pDevice, presentDesc.Format,
+                    processingRect.Width(), processingRect.Height(), Tex2D_DefaultShaderRTarget))) {
+                    hr = m_mfgPostVsrVP.ProcessExternal(vpInput, 0, m_processingTexture.pTexture, sourceRect, processingRect);
+                    if (SUCCEEDED(hr)) {
+                        hr = ResizeShaderPass(m_processingTexture, target, processingRect, m_videoRect, 0);
+                    }
+                } else {
+                    hr = m_mfgPostVsrVP.ProcessExternal(vpInput, 0, target, sourceRect, m_videoRect);
+                }
             }
             if(SUCCEEDED(hr)) {
                 ++m_mfgPostVsrProcessed;
@@ -569,6 +890,17 @@ HRESULT CDX11VideoProcessor::RenderMfgVideo(const mfg::FrameSurface& surface,boo
             // Current prepared frame must still be displayed. Future source
             // frames return to the existing VSR-before-MFG Golden path.
             m_pDeviceContext->ClearRenderTargetView(rtv,black);
+        }
+        // The native-size MFG path is the post-upscale slot. A frame that
+        // used the full-size/legacy route can never enter this branch.
+        if (UpscaleAt(UpscaleSlot::AfterMfg) && CanDlssSRUpscale(sourceRect, processingRect)) {
+            if (auto* input = PrepareDlssSR(sourceRect, processingRect, true)) {
+                const float frameTimeMs = m_dRefreshPeriodMs > 0.0 ? float(m_dRefreshPeriodMs) : 16.7f;
+                if (auto* output = EvaluateDlssSR(texture, *input, sourceRect, timestamp, frameTimeMs)) {
+                    const CRect outputRect(0, 0, output->desc.Width, output->desc.Height);
+                    return ResizeShaderPass(*output, target, outputRect, m_videoRect, 0);
+                }
+            }
         }
         return ResizeShaderPass(texture,target,sourceRect,m_videoRect,0);
     }
@@ -590,7 +922,6 @@ HRESULT CDX11VideoProcessor::FinishMfgPresent(ID3D11Texture2D* preparedVideo,REF
     }
     const auto saved=m_rtStart;m_rtStart=timestamp;
     DrawSubtitles(back);m_rtStart=saved;
-    if(m_bShowStats)DrawStats(back);
     if(m_bAlphaBitmapEnable) {
         D3D11_TEXTURE2D_DESC desc{};back->GetDesc(&desc);
         D3D11_VIEWPORT viewport{m_AlphaBitmapNRectDest.left*desc.Width,m_AlphaBitmapNRectDest.top*desc.Height,
@@ -598,11 +929,13 @@ HRESULT CDX11VideoProcessor::FinishMfgPresent(ID3D11Texture2D* preparedVideo,REF
             (m_AlphaBitmapNRectDest.bottom-m_AlphaBitmapNRectDest.top)*desc.Height,0,1};
         AlphaBlt(m_TexAlphaBitmap.pShaderResource,back,m_pAlphaBitmapVertex,&viewport,m_pSamplerLinear);
     }
-    if(m_showFeatureBadges.load(std::memory_order_relaxed)) DrawFeatureBadges(back);
+    const LONG featureOffset = DrawFeatureStatus(back);
+    if (m_bShowStats) DrawStats(back, featureOffset);
     // Both MFG processing orders finish with the existing D3D11 Golden presenter.
     g_bPresent=true;
     hr=m_pDXGISwapChain1->Present(1u,0);
     g_bPresent=false;
+    if(SUCCEEDED(hr)) m_pFilter->OnVideoPresented();
     return hr;
 }
 
@@ -610,7 +943,7 @@ HRESULT CDX11VideoProcessor::CompositeMfg(const mfg::FrameSurface& surface,REFER
     CComPtr<ID3D11Texture2D> back;
     HRESULT hr=m_pDXGISwapChain1->GetBuffer(0,IID_PPV_ARGS(&back));
     if(FAILED(hr))return hr;
-    hr=RenderMfgVideo(surface,nativeInput,back);
+    hr=RenderMfgVideo(surface,nativeInput,back,timestamp);
     if(FAILED(hr))return hr;
     return FinishMfgPresent(back,timestamp);
 }
@@ -626,7 +959,20 @@ int CDX11VideoProcessor::GetRenderAhead() {
         // Keep the existing 1.5-frame experimental lookahead, but now three
         // banks can retain the earlier pictures while MFG gets ahead.
         // Disable extended lookahead with MPCVR_MFG_RENDER_AHEAD=0.
-        const REFERENCE_TIME ahead = extendedAhead ? duration * 3 / 2 + 100000 : duration + 100000;
+        REFERENCE_TIME ahead = extendedAhead ? duration * 3 / 2 + 100000 : duration + 100000;
+        if (extendedAhead) {
+            const auto pendingRepeats = m_mfgPendingRepeats.load(std::memory_order_relaxed);
+            if (pendingRepeats) {
+                // Read ahead across the confirmed repeats without moving any display deadline.
+                const auto phaseMargin = std::clamp<REFERENCE_TIME>(duration / 2, 0, 200000);
+                // The first interpolated frame is due before the other outputs
+                // from the same NGX submission. Give the batch one display slot
+                // of extra headroom only while crossing a confirmed repeat.
+                const auto displaySlot = REFERENCE_TIME(std::clamp(m_dRefreshPeriodMs, 0.0, 25.0) * 10000.0);
+                ahead = std::max(ahead, duration * (std::min(pendingRepeats, mfg::MaxGenerated) + 1)
+                    + 100000 + phaseMargin + displaySlot);
+            }
+        }
         const REFERENCE_TIME adaptive = extendedAhead && AdaptiveAheadEnabled()
             ? m_mfgExtraAheadTicks.load(std::memory_order_relaxed) : 0;
         return int(std::clamp<REFERENCE_TIME>(ahead+adaptive,100000,2500000));

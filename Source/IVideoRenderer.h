@@ -46,6 +46,16 @@ enum :int {
 	SUPERRES_COUNT
 };
 
+// DLSS SR / DLAA follows the same source-resolution gates as RTX VSR.
+// The output target is always the display-fit resolution.
+enum :int {
+    DLSSSR_SOURCE_Disable = 0,
+    DLSSSR_SOURCE_SD,
+    DLSSSR_SOURCE_720p,
+    DLSSSR_SOURCE_1080p,
+    DLSSSR_SOURCE_1440p,
+};
+
 enum :int {
 	CHROMA_Nearest = 0,
 	CHROMA_Bilinear,
@@ -165,12 +175,22 @@ constexpr inline auto DLSSNR_SCALE_MAX  = 100;
 constexpr inline auto DLSSNR_SCALE_STEP = 5;
 constexpr inline auto DLSSNR_SCALE_DEF  = 100;
 
-// DLSS Super Resolution render preset, stored as the NGX number: 0 lets DLSS
-// choose for the scale, 10 J and 11 K are the first transformer models, 12 L and
-// 13 M the second (DLSS 4.5).
-constexpr inline auto DLSSSR_PRESET_DEF = 0;
+// Names shown in the playback badge for the model requested from NGX.
 constexpr inline auto DLSSSR_PRESET_J   = 10;
+constexpr inline auto DLSSSR_PRESET_K   = 11;
+constexpr inline auto DLSSSR_PRESET_L   = 12;
 constexpr inline auto DLSSSR_PRESET_M   = 13;
+
+constexpr const wchar_t* DlssSRModelLabel(int preset)
+{
+	switch (preset) {
+	case DLSSSR_PRESET_J: return L"J (Alt. Quality)";
+	case DLSSSR_PRESET_K: return L"K (Quality)";
+	case DLSSSR_PRESET_L: return L"L (Ultra Perf.)";
+	case DLSSSR_PRESET_M: return L"M (Performance)";
+	default: return L"Auto";
+	}
+}
 
 struct VPEnableFormats_t {
 	bool bNV12;
@@ -294,7 +314,7 @@ struct Settings_t {
 	// page and independent of DLSS 5 NR: nvngx_dlss.dll through the display
 	// driver's NGX runtime.
 	bool bDlssSR;
-	int  iDlssSRPreset;   // DLSSSR_PRESET_*
+	int reservedDlssSRPreset = {}; // Legacy Settings_t slot.
 	wchar_t szDlssSRDllPath[MAX_PATH];
 	// Start the DLSS passes early by what they take, and hold each finished picture
 	// until its time, so DLSS does not make the video late (see CRenderAhead).
@@ -361,7 +381,22 @@ struct Settings_t {
 	// Kept at the end of Settings_t to preserve previous members and presets.
 	// Hybrid MFG processing order, independent of the final D3D11 Present.
 	unsigned iMfgProcessingMode = 0; // 0 Quality: VSR -> MFG; 1 Performance: MFG -> VSR
-	bool bShowFeatureBadges = true; // brief, icon-only VSR/MFG activation badges
+	bool bShowFeatureBadges = true; // show DLSS SR, VSR and MFG status on the video
+	BYTE reservedProcessingResolution = {}; // Legacy Settings_t slot.
+	bool reservedDlssSRValidateMotion = {}; // Legacy Settings_t slot.
+    int iDlssSRSourceLimit = DLSSSR_SOURCE_Disable; // Appended: preserve the existing settings layout.
+	// Reserved legacy A/B slot, kept for Settings_t layout/preset compatibility.
+	// No GUI or runtime toggle; normalization always forces true.
+	bool bDlssSRTemporalHistory = true;
+	int reservedDlssSRMotionQuality = {}; // Legacy Settings_t slot.
+	bool reservedDlssSRDepthCues = {}; // Legacy Settings_t slot.
+	int reservedDlssSRDepthMode = {}; // Legacy Settings_t slot.
+	bool reservedMfgPulldown = {}; // Legacy Settings_t slot.
+	bool bMfgLowMotion = false;
+	bool bUseZipDepth = false;
+	unsigned char reservedMfgOriginalProtection = {}; // Legacy Settings_t slot.
+	bool bShowDepthOverlay = false;
+	BYTE reservedDepthOverlayOpacity = {}; // Legacy Settings_t slot.
 
 	Settings_t() {
 		SetDefault();
@@ -371,6 +406,11 @@ struct Settings_t {
 		iMfgMultiplier = 0;
 		iMfgProcessingMode = 0;
 		bShowFeatureBadges = true;
+        iDlssSRSourceLimit = DLSSSR_SOURCE_Disable;
+		bDlssSRTemporalHistory = true;
+		bMfgLowMotion = false;
+		bUseZipDepth = false;
+		bShowDepthOverlay = false;
 		if (IsWindows8OrGreater()) {
 			bUseD3D11                   = true;
 		} else {
@@ -448,7 +488,6 @@ struct Settings_t {
 		bDlssSRDlaa                     = false;
 		bUpscalingSmall                 = false;
 		iUpscalingSmall                 = UPSCALE_Jinc2;
-		iDlssSRPreset                   = DLSSSR_PRESET_DEF;
 		szDlssSRDllPath[0]              = L'\0';
 		bDlssRenderAhead                = true;
 		iVideoDelay                     = 0;
@@ -483,8 +522,9 @@ inline void CopyDlssSettings(Settings_t& dst, const Settings_t& src)
 	dst.iDlssNRToggleKey      = src.iDlssNRToggleKey;
 	wcscpy_s(dst.szDlssNRDllPath, src.szDlssNRDllPath);
 	dst.bDlssSR               = src.bDlssSR;
+    dst.iDlssSRSourceLimit     = src.iDlssSRSourceLimit;
 	dst.bDlssSRDlaa           = src.bDlssSRDlaa;
-	dst.iDlssSRPreset         = src.iDlssSRPreset;
+	dst.bDlssSRTemporalHistory = src.bDlssSRTemporalHistory;
 	wcscpy_s(dst.szDlssSRDllPath, src.szDlssSRDllPath);
 	// bDlssRenderAhead is not here: it belongs to the main page, which sets it for
 	// the prescalers as much as for DLSS.

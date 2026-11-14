@@ -23,6 +23,7 @@
 #include <mfidl.h>
 #include <dxva2api.h>
 #include <thread>
+#include <atomic>
 #include "renbase2.h"
 #include "IVideoRenderer.h"
 #include "DX9VideoProcessor.h"
@@ -102,6 +103,10 @@ private:
 	FILTER_STATE m_filterState = State_Stopped;
 	bool m_bFlushing = false;
 	bool m_bValidBuffer = false;
+	// Startup is not specific to MFG: SR, DLAA, VSR and MFG may all be
+	// preparing before the first picture is ready for the DirectShow clock.
+	std::atomic<bool> m_bStartupOverlayPending{ false };
+	std::atomic<unsigned> m_featureStatusPlaybackRun{ 0 };
 	// How often a picture's turn was cancelled after it had been scheduled, leaving
 	// the streaming thread with nothing that could ever wake it. Nothing should ever
 	// raise this; the statistics carry it because that is the only place it can be
@@ -152,6 +157,14 @@ private:
 	void RemoveToggleKeyHook();
 	static LRESULT CALLBACK ToggleKeyProc(int code, WPARAM wParam, LPARAM lParam);
 	HWND m_hWndWindow     = nullptr;
+	// The video-window thread owns this simple child label. It stays visible
+	// until the first *video* Present, not merely the first decoded frame.
+	HWND m_hStartupOverlay = nullptr;
+	std::atomic<const wchar_t*> m_startupFeatureText{ L"" };
+	static const wchar_t* FeatureStatusText(bool dlssSR, bool vsr, bool mfg);
+	void BeginStartupOverlay();
+	void ResizeStartupOverlay(HWND hwnd);
+	void OnVideoPresented();
 	HWND m_hWndParent     = nullptr;
 	HWND m_hWndDrain      = nullptr;
 	HWND m_hWndParentMain = nullptr;

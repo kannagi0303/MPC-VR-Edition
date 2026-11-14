@@ -13,6 +13,7 @@ pushd "%~dp0" || (
 set "ACTION=Rebuild"
 if /I "%~1"=="quick" set "ACTION=Build"
 if /I "%~1"=="rebuild" set "ACTION=Rebuild"
+if not "%~2"=="" goto :usage
 if not "%~1"=="" if /I not "%~1"=="quick" if /I not "%~1"=="rebuild" goto :usage
 
 if not exist "MpcVideoRenderer.sln" (
@@ -66,10 +67,21 @@ if not exist "vendor\nvidia\include\nvsdk_ngx.h" (
     goto :fail
 )
 if not exist "vendor\nvidia\lib\nvsdk_ngx_s.lib" (
-    echo [ERROR] Required NVIDIA SDK import library is still missing after bootstrap.
+    echo [ERROR] Required NVIDIA SDK static library is still missing after bootstrap.
     goto :fail
 )
 
+rem Prepare the pinned DirectML runtime, build headers, and converter payload.
+if not exist "build-support\prepare-zipdepth.ps1" (
+    echo [ERROR] ZipDepth direct binary bootstrap script is missing.
+    goto :fail
+)
+echo [INFO] Preparing the ZipDepth runtime and converter dependencies...
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "build-support\prepare-zipdepth.ps1" -VisualStudioRoot "%MFG_VSROOT%"
+if errorlevel 1 (
+    echo [ERROR] Prebuilt ZipDepth dependency download/validation failed.
+    goto :fail
+)
 if not exist "_bin\logs" mkdir "_bin\logs"
 if not exist "_bin\logs" (
     echo [ERROR] Could not create _bin\logs.
@@ -117,6 +129,7 @@ echo.
 echo [OK] %ACTION% completed successfully.
 for %%F in ("%FILTER%") do echo Compiled: %%~fF  [%%~zF bytes]
 echo Distribution: "%CD%\dist"
+echo Optional model converter: "%CD%\tools\zipdepth-convert.exe"
 echo.
 echo This script only builds files. It does not register the AX or launch MPC-BE.
 popd

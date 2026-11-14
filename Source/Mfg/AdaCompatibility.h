@@ -11,7 +11,7 @@
 
 namespace lf_ada {
 struct Patch { BYTE *at; std::vector<BYTE> before, after; DWORD protection = 0; };
-struct Result { bool applied = false; unsigned containers = 0; };
+struct Result { bool applied = false; bool reused = false; unsigned containers = 0; };
 
 inline bool Range(size_t offset, size_t length, size_t size) { return offset <= size && length <= size - offset; }
 template<class T> inline T Read(const BYTE *p) { T v; memcpy(&v,p,sizeof(v)); return v; }
@@ -34,36 +34,35 @@ inline BYTE *Unique(BYTE *base, const std::vector<IMAGE_SECTION_HEADER> &section
     return found;
 }
 
-inline Result Apply(BYTE *base, size_t size, unsigned computeCapability) {
-    Result result;
-    if(computeCapability!=89 || !base || size<sizeof(IMAGE_DOS_HEADER))return result;
+inline unsigned Plan(BYTE *base, size_t size, std::vector<Patch>& patches) {
+    if(!base || size<sizeof(IMAGE_DOS_HEADER))return 0;
     auto dos=Read<IMAGE_DOS_HEADER>(base);
-    if(dos.e_magic!=IMAGE_DOS_SIGNATURE || dos.e_lfanew<0 || !Range(dos.e_lfanew,sizeof(IMAGE_NT_HEADERS64),size))return result;
+    if(dos.e_magic!=IMAGE_DOS_SIGNATURE || dos.e_lfanew<0 || !Range(dos.e_lfanew,sizeof(IMAGE_NT_HEADERS64),size))return 0;
     auto nt=Read<IMAGE_NT_HEADERS64>(base+dos.e_lfanew);
     if(nt.Signature!=IMAGE_NT_SIGNATURE || nt.OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
-       nt.OptionalHeader.SizeOfImage>size || nt.FileHeader.NumberOfSections>96)return result;
+       nt.OptionalHeader.SizeOfImage!=size || nt.FileHeader.NumberOfSections>96)return 0;
     size_t table=dos.e_lfanew+sizeof(DWORD)+sizeof(IMAGE_FILE_HEADER)+nt.FileHeader.SizeOfOptionalHeader;
-    if(!Range(table,nt.FileHeader.NumberOfSections*sizeof(IMAGE_SECTION_HEADER),size))return result;
+    if(!Range(table,nt.FileHeader.NumberOfSections*sizeof(IMAGE_SECTION_HEADER),size))return 0;
     std::vector<IMAGE_SECTION_HEADER> sections;
     for(unsigned i=0;i<nt.FileHeader.NumberOfSections;++i) {
         auto s=Read<IMAGE_SECTION_HEADER>(base+table+i*sizeof(IMAGE_SECTION_HEADER));
-        if(!Range(s.VirtualAddress,s.Misc.VirtualSize,size))return result;
+        if(!Range(s.VirtualAddress,s.Misc.VirtualSize,size))return 0;
         sections.push_back(s);
     }
     BYTE *advertise=Unique(base,sections,{0x81,0xfd,0xb0,1,0,0,0x0f,0x8c,-1,-1,-1,-1,0xbf,5,0,0,0});
     BYTE *validate=Unique(base,sections,{0x3d,0xb0,1,0,0,0x0f,0x93,0xc0});
-    std::vector<Patch> patches;
     if(advertise && validate) {
         const BYTE nop[]={0x0f,0x1f,0x44,0,0,0x90}, yes[]={0xb0,1,0x90};
         Add(patches,advertise+6,nop,sizeof(nop)); Add(patches,validate+5,yes,sizeof(yes));
     } else {
         advertise=Unique(base,sections,{0xbb,1,0,0,0,0x41,0xb8,3,0,0,0,0x81,0xff,0xb0,1,0,0,0x44,0x0f,0x4c,0xc3});
         validate=Unique(base,sections,{0x3d,0xb0,1,0,0,0x7c,-1,0x83,0xfb,3,0x76});
-        if(!advertise || !validate)return result;
+        if(!advertise || !validate)return 0;
         const BYTE five=5, nop4[]={0x0f,0x1f,0x40,0}, nop2[]={0x90,0x90};
         Add(patches,advertise+7,&five,1);Add(patches,advertise+17,nop4,4);
         Add(patches,validate+5,nop2,2);Add(patches,validate+9,&five,1);
     }
+    unsigned containers=0;
     const BYTE magic[]={0x50,0xed,0x55,0xba};
     for(const auto &s:sections) {
         if(s.Characteristics & IMAGE_SCN_MEM_EXECUTE)continue;
@@ -94,24 +93,40 @@ inline Result Apply(BYTE *base, size_t size, unsigned computeCapability) {
             const uint32_t arch=89,parked=122;
             Add(patches,target,to,sizeof(to)-1);Add(patches,blackwell+28,&arch,4);
             for(auto im:ada)Add(patches,im+28,&parked,4);
-            ++result.containers;
+            ++containers;
         }
     }
-    if(!result.containers)return result;
+    return containers;
+}
+
+inline Result Apply(BYTE *base, BYTE *original, size_t size) {
+    std::vector<Patch> patches;
+    const auto containers=Plan(original,size,patches);
+    if(!containers)return {};
+    for(auto& p:patches) p.at=base+(p.at-original);
+
+    // A prior session may have modified this still-loaded image. Compare all
+    // edits against the verified disk image's plan before trusting or writing it.
+    if(std::all_of(patches.begin(),patches.end(),[](const Patch& p){
+        return memcmp(p.at,p.after.data(),p.after.size())==0;
+    })) return {true,true,containers};
+    if(!std::all_of(patches.begin(),patches.end(),[](const Patch& p){
+        return memcmp(p.at,p.before.data(),p.before.size())==0;
+    })) return {};
+
     // Grant access to every page before modifying anything. Restore in reverse
     // order because several edits can share a page and its prior protection.
     size_t unlocked=0;
     for(;unlocked<patches.size();++unlocked) {
         auto &p=patches[unlocked];
-        if(memcmp(p.at,p.before.data(),p.before.size()) ||
-           !VirtualProtect(p.at,p.after.size(),PAGE_EXECUTE_READWRITE,&p.protection))break;
+        if(!VirtualProtect(p.at,p.after.size(),PAGE_EXECUTE_READWRITE,&p.protection))break;
     }
-    if(unlocked==patches.size()) {
+    const bool applied=unlocked==patches.size();
+    if(applied) {
         for(auto &p:patches)memcpy(p.at,p.after.data(),p.after.size());
         FlushInstructionCache(GetCurrentProcess(),base,size);
-        result.applied=true;
     }
     while(unlocked) {auto &p=patches[--unlocked];DWORD ignored;VirtualProtect(p.at,p.after.size(),p.protection,&ignored);}
-    return result;
+    return {applied,false,containers};
 }
 } // namespace lf_ada

@@ -24,6 +24,7 @@
 #include <dxva2api.h>
 #include <dxgi1_5.h>
 #include <strmif.h>
+#include <format>
 #include <map>
 #include "IVideoRenderer.h"
 #include "DX11Helper.h"
@@ -37,6 +38,7 @@
 #include <mutex>
 #include "Mfg/Session.h"
 #include "DLSS/DlssSR.h"
+#include "DLSS/ZipDepth.h"
 #include "Mfg/FrameQueue.h"
 #include "Mfg/LiveFlowGroups.h"
 #include "Mfg/LiveFlowGroupPacing.h"
@@ -44,6 +46,8 @@
 #include "Mfg/DisplaySubmitPacing.h"
 #include "Mfg/DisplayPreparation.h"
 #include "Mfg/AutoCadence.h"
+#include "Mfg/RepeatFrameTiming.h"
+#include "Mfg/DecodedFrameDifference.h"
 #include "Mfg/PresentationThread.h"
 
 
@@ -58,17 +62,44 @@ private:
 	bool m_bPGSSubtitles=false;
 	bool SourceIsHDR10() const {return m_decExFmt.VideoTransferFunction==MFVideoTransFunc_2084 && m_decExFmt.VideoTransferMatrix!=DXVA2_VideoTransferMatrix_Unknown;}
 	std::atomic<unsigned> m_mfgMultiplier{0};
-    // User settings; changing either drains the MFG presentation worker.
-    unsigned m_mfgProcessingMode = 0;  // Quality or Performance
+    // One logical AI upscaler, routed to exactly one side of MFG. This
+    // selector is read under RendererLock by both the source and presenter.
+    enum class UpscaleSlot : unsigned { BeforeMfg = 0, AfterMfg = 1 };
+    unsigned m_mfgProcessingMode = 0;
+    static constexpr auto MfgOriginalProtection = mfg::OriginalFrameProtection::Prefer;
+    unsigned m_mfgOriginalsReplaced = 0; // RendererLock
+    bool UpscaleAt(UpscaleSlot slot) const {
+        return m_mfgProcessingMode == static_cast<unsigned>(slot);
+    }
 	// Requested UI multiplier is independent of the display-budgeted effective multiplier.
 	std::atomic<unsigned> m_mfgEffectiveMultiplier{0};
+	unsigned m_mfgTargetSlots = 0;
 	unsigned m_mfgBudgetCandidate = 0;
 	unsigned m_mfgBudgetStreak = 0;
 	// Auto needs the *actual* interval PTS, including x1 fallback intervals.
 	// Kept independent of Session so reducing to x1 does not lose cadence phase.
 	int64_t m_mfgAutoEpoch = -1;
 	int64_t m_mfgAutoLastPts = -1;
+	mfg::RepeatFrameTiming m_mfgRepeatTiming;
 	mfg::Session m_mfg;
+	mfg::DecodedFrameDifference m_mfgDecodedDifference;
+	std::atomic<unsigned> m_mfgPendingRepeats{0};
+	bool m_useZipDepth = false;
+	bool m_showDepthOverlay = false;
+	bool MfgDepthSourceEligible() const;
+	bool m_mfgLowMotionEnabled = false;
+	bool m_mfgLowMotionActive = false;
+	unsigned m_mfgLowMotionStreak = 0;
+	unsigned m_mfgQuietFlowCredit = 0;
+	int64_t m_mfgQuietFlowPts = -1;
+	uint64_t m_mfgLowMotionVetoes = 0;
+	uint64_t m_mfgLowMotionSaved = 0;
+	bool m_mfgRepeatHold = false;
+	uint64_t m_mfgRepeatsBypassed = 0;
+	std::shared_ptr<mfg::OriginalSnapshot> m_mfgOriginalPrime;
+	void ResetMfgFrameAnalysis();
+	bool MfgFrameAnalysisEligible() const;
+	std::wstring MfgFrameAnalysisStatus() const;
 	mfg::FrameQueue m_mfgQueue; // v7 A/B rollback
 	mfg::LiveFlowGroups m_mfgLiveFlowGroups;
 	std::mutex m_mfgQueueLock;
@@ -103,9 +134,11 @@ private:
 	// regular statistics/COM paths. Keep reads race-free.
 	std::atomic<unsigned> m_mfgSkipped{0};
 	std::atomic<uint64_t> m_mfgGeneratedPresents{0},m_mfgRealPresents{0},m_mfgFallbackPresents{0};
+	std::atomic<uint64_t> m_mfgInputs{0};
 	std::mutex m_mfgRateLock;
 	int64_t m_mfgRateTick=0;
-	uint64_t m_mfgRateReal=0,m_mfgRateGenerated=0,m_mfgRateFallback=0;
+	uint64_t m_mfgRateInputs=0,m_mfgRateReal=0,m_mfgRateGenerated=0,m_mfgRateFallback=0;
+	double m_mfgInputFps=0.0;
 	unsigned m_mfgRateSkipped=0;
 	double m_mfgActualFps=0.0,m_mfgGeneratedFps=0.0,m_mfgSkippedPerSec=0.0,m_mfgFallbackFps=0.0;
 	// Present() success counts do not mean the display actually scanned out that image.
@@ -133,37 +166,48 @@ private:
 	bool m_mfgInputModeKnown=false;
 	bool m_mfgLastNativeInput=false;
     bool m_mfgLastPostVsrInput=false;
-	bool QueueMfg(ID3D11Texture2D* image,REFERENCE_TIME timestamp,bool nativeInput=false,bool postVsrInput=false);
+    bool m_mfgLastVideoOnlyInput = false;
+	bool QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timestamp, bool& overlayInputHandled,
+		bool nativeInput, bool postVsrInput, bool videoOnlyInput = false);
 	bool PresentMfg();
 	bool NextMfg(int64_t& deadline);
 	void StopMfg(bool release=true);
+    // Settings changes run under RendererLock. Retire the old timeline and
+    // present its independent ORIGINAL snapshots before moving the upscaler.
+    void SwitchMfgUpscaleSlot(unsigned requestedMode);
     // Keep the old back buffer while a windowed resize is in progress.
     // Apply the last requested size on the source-render thread once it settles.
     bool m_resizePending = false;
     CRect m_resizeTarget;
     ULONGLONG m_resizeLastChangeTick = 0;
     HRESULT ApplyPendingWindowResize();
+    void DiscardMfgPreparedFrame();
+    void UpdateProcessingResolution();
+    CRect ProcessingRect() const;
+    CSize m_processingSize{0, 0};
+    Tex2D_t m_processingTexture;
+    CTex2DRing m_processingPostScale;
 
 	HRESULT CompositeMfg(const mfg::FrameSurface& surface,REFERENCE_TIME timestamp,bool nativeInput);
-    HRESULT RenderMfgVideo(const mfg::FrameSurface& surface, bool nativeInput, ID3D11Texture2D* target);
+    HRESULT RenderMfgVideo(const mfg::FrameSurface& surface, bool nativeInput, ID3D11Texture2D* target,
+                           REFERENCE_TIME timestamp, bool bypassUpscale = false);
     HRESULT FinishMfgPresent(ID3D11Texture2D* preparedVideo, REFERENCE_TIME timestamp);
     HRESULT EnsureMfgPreparedTexture(ID3D11Texture2D* referenceBackBuffer);
-    bool MfgPostVsrRequested() const;
+    bool MfgPostUpscaleRequested() const;
     bool EnsureMfgPostVsr();
     void ResetMfgPostVsr();
 
-    // Three-second, icon-only status badges. This state is only for presentation;
-    // it does not change NGX, VSR or the existing statistics counters.
-    std::atomic<bool> m_showFeatureBadges{true};
-    std::mutex m_featureBadgeMutex;
-    uint64_t m_badgeLastGenerated = 0;
-    ULONGLONG m_badgeLastGeneratedTick = 0;
-    ULONGLONG m_badgeVsrUntil = 0, m_badgeMfgUntil = 0;
-    bool m_badgeVsrWasActive = false, m_badgeMfgWasActive = false;
-    // A transient MFG pause or auto-cadence dip must not re-arm the badges.
-    bool m_badgeVsrAnnounced = false, m_badgeMfgAnnounced = false;
-    void ResetFeatureBadgeAnnouncements();
-    HRESULT DrawFeatureBadges(ID3D11Texture2D* target);
+    std::atomic<bool> m_showFeatureStatus{true};
+    std::mutex m_featureStatusMutex;
+    uint64_t m_featureStatusLastGenerated = 0;
+    ULONGLONG m_featureStatusGeneratedTick = 0;
+    ULONGLONG m_featureStatusUntil = 0;
+    CSize m_featureStatusSize{0, 0};
+    unsigned m_featureStatusPlaybackRun = 0;
+    bool m_featureStatusMfgActive = false;
+    void ResetFeatureStatus();
+    LONG DrawFeatureStatus(ID3D11Texture2D* target);
+    LONG m_statsFeatureOffset = 0;
 
 
 	// Direct3D 11
@@ -176,6 +220,12 @@ private:
 	CComPtr<ID3D11VertexShader>   m_pVS_Simple;
 	CComPtr<ID3D11PixelShader>    m_pPS_Simple;
 	CComPtr<ID3D11PixelShader>    m_pPS_BitmapToFrame;
+	CComPtr<ID3D11PixelShader>    m_pPS_DepthOverlay;
+	CComPtr<ID3D11BlendState>     m_pDepthOverlayBlendState;
+	CComPtr<ID3D11Buffer>         m_pDepthOverlayVertex;
+	Tex2D_t m_depthOverlayCapture;
+	SIZE m_depthOverlayModelSize{};
+	bool m_depthOverlayShaderFailed = false;
 	CComPtr<ID3D11InputLayout>    m_pVSimpleInputLayout;
 	CComPtr<ID3D11Buffer>         m_pVertexBuffer;
 	CComPtr<ID3D11Buffer>         m_pResizeShaderConstantBuffer;
@@ -189,7 +239,7 @@ private:
 	Tex2D_t m_TexResize;        // for intermediate result of two-pass resize
 	CTex2DRing m_TexsPostScale;
 	Tex2D_t m_TexDither;
-    CD3D11Rectangle m_FeatureBadgeRect;
+    CD3D11Rectangle m_FeatureStatusBackground;
 
 	// for GetAlignmentSize()
 	struct Alignment_t {
@@ -340,8 +390,12 @@ private:
 	bool m_bFullScreen = false;
 
 	int m_iVPSuperRes = SUPERRES_Disable;
+    int m_dlssSRSourceLimit = DLSSSR_SOURCE_Disable;
+	bool m_dlssSRDlaa = false;
 	CDlssSR m_dlssSR;
+	CZipDepth m_zipDepth;
 	const wchar_t* m_dlssSRInputStatus = nullptr;
+	bool m_dlssSRAfterMfg = false;
 	Tex2D_t m_dlssSRSource;
 	bool m_bVPUseSuperRes = false; // but it is not exactly
 
@@ -428,12 +482,22 @@ public:
 		if (!multiplier) return L"Processor MFG: Off (NGX is not called)";
 		if (m_mfgPresentFailed.load()) return L"Processor MFG: " + (multiplier==mfg::AutoMultiplier ? L"Auto" : L"x"+std::to_wstring(multiplier)) +
 			L"; presenter failed, normal playback retained";
+		std::lock_guard guard(m_mfgRateLock);
+		std::wstring diagnostics = std::format(
+			L"\nMFG runtime    : cap x{}, needs x{}; fallback {:.1f}/s, skipped {:.1f}/s",
+			m_mfg.MaxAvailableMultiplier(), m_mfgTargetSlots, m_mfgFallbackFps, m_mfgSkippedPerSec);
+		if (m_useZipDepth) {
+			diagnostics += std::format(L"\nMFG depth      : {}", m_mfg.UsesZipDepth() ? L"ZipDepth active" :
+				!MfgDepthSourceEligible() ? L"flat (unsupported source)" : m_zipDepth.Status());
+		}
 		const std::wstring& ngx = m_mfg.Status();
 		return L"Processor MFG: " + (multiplier==mfg::AutoMultiplier ? L"Auto" : L"x"+std::to_wstring(multiplier)) + L"; " +
 			(ngx.empty() ? L"NGX not yet attempted (waiting for eligible running frame)" : ngx) +
 			L"; presents generated=" + std::to_wstring(m_mfgGeneratedPresents.load()) +
 			L" real=" + std::to_wstring(m_mfgRealPresents.load()) +
-			L" skipped=" + std::to_wstring(m_mfgSkipped.load());
+			L" skipped=" + std::to_wstring(m_mfgSkipped.load()) +
+			L"; original protection " + mfg::OriginalFrameProtectionName(MfgOriginalProtection) +
+			L", replaced=" + std::to_wstring(m_mfgOriginalsReplaced) + diagnostics + MfgFrameAnalysisStatus();
 	}
 
 	HRESULT Init(const HWND hwnd, const bool displayHdrChanged, bool* pChangeDevice = nullptr) override;
@@ -493,6 +557,7 @@ public:
 	BOOL GetAlignmentSize(const CMediaType& mt, SIZE& Size) override;
 
 	HRESULT ProcessSample(IMediaSample* pSample) override;
+	REFERENCE_TIME m_sampleDuration = 0;
 	HRESULT CopySample(IMediaSample* pSample);
 	// Render: 1 - render first fied or progressive frame, 2 - render second fied, 0 or other - forced repeat of render.
 	HRESULT Render(int field, const REFERENCE_TIME frameStartTime) override;
@@ -540,9 +605,17 @@ private:
 	HRESULT ResizeShaderPass(const Tex2D_t& Tex, ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, const int rotation);
 	HRESULT FinalPass(const Tex2D_t& Tex, ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect);
 
+	bool DepthOverlayEnabled() const;
+	bool BlendSourceDepthOverlay(ID3D11Texture2D* image, ID3D11ShaderResourceView* source,
+		const CRect& picture, REFERENCE_TIME timestamp);
+	void DrawDepthOverlay(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME timestamp);
 	void DrawSubtitles(ID3D11Texture2D* pRenderTarget);
-	HRESULT Process(ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, const bool second, bool allowDlssSR = true);
-	Tex2D_t* TryDlssSR(const CRect& srcRect, const CRect& dstRect);
+	HRESULT Process(ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, bool second, bool allowDlssSR = true, REFERENCE_TIME timestamp = INVALID_TIME, CTex2DRing* processingPostScale = nullptr, bool* overlayInputHandled = nullptr);
+    bool DlssSRSourceAllowed() const;
+	bool CanDlssSRUpscale(const CRect& srcRect, const CRect& dstRect);
+	Tex2D_t* PrepareDlssSR(const CRect& srcRect, const CRect& dstRect, bool afterMfg);
+	Tex2D_t* EvaluateDlssSR(const Tex2D_t& source, Tex2D_t& input, const CRect& sourceRect, REFERENCE_TIME timestamp, float frameTimeMs, bool* overlayInputHandled = nullptr);
+	Tex2D_t* TryDlssSR(const CRect& srcRect, const CRect& dstRect, bool second, REFERENCE_TIME timestamp, bool* overlayInputHandled);
 
 	HRESULT AlphaBlt(ID3D11ShaderResourceView* pShaderResource, ID3D11Texture2D* pRenderTarget,
 					 ID3D11Buffer* pVertexBuffer, D3D11_VIEWPORT* pViewPort,
@@ -560,7 +633,7 @@ private:
 	void UpdateStatsPresent();
 	void UpdateStatsStatic() override;
 	//void UpdateStatsPostProc();
-	HRESULT DrawStats(ID3D11Texture2D* pRenderTarget);
+	HRESULT DrawStats(ID3D11Texture2D* pRenderTarget, LONG featureOffset = 0);
 
 public:
 	// IMFVideoProcessor

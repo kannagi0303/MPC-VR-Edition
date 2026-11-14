@@ -52,8 +52,8 @@
     -->
     <TargetName>mpcvrmfg_nvngx</TargetName>
     <TargetExt>.dll</TargetExt>
-    <OutDir>$(SolutionDir)_bin\Filter_$(PlatformShortName)\dlss\</OutDir>
-    <OutDir Condition="'$(Configuration)'=='Debug'">$(SolutionDir)_bin\Filter_$(PlatformShortName)_Debug\dlss\</OutDir>
+    <OutDir>$(SolutionDir)_bin\Filter_$(PlatformShortName)\edition\</OutDir>
+    <OutDir Condition="'$(Configuration)'=='Debug'">$(SolutionDir)_bin\Filter_$(PlatformShortName)_Debug\edition\</OutDir>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>

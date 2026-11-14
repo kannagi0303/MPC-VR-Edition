@@ -7,6 +7,9 @@
 #include <string>
 #include <cstdint>
 #include <atomic>
+#include "FlowMotionCheck.h"
+class CZipDepth;
+
 namespace mfg {
 // One source frame owns an independent reference to its full-resolution D3D11
 // snapshot. The MFG bank may be recycled, but this source must not be overwritten
@@ -17,6 +20,12 @@ struct OriginalSnapshot {
     // Only Native D3D12 sessions allocate shareable snapshots. The opened
     // native-device alias is owned by this snapshot for its entire queue lifetime.
     Microsoft::WRL::ComPtr<ID3D12Resource> nativeView;
+};
+struct DepthInput {
+    CZipDepth& source;
+    RECT picture;
+    SIZE modelSize;
+    bool captureSource = true;
 };
 struct Batch {
     uint64_t serial=0;
@@ -38,11 +47,17 @@ class Session {
     std::atomic<bool> failed_{false};
 public:
     Session();~Session();
-    bool Generate(ID3D11Device1* device,ID3D11DeviceContext1* context,ID3D11Texture2D* image,
-        unsigned multiplier,int64_t timestamp,const std::wstring& directory,Batch& batch,
+    // Preroll-only initialization: allocate NGX/flow/GPU resources without
+    // submitting a frame, advancing history, or starting the presenter.
+    bool Warmup(ID3D11Device1* device, ID3D11DeviceContext1* context,
+        ID3D11Texture2D* image, unsigned multiplier,
         bool nativeSharedOriginals = false);
+    bool Generate(ID3D11Device1* device,ID3D11DeviceContext1* context,ID3D11Texture2D* image,
+        unsigned multiplier,int64_t timestamp,Batch& batch,
+        bool nativeSharedOriginals = false, bool inspectMotion = false, const DepthInput* depth = nullptr);
+    FlowMotion TakeFlowMotion(int64_t pts);
     // x1 Auto: keep the source frame in the SAME queued presenter without NGX.
-    bool CaptureOriginal(ID3D11Texture2D* image,int64_t timestamp,Batch& batch);
+    bool CaptureOriginal(ID3D11Texture2D* image,int64_t timestamp,Batch& batch,const DepthInput* depth = nullptr);
     // Non-blocking completion and NGX validity check for a synthetic phase.
     // No presentation lock or CPU fence wait is performed here.
     bool Ready(uint64_t serial,unsigned index) const;
@@ -53,8 +68,11 @@ public:
     bool AsyncProducer() const;
     uint64_t BusyFallbacks() const;
     unsigned BankCount() const;
-    // NGX-advertised ceiling after the first successful session creation.
+    // Current runtime ceiling, which can decrease after an NGX rejection.
     unsigned MaxAvailableMultiplier() const;
+    SIZE InputSize() const;
+    SIZE GeneratedSize() const;
+    bool UsesZipDepth() const;
     std::wstring WorkDescription() const;
     void Reset();
     void ResetHistory();

@@ -10,15 +10,20 @@
 using MfgBridgeFn = NVSDK_NGX_Result(__cdecl*)(void*,void*,const void*,const void*,void*);
 static thread_local MfgBridgeFn mfgBridge=nullptr;
 static thread_local void* mfgTarget=nullptr;
+static thread_local bool mfgEvaluateException=false;
 static NVSDK_NGX_Result MfgEvaluateBridge(ID3D12GraphicsCommandList* list,const NVSDK_NGX_Handle* handle,
     const NVSDK_NGX_Parameter* params,PFN_NVSDK_NGX_ProgressCallback) {
     __try { return mfgBridge(mfgTarget,list,handle,params,nullptr); }
-    __except(EXCEPTION_EXECUTE_HANDLER) { return NVSDK_NGX_Result_Fail; }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        mfgEvaluateException=true;
+        return NVSDK_NGX_Result_Fail;
+    }
 }
 #define NVSDK_NGX_D3D12_EvaluateFeature_C MfgEvaluateBridge
 #include <nvsdk_ngx_helpers_dlssg_d3d.h>
 #undef NVSDK_NGX_D3D12_EvaluateFeature_C
 #include <bcrypt.h>
+#include <shlobj.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 #include <algorithm>
@@ -33,10 +38,12 @@ static NVSDK_NGX_Result MfgEvaluateBridge(ID3D12GraphicsCommandList* list,const 
 #include "DlssCaptureCamera.h"
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "shell32.lib")
 
 namespace mfg {
 namespace {
 std::atomic<bool> runtimeOwned{false};
+constexpr ULONGLONG MultiplierRetryDelayMs = 2000;
 using Result = NVSDK_NGX_Result;
 using Init = Result(__cdecl*)(unsigned long long,const wchar_t*,ID3D12Device*,unsigned,const void*);
 using Populate = Result(__cdecl*)(NVSDK_NGX_Parameter*);
@@ -114,7 +121,28 @@ struct Runtime::Impl {
     Destroy destroy=nullptr;
     ShimInit si=nullptr; ShimPopulate sp=nullptr; ShimCreate sc=nullptr; ShimEval se=nullptr; ShimRelease sr=nullptr,ss=nullptr;
     unsigned maximum=1,width=0,height=0; bool initialized=false,hdr=false;
+    unsigned populateMaximum=0, createMaximum=0;
+    bool ada=false, adaAdapted=false, adaImageReused=false;
+    unsigned refusedCount=0;
+    bool retrySubmitted=false;
+    ULONGLONG retryAt=0;
+    std::wstring rejectedMultiplier;
     unsigned long long frame=0;
+    unsigned Available() const {
+        return refusedCount ? refusedCount-1 : maximum;
+    }
+    std::wstring CapabilityStatus() const {
+        const auto describe = [](unsigned generated) -> std::wstring {
+            return generated ? L"x" + std::to_wstring(generated + 1) : L"unreported";
+        };
+        return L"310.9.1; cap " + describe(Available()) +
+            (adaImageReused ? L" (Ada adapted, reused DLL image)" :
+                adaAdapted ? L" (Ada adapted)" : ada ? L" (Ada adaptation unavailable)" : L"") +
+            L"; Populate " + describe(populateMaximum) + L"; Create " + describe(createMaximum) +
+            rejectedMultiplier +
+            (refusedCount ? (retryAt ? L"; retry pending" :
+                retrySubmitted ? L"; retry submitted" : L"; lower cap for this session") : L"");
+    }
     ~Impl() {
         if(feature&&release&&sr) SafeRelease(sr,reinterpret_cast<void*>(release),feature);
         if(initialized&&shutdown&&ss) SafeRelease(ss,reinterpret_cast<void*>(shutdown),device.Get());
@@ -127,17 +155,31 @@ struct Runtime::Impl {
 Runtime::Runtime()=default;
 Runtime::~Runtime()=default;
 void Runtime::Close() { impl_.reset(); }
-unsigned Runtime::Maximum() const { return impl_?impl_->maximum:0; }
-bool Runtime::Open(ID3D12Device* device,const std::wstring& directory) {
+unsigned Runtime::Maximum() const { return impl_?impl_->Available():0; }
+unsigned Runtime::SelectMultiplier(unsigned requested, bool allowRetry) const {
+    if(!impl_) return 2;
+    const auto& p=*impl_;
+    const unsigned available=1u+p.Available();
+    if(allowRetry && requested>available && p.retryAt && GetTickCount64()>=p.retryAt)
+        return available+1;
+    return std::min(requested,available);
+}
+bool Runtime::Open(ID3D12Device* device) {
     Close(); status_=L"MFG unavailable";
     if(!device) return false;
     auto p=std::make_unique<Impl>(); p->device=device;
     if(!p->exclusive) {status_=L"MFG: another renderer owns the private runtime; normal playback retained";return false;}
+    const auto directory=NgxRuntime::EditionDir();
     const auto dll=directory+L"\\nvngx_dlssg.dll";
     p->file=CreateFileW(dll.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(p->file==INVALID_HANDLE_VALUE) {
+        const auto error=GetLastError();
+        status_=L"MFG: cannot open edition\\nvngx_dlssg.dll (Win32 "+std::to_wstring(error)+L")";
+        return false;
+    }
     // Exact NVIDIA-signed Manager native runtime, independently inventoried.
-    if(p->file==INVALID_HANDLE_VALUE||!Hash(p->file,"FF6E90EB78B827927DFF5B4ECC6B1C870C2E9BCA29ED9F48C7D348CC9E170B82")) {
-        status_=L"MFG: missing or unreviewed runtime; no patch applied"; return false;
+    if(!Hash(p->file,"FF6E90EB78B827927DFF5B4ECC6B1C870C2E9BCA29ED9F48C7D348CC9E170B82")) {
+        status_=L"MFG: edition\\nvngx_dlssg.dll hash mismatch"; return false;
     }
     p->module=LoadLibraryExW(dll.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);
     p->shim=LoadLibraryExW((directory+L"\\mpcvrmfg_nvngx.dll").c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -163,19 +205,34 @@ bool Runtime::Open(ID3D12Device* device,const std::wstring& directory) {
         !p->si||!p->sp||!p->sc||!p->se||!p->sr||!p->ss) {status_=L"MFG: incomplete NGX ABI";return false;}
     p->cuda=LoadLibraryExW(L"nvcuda.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
     const unsigned sm=ComputeCapability(device,p->cuda);
-    bool patched=false;
     if(sm==89) {
+        p->ada=true;
         auto base=reinterpret_cast<BYTE*>(p->module);
         auto dos=reinterpret_cast<IMAGE_DOS_HEADER*>(base);
         auto nt=reinterpret_cast<IMAGE_NT_HEADERS64*>(base+dos->e_lfanew);
-        patched=lf_ada::Apply(base,nt->OptionalHeader.SizeOfImage,sm).applied;
+        const auto mapping=CreateFileMappingW(p->file,nullptr,PAGE_READONLY|SEC_IMAGE_NO_EXECUTE,0,0,nullptr);
+        if(mapping) {
+            const std::unique_ptr<void,decltype(&UnmapViewOfFile)> original(
+                MapViewOfFile(mapping,FILE_MAP_READ,0,0,0),&UnmapViewOfFile);
+            CloseHandle(mapping);
+            if(original) {
+                const auto adapted=lf_ada::Apply(base,static_cast<BYTE*>(original.get()),nt->OptionalHeader.SizeOfImage);
+                p->adaAdapted=adapted.applied;
+                p->adaImageReused=adapted.reused;
+            }
+        }
         // This is still only a potential ceiling; Create/Evaluate must succeed.
-        p->maximum=patched?MaxGenerated:1;
+        p->maximum=p->adaAdapted?MaxGenerated:1;
     } else if(sm>=120) p->maximum=MaxGenerated;
     else {status_=L"MFG: selected adapter capability is not recognized; no compatibility patch applied";return false;}
     auto r=allocate(&p->params);
     if(NVSDK_NGX_FAILED(r)||!p->params) {status_=Error(L"AllocateParameters",r);return false;}
-    const auto cache=directory+L"\\cache"; std::error_code ec;
+    wchar_t localAppData[MAX_PATH]{};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, localAppData))) {
+        status_=L"MFG: local application data unavailable"; return false;
+    }
+    const auto cache=std::filesystem::path(localAppData) / L"MPC-VR-Edition" / L"mfg";
+    std::error_code ec;
     std::filesystem::create_directories(cache,ec);
     if(ec) {status_=L"MFG: private runtime cache is not writable";return false;}
     r=SafeInit(p->si,init,cache.c_str(),device,p->params);
@@ -183,9 +240,13 @@ bool Runtime::Open(ID3D12Device* device,const std::wstring& directory) {
     p->initialized=true;
     p->sp(reinterpret_cast<void*>(populate),p->params);
     unsigned advertised=0;
-    if(p->params->Get(NVSDK_NGX_DLSSG_Parameter_MultiFrameCountMax,&advertised)==NVSDK_NGX_Result_Success&&advertised)
-        p->maximum=std::min(p->maximum,std::min(advertised,MaxGenerated));
-    status_=patched?L"310.9.1 initialized; exact-runtime Ada adaptation applied; generation untested":L"310.9.1 initialized; generation untested";
+    if(p->params->Get(NVSDK_NGX_DLSSG_Parameter_MultiFrameCountMax,&advertised)==NVSDK_NGX_Result_Success)
+        p->populateMaximum=std::min(advertised,MaxGenerated);
+    // The private Live Flow Ada path establishes its own ceiling after
+    // adapting this exact runtime. The public capability value can still
+    // describe stock Ada. Check actual Evaluate results on that path.
+    if(!p->adaAdapted && p->populateMaximum) p->maximum=std::min(p->maximum,p->populateMaximum);
+    status_=p->CapabilityStatus()+L"; initialized";
     impl_=std::move(p); return true;
 }
 bool Runtime::Create(ID3D12GraphicsCommandList* list,unsigned width,unsigned height,DXGI_FORMAT format) {
@@ -202,16 +263,20 @@ bool Runtime::Create(ID3D12GraphicsCommandList* list,unsigned width,unsigned hei
     if(NVSDK_NGX_FAILED(r)||!p.feature) {status_=Error(L"CreateFeature",r);return false;}
     p.width=width;p.height=height;p.hdr=format==DXGI_FORMAT_R10G10B10A2_UNORM;
     unsigned maximum=0;
-    if(s->Get(NVSDK_NGX_DLSSG_Parameter_MultiFrameCountMax,&maximum)==NVSDK_NGX_Result_Success&&maximum)
-        p.maximum=std::min(p.maximum,std::min(maximum,MaxGenerated));
-    status_+=L"; feature created";return true;
+    if(s->Get(NVSDK_NGX_DLSSG_Parameter_MultiFrameCountMax,&maximum)==NVSDK_NGX_Result_Success)
+        p.createMaximum=std::min(maximum,MaxGenerated);
+    if(!p.adaAdapted && p.createMaximum) p.maximum=std::min(p.maximum,p.createMaximum);
+    status_=p.CapabilityStatus()+L"; feature created";return true;
 }
-bool Runtime::Evaluate(ID3D12GraphicsCommandList* list,ID3D12Resource* color,ID3D12Resource* depth,
+Runtime::Evaluation Runtime::Evaluate(ID3D12GraphicsCommandList* list,ID3D12Resource* color,ID3D12Resource* depth,
     ID3D12Resource* motion,const std::array<ID3D12Resource*,MaxGenerated>& outputs,
     const std::array<ID3D12Resource*,MaxGenerated>& disabled,unsigned multiplier,bool reset) {
-    if(!impl_||!list||!color||!depth||!motion||multiplier<2||multiplier>MaxMultiplier) return false;
+    if(!impl_||!list||!color||!depth||!motion||multiplier<2||multiplier>MaxMultiplier) return Evaluation::Failed;
     auto& p=*impl_;const unsigned count=multiplier-1;
-    if(!p.feature||count>p.maximum) {status_=L"MFG: requested multiplier exceeds initialized runtime capacity";return false;}
+    if(!p.feature || multiplier> SelectMultiplier(multiplier, true)) {
+        status_=L"MFG: requested multiplier exceeds initialized runtime capacity";
+        return Evaluation::Failed;
+    }
     auto s=p.params;
     s->Set(NVSDK_NGX_DLSSG_Parameter_BackbufferFrameID,++p.frame);
     NVSDK_NGX_DLSSG_Opt_Eval_Params options{};
@@ -231,14 +296,44 @@ bool Runtime::Evaluate(ID3D12GraphicsCommandList* list,ID3D12Resource* color,ID3
     NVSDK_NGX_D3D12_DLSSG_Eval_Params evaluate{};
     evaluate.pBackbuffer=color;evaluate.pDepth=depth;evaluate.pMVecs=motion;
     mfgBridge=p.se;mfgTarget=reinterpret_cast<void*>(p.evaluate);
+    mfgEvaluateException=false;
     for(unsigned i=0;i<count;++i) {
-        if(!outputs[i]||!disabled[i]) {status_=L"MFG: incomplete output resources";return false;}
+        if(!outputs[i]||!disabled[i]) {status_=L"MFG: incomplete output resources";return Evaluation::Failed;}
         options.multiFrameIndex=i+1;
         evaluate.pOutputInterpFrame=outputs[i];evaluate.pOutputDisableInterpolation=disabled[i];
         const auto r=NGX_D3D12_EVALUATE_DLSSG(list,p.feature,s,&evaluate,&options);
-        if(NVSDK_NGX_FAILED(r)) {status_=Error(L"EvaluateFeature",r);return false;}
+        if(NVSDK_NGX_FAILED(r)) {
+            if(p.adaAdapted && count>1 && !mfgEvaluateException &&
+               SUCCEEDED(p.device->GetDeviceRemovedReason())) {
+                // One rejected batch may be transient. Retry this level once
+                // after lower-multiplier playback has had time to recover.
+                p.retryAt=p.refusedCount ? 0 : GetTickCount64()+MultiplierRetryDelayMs;
+                p.refusedCount=count;
+                p.retrySubmitted=false;
+                p.rejectedMultiplier=L"; x"+std::to_wstring(multiplier)+L" refused ("+Error(L"EvaluateFeature",r)+L")";
+                status_=p.CapabilityStatus();
+                return Evaluation::LowerMultiplier;
+            }
+            status_=Error(L"EvaluateFeature",r);
+            return Evaluation::Failed;
+        }
     }
-    status_=L"310.9.1 NGX Evaluate accepted; validity checked by GPU readback";
-    return true;
+    // Keep the lower cap until the retry's GPU output flags are checked.
+    if(p.refusedCount && count==p.refusedCount && !reset) {
+        p.retryAt=0;
+        p.retrySubmitted=true;
+        status_=p.CapabilityStatus();
+    }
+    return Evaluation::Accepted;
+}
+void Runtime::CompleteMultiplierRetry(unsigned multiplier, bool valid) {
+    if(impl_ && impl_->retrySubmitted && multiplier==impl_->refusedCount+1) {
+        auto& p=*impl_;
+        p.retrySubmitted=false;
+        if(valid) p.refusedCount=0;
+        p.rejectedMultiplier+=L"; x"+std::to_wstring(multiplier)+
+            (valid ? L" retry verified" : L" retry output unavailable");
+        status_=p.CapabilityStatus();
+    }
 }
 }

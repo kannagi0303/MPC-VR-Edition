@@ -5,6 +5,7 @@
 #include "MotionShaders.h"
 #include "GpuBankTimeline.h"
 #include "DLSS/DlssOpticalFlow.h"
+#include "DLSS/ZipDepth.h"
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
@@ -23,19 +24,19 @@ using Microsoft::WRL::ComPtr;
 #pragma comment(lib,"d3dcompiler.lib")
 namespace mfg {
 namespace {
-// Match the DLSS 5 Manager's maximum MFG height strategy.  The cap is
-// deliberately independent of the real source/presentation size.
 // Optional environment override: MPCVR_MFG_MAX_HEIGHT=1080, 1440, 2160,
-// or 0 to disable the cap.  Read once per newly created MFG session.
+// or 0 to disable the cap. By default the MFG session keeps the full
+// upstream size instead of clamping to a fixed manager-style height.
+// Read once per newly created MFG session.
 UINT MaxGenerationHeight() {
     wchar_t text[16]{};
     const DWORD length=GetEnvironmentVariableW(L"MPCVR_MFG_MAX_HEIGHT",text,_countof(text));
-    if(!length || length>=_countof(text)) return 1440;
+    if(!length || length>=_countof(text)) return std::numeric_limits<UINT>::max();
     wchar_t* end=nullptr;
     const unsigned long value=std::wcstoul(text,&end,10);
-    if(end==text || *end!=L'\0') return 1440;
+    if(end==text || *end!=L'\0') return std::numeric_limits<UINT>::max();
     if(value==0) return std::numeric_limits<UINT>::max();
-    return value>=360 && value<=8192 ? static_cast<UINT>(value) : 1440;
+    return value>=360 && value<=8192 ? static_cast<UINT>(value) : std::numeric_limits<UINT>::max();
 }
 bool AsyncProducerEnabled() {
     static const bool enabled=[] {
@@ -107,12 +108,14 @@ struct Session::Impl {
         uint64_t serial=0;
         GpuBankTimeline timeline;
         unsigned generatedCount=0;
-        bool checked=false,valid=false;
+        bool checked=false,valid=false,multiplierRetry=false;
     };
     std::array<Bank,4> banks;
     unsigned activeBanks=3; // 2/3/4 selectable, 4 supports longer Live Flow group retention.
     ComPtr<ID3D12Resource> zero;
     CDlssOpticalFlow flow;
+    CZipDepthHistory zipHistory;
+    bool zipDepthActive = false;
     UINT w=0,h=0,sourceW=0,sourceH=0,multiplier=0,allocated=0;
     DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
     D3D11_TEXTURE2D_DESC originalDesc{};
@@ -130,6 +133,7 @@ struct Session::Impl {
     }
     uint64_t serial=0,value=0,pendingValue=0,inputValue=0,presentValue=0;
     int64_t previous=-1;
+    FlowMotionCheck motionCheck;
     bool pending=false,asyncProducer=AsyncProducerEnabled();HANDLE event=nullptr;
     uint64_t busyFallbacks=0;
     Runtime runtime; // destroyed before resources, after caller has drained GPU.
@@ -187,11 +191,16 @@ struct Session::Impl {
         if(!bank.valid || !bank.generatedCount) return bank.valid;
         void* data=nullptr;
         const D3D12_RANGE read{0,bank.generatedCount*4u};
-        if(FAILED(bank.readback->Map(0,&read,&data)) || !data) {bank.valid=false;return false;}
+        if(FAILED(bank.readback->Map(0,&read,&data)) || !data) {
+            bank.valid=false;
+            if(bank.multiplierRetry) runtime.CompleteMultiplierRetry(bank.generatedCount+1,false);
+            return false;
+        }
         for(unsigned i=0;i<bank.generatedCount;++i)
             if(static_cast<const unsigned*>(data)[i]!=0) bank.valid=false;
         const D3D12_RANGE noWrite{0,0};
         bank.readback->Unmap(0,&noWrite);
+        if(bank.multiplierRetry) runtime.CompleteMultiplierRetry(bank.generatedCount+1,bank.valid);
         return bank.valid;
     }
     void MarkConsumed(uint64_t submittedSerial) {
@@ -206,7 +215,7 @@ struct Session::Impl {
             break;
         }
     }
-    void Init(ID3D11Device1* d,ID3D11DeviceContext1* c,const D3D11_TEXTURE2D_DESC& desc,unsigned multiple,const std::wstring& directory,bool nativeSharedOriginals) {
+    void Init(ID3D11Device1* d,ID3D11DeviceContext1* c,const D3D11_TEXTURE2D_DESC& desc,bool nativeSharedOriginals) {
         device11=d;context=c;sourceW=desc.Width;sourceH=desc.Height;
         w=sourceW;h=sourceH;
         const UINT limit=MaxGenerationHeight();
@@ -215,7 +224,7 @@ struct Session::Impl {
             const double scaledWidth=double(sourceW)*double(h)/double(sourceH);
             w=std::max(2u,static_cast<UINT>(std::lround(scaledWidth)) & ~1u);
         }
-        format=desc.Format;multiplier=multiple;
+        format=desc.Format;multiplier=2;
         // Bank allocation is coupled to group resource lifetimes. Unlike the
         // source snapshots, generated resources are reused after N groups.
         // Keep the working v7 default (3), allow 4 for the Live Flow path.
@@ -242,9 +251,8 @@ struct Session::Impl {
         open11(presentFence.Get(),presentFence11);
         event=CreateEventW(nullptr,FALSE,FALSE,nullptr);if(!event) throw std::runtime_error("MFG fence event failed");
         const auto ngxFormat=format==DXGI_FORMAT_R10G10B10A2_UNORM?format:DXGI_FORMAT_R8G8B8A8_UNORM;
-        if(!runtime.Open(device12.Get(),directory)||!runtime.Create(list.Get(),w,h,ngxFormat)) throw std::runtime_error("NGX open/create failed");
+        if(!runtime.Open(device12.Get())||!runtime.Create(list.Get(),w,h,ngxFormat)) throw std::runtime_error("NGX open/create failed");
         if(!Submit()) throw std::runtime_error("MFG GPU create timed out");
-        if(multiple-1>runtime.Maximum()) throw std::runtime_error("Requested MFG multiplier unavailable");
         // Create one full-resolution snapshot for each outstanding real frame;
         // only NGX-related textures are reduced.  The same snapshot is sampled
         // to downscale the NGX input, avoiding a redundant full-size copy.
@@ -273,7 +281,7 @@ struct Session::Impl {
                                                bank.allocator.Get(),nullptr,IID_PPV_ARGS(&bank.list)));
             Check(bank.list->Close());
             bank.readback=Buffer(device12.Get(),MaxGenerated*4,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);
-            for(unsigned i=0;i<multiple-1;++i) {
+            for(unsigned i=0;i<multiplier-1;++i) {
                 bank.generated[i].Create(device12.Get(),d,w,h,ngxFormat,true);
                 bank.disabled[i]=Buffer(device12.Get(),4,D3D12_HEAP_TYPE_DEFAULT,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
@@ -293,11 +301,10 @@ struct Session::Impl {
         Check(d->CreateBuffer(&cb,nullptr,&constants));
         CDlssOpticalFlow::Options options;options.bidirectional=false;options.cost=false;
         if(!flow.Init(d,c,w,h,options)) throw std::runtime_error("NVIDIA Optical Flow initialization failed");
-        allocated=multiple-1;
+        allocated=multiplier-1;
     }
     void Reconfigure(unsigned multiple) {
         const unsigned count=multiple-1;
-        if(count>runtime.Maximum())throw std::runtime_error("Requested MFG multiplier unavailable");
         const auto ngxFormat=format==DXGI_FORMAT_R10G10B10A2_UNORM?format:DXGI_FORMAT_R8G8B8A8_UNORM;
         for(unsigned i=allocated;i<count;++i) {
             for(unsigned bankIndex=0;bankIndex<activeBanks;++bankIndex) {
@@ -311,34 +318,47 @@ struct Session::Impl {
         // Manual mode changes/discontinuities explicitly ResetHistory upstream.
         allocated=std::max(allocated,count);multiplier=multiple;
     }
-    bool CaptureOnly(ID3D11Texture2D* image,int64_t timestamp,Batch& batch) {
+    bool CaptureOnly(ID3D11Texture2D* image,int64_t timestamp,Batch& batch,const DepthInput* depth) {
         // No NGX work in Auto x1. The output bank serial still advances so
         // queued generated frames can expire, but real snapshots stay valid.
         auto& bank=banks[unsigned(serial%activeBanks)];
         Capture(bank,image);
+        if (depth && depth->captureSource) depth->source.Update(device11.Get(), context.Get(), bank.original->view.Get(),
+            depth->picture, depth->modelSize, timestamp);
         bank.serial=++serial;
         batch={serial,0,previous,timestamp,bank.original};
         previous=-1;
+        zipHistory.Reset();
+        zipDepthActive = false;
         flow.Reset();
         return true;
     }
-    bool Generate(ID3D11Texture2D* image,int64_t timestamp,Batch& batch) {
+    bool Generate(ID3D11Texture2D* image,int64_t timestamp,Batch& batch,bool inspectMotion,const DepthInput* depth) {
         const bool reset=previous<0||timestamp<=previous||timestamp-previous>2500000;
-        if(reset) flow.Reset();
+        zipDepthActive = false;
+        if (reset || !depth) zipHistory.Reset();
+        if (reset) {
+            flow.Reset();
+            motionCheck.Reset();
+        }
         const unsigned bankIndex=unsigned(serial%activeBanks);auto& bank=banks[bankIndex];
         if(asyncProducer && !bank.timeline.ProducerReady(fence->GetCompletedValue())) {
             // NGX is more than N groups behind. Preserve this real frame
             // immediately rather than stalling the player's source clock.
             ++busyFallbacks;
-            return CaptureOnly(image,timestamp,batch);
+            return CaptureOnly(image,timestamp,batch,depth);
         }
         if(!AwaitBank(bank)) throw std::runtime_error("MFG: GPU bank reuse timed out");
+        if(bank.multiplierRetry) CheckBank(bank);
+        bank.multiplierRetry=false;
         bank.checked=false;bank.valid=false;bank.generatedCount=0;
         ComPtr<ID3DDeviceContextState> saved;context->SwapDeviceContextState(state.Get(),&saved);
         struct Restore {ID3D11DeviceContext1* c;ID3DDeviceContextState* old;~Restore(){c->SwapDeviceContextState(old,nullptr);}} restore{context.Get(),saved.Get()};
         // Keep the original at its full resolution while NGX operates on its
         // downscaled copy. This snapshot is retained by the frame queue.
         Capture(bank,image);
+        if (depth && depth->captureSource) depth->source.Update(device11.Get(), context.Get(), bank.original->view.Get(),
+            depth->picture, depth->modelSize, timestamp);
         context->IASetInputLayout(nullptr);context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         context->VSSetShader(vs.Get(),nullptr,0);context->RSSetState(nullptr);
         context->OMSetBlendState(nullptr,nullptr,0xffffffff);context->OMSetDepthStencilState(nullptr,0);
@@ -357,8 +377,11 @@ struct Session::Impl {
         target=nullptr;context->OMSetRenderTargets(0,nullptr,nullptr);srvs[0]=nullptr;context->PSSetShaderResources(0,2,srvs);
         const bool hasFlow=flow.Execute();
         if(flow.LastExecuteFailed()) throw std::runtime_error("NVIDIA Optical Flow execution failed");
+        if (inspectMotion && hasFlow) {
+            motionCheck.Submit(device11.Get(), context.Get(), flow.ForwardFlow(),
+                flow.OutputWidth(), flow.OutputHeight(), timestamp);
+        }
         const FLOAT flat[4]={.5f,0,0,0},none[4]={0,0,0,0};
-        context->ClearRenderTargetView(bank.depth.rtv.Get(),flat);
         if(hasFlow) {
             // Same constants as the copy pass; the vector shader reads grid.
             srvs[1]=flow.ForwardFlow();context->PSSetShaderResources(0,2,srvs);
@@ -366,6 +389,18 @@ struct Session::Impl {
             context->PSSetShader(vectors.Get(),nullptr,0);context->Draw(3,0);
         } else context->ClearRenderTargetView(bank.motion.rtv.Get(),none);
         context->OMSetRenderTargets(0,nullptr,nullptr);srvs[1]=nullptr;context->PSSetShaderResources(0,2,srvs);
+        if (!hasFlow) zipHistory.Reset();
+        if (depth && hasFlow && !reset) {
+            const auto scaleX = [this](LONG x) { return LONG((int64_t(x) * w + sourceW / 2) / sourceW); };
+            const auto scaleY = [this](LONG y) { return LONG((int64_t(y) * h + sourceH / 2) / sourceH); };
+            const RECT picture{scaleX(depth->picture.left), scaleY(depth->picture.top),
+                scaleX(depth->picture.right), scaleY(depth->picture.bottom)};
+            zipDepthActive = zipHistory.Draw(device11.Get(), context.Get(), depth->source,
+                bank.depth.d11.Get(), bank.depth.rtv.Get(), bank.motion.srv.Get(), picture,
+                depth->modelSize, timestamp, float(timestamp - previous) / 10000.f, true);
+        }
+        if (!zipDepthActive) context->ClearRenderTargetView(bank.depth.rtv.Get(), flat);
+
         const auto inputReady=++inputValue;
         Check(context4->Signal(inputFence11.Get(),inputReady));context->Flush();
         Check(queue->Wait(inputFence.Get(),inputReady));
@@ -381,8 +416,8 @@ struct Session::Impl {
             work->CopyBufferRegion(flag[i],0,zero.Get(),0,4);
             Transition(work,flag[i],D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
-        const bool evaluated=runtime.Evaluate(work,bank.real.d12.Get(),bank.depth.d12.Get(),
-                                              bank.motion.d12.Get(),out,flag,multiplier,reset||!hasFlow);
+        const auto evaluation=runtime.Evaluate(work,bank.real.d12.Get(),bank.depth.d12.Get(),
+                                                bank.motion.d12.Get(),out,flag,multiplier,reset||!hasFlow);
         for(unsigned i=0;i<multiplier-1;++i) {
             Transition(work,out[i],D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COMMON);
             Transition(work,flag[i],D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -391,22 +426,68 @@ struct Session::Impl {
         }
         for(auto r:{bank.real.d12.Get(),bank.depth.d12.Get(),bank.motion.d12.Get()})
             Transition(work,r,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
-        if(!evaluated) throw std::runtime_error("NGX evaluation failed");
-        bank.generatedCount=multiplier-1;
-        bank.valid=hasFlow&&!reset;
+        if(evaluation==Runtime::Evaluation::Failed) throw std::runtime_error("NGX evaluation failed");
+        // A refused multiplier may have recorded earlier phases. Submit the
+        // bank normally to retire that work, but queue only its source frame.
+        const bool accepted=evaluation==Runtime::Evaluation::Accepted;
+        bank.generatedCount=accepted ? multiplier-1 : 0;
+        bank.valid=accepted&&hasFlow&&!reset;
+        bank.multiplierRetry=bank.valid&&multiplier>1u+runtime.Maximum();
         if(!SubmitBank(bank)) throw std::runtime_error("MFG GPU evaluate timed out");
+        if(bank.valid && zipDepthActive) depth->source.RecordMfgSubmission();
         // The producer no longer waits for D3D12 completion when asynchronous.
         // Only generated surfaces are gated by the completion fence. Originals
         // remain separate snapshots and may be presented independently.
         bank.serial=++serial;
         batch={serial,bank.valid ? multiplier-1 : 0,previous,timestamp,bank.original};
-        previous=timestamp;return true;
+        previous=accepted ? timestamp : -1;
+        if(!accepted) zipDepthActive=false;
+        return true;
     }
 };
 Session::Session()=default;Session::~Session(){Reset();}
+bool Session::Warmup(ID3D11Device1* device, ID3D11DeviceContext1* context,
+    ID3D11Texture2D* image, unsigned multiplier,
+    bool nativeSharedOriginals) {
+    if(failed_ || !device || !context || !image || multiplier<2 || multiplier>MaxMultiplier) return false;
+    D3D11_TEXTURE2D_DESC desc{};image->GetDesc(&desc);
+    // Do not disturb an already initialized/running session during Pause.
+    if(impl_ && impl_->sourceW==desc.Width && impl_->sourceH==desc.Height &&
+       impl_->format==desc.Format) return true;
+    if(impl_) Reset();
+    std::unique_ptr<Impl> next;
+    try {
+        // A retired session may still own GPU resources. Never stall graph
+        // preroll waiting for it: the normal video path remains available.
+        {
+            std::lock_guard guard(Impl::retiredMutex);
+            std::erase_if(Impl::retired,[](const auto& old){return old->Safe();});
+            if(!Impl::retired.empty()) {
+                status_=L"MFG: previous GPU session still retiring";
+                return false;
+            }
+        }
+        next=std::make_unique<Impl>();
+        next->Init(device,context,desc,nativeSharedOriginals);
+        impl_=std::move(next);
+        status_=L"MFG: resources prewarmed before playback";
+        return true;
+    } catch(const std::exception& e) {
+        const std::string what=e.what();status_=std::wstring(what.begin(),what.end());
+        if(next&&!next->runtime.Status().empty()) status_+=L"; "+next->runtime.Status();
+        Reset();failed_=true;
+        return false;
+    }
+}
 void Session::ResetHistory() {
     if(failed_){Reset();return;}
-    if(impl_){impl_->previous=-1;impl_->flow.Reset();}
+    if (impl_) {
+        impl_->previous = -1;
+        impl_->flow.Reset();
+        impl_->motionCheck.Reset();
+        impl_->zipHistory.Reset();
+        impl_->zipDepthActive = false;
+    }
 }
 void Session::Reset() {
     if(impl_) {
@@ -418,8 +499,8 @@ void Session::Reset() {
     failed_=false;
 }
 bool Session::Generate(ID3D11Device1* device,ID3D11DeviceContext1* context,ID3D11Texture2D* image,
-    unsigned multiplier,int64_t timestamp,const std::wstring& directory,Batch& batch,
-    bool nativeSharedOriginals) {
+    unsigned multiplier,int64_t timestamp,Batch& batch,
+    bool nativeSharedOriginals, bool inspectMotion, const DepthInput* depth) {
     if(failed_||!image||multiplier<2||multiplier>MaxMultiplier) return false;
     D3D11_TEXTURE2D_DESC desc{};image->GetDesc(&desc);
     if(impl_&&(impl_->sourceW!=desc.Width||impl_->sourceH!=desc.Height||impl_->format!=desc.Format)) Reset();
@@ -436,10 +517,13 @@ bool Session::Generate(ID3D11Device1* device,ID3D11DeviceContext1* context,ID3D1
                     return false;
                 }
             }
-            impl_=std::make_unique<Impl>();impl_->Init(device,context,desc,multiplier,directory,nativeSharedOriginals);
+            impl_=std::make_unique<Impl>();impl_->Init(device,context,desc,nativeSharedOriginals);
         }
+        const bool continuous = impl_->previous >= 0 && timestamp > impl_->previous &&
+            timestamp - impl_->previous <= 2'500'000;
+        multiplier = impl_->runtime.SelectMultiplier(multiplier, continuous);
         if(impl_->multiplier!=multiplier)impl_->Reconfigure(multiplier);
-        const bool ok=impl_->Generate(image,timestamp,batch);
+        const bool ok=impl_->Generate(image,timestamp,batch,inspectMotion,depth);
         status_=L"MFG x"+std::to_wstring(multiplier)+L"; internal "+
             std::to_wstring(impl_->w)+L"x"+std::to_wstring(impl_->h)+
             L" from "+std::to_wstring(impl_->sourceW)+L"x"+std::to_wstring(impl_->sourceH)+
@@ -450,16 +534,29 @@ bool Session::Generate(ID3D11Device1* device,ID3D11DeviceContext1* context,ID3D1
         Reset();failed_=true;return false;
     }
 }
-bool Session::CaptureOriginal(ID3D11Texture2D* image,int64_t timestamp,Batch& batch) {
+FlowMotion Session::TakeFlowMotion(int64_t pts) {
+    return impl_ ? impl_->motionCheck.Take(impl_->context.Get(), pts) : FlowMotion::Unknown;
+}
+
+bool Session::CaptureOriginal(ID3D11Texture2D* image,int64_t timestamp,Batch& batch,const DepthInput* depth) {
     if(failed_ || !impl_ || !image) return false;
     D3D11_TEXTURE2D_DESC desc{};image->GetDesc(&desc);
     if(impl_->sourceW!=desc.Width || impl_->sourceH!=desc.Height || impl_->format!=desc.Format)
         return false;
-    try {return impl_->CaptureOnly(image,timestamp,batch);}
+    try {return impl_->CaptureOnly(image,timestamp,batch,depth);}
     catch(const std::exception& e) {
         const std::string what=e.what();status_=std::wstring(what.begin(),what.end());
         failed_=true;return false;
     }
+}
+bool Session::UsesZipDepth() const {
+    return impl_ && impl_->zipDepthActive;
+}
+SIZE Session::InputSize() const {
+    return impl_ ? SIZE{LONG(impl_->sourceW), LONG(impl_->sourceH)} : SIZE{};
+}
+SIZE Session::GeneratedSize() const {
+    return impl_ ? SIZE{LONG(impl_->w), LONG(impl_->h)} : SIZE{};
 }
 std::wstring Session::WorkDescription() const {
     if(!impl_) return {};
