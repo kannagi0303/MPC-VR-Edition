@@ -26,6 +26,13 @@ struct DepthInput {
     RECT picture;
     SIZE modelSize;
     bool captureSource = true;
+    bool applyDepth = true;
+    bool adaptive = false;
+};
+struct FrameGeometry {
+    RECT picture; // video rectangle in MFG input pixels
+    RECT crop;    // decoder source crop
+    RECT present; // video rectangle in presentation pixels
 };
 struct Batch {
     uint64_t serial=0;
@@ -40,9 +47,21 @@ struct FrameSurface {
     ID3D11ShaderResourceView* view=nullptr;
     bool pending=false; // GPU producer has not signalled completion yet
 };
+struct MotionOverlay {
+    ID3D11ShaderResourceView* view = nullptr;
+    RECT picture{};
+    ID3D11ShaderResourceView* active = nullptr;
+};
+struct DepthPreview {
+    ID3D11ShaderResourceView* view = nullptr;
+    RECT picture{};
+    SIZE size{};
+};
 class Session {
     struct Impl;
+    struct WarmupJob;
     std::unique_ptr<Impl> impl_;
+    std::unique_ptr<WarmupJob> warmup_;
     std::wstring status_;
     std::atomic<bool> failed_{false};
 public:
@@ -52,16 +71,22 @@ public:
     bool Warmup(ID3D11Device1* device, ID3D11DeviceContext1* context,
         ID3D11Texture2D* image, unsigned multiplier,
         bool nativeSharedOriginals = false);
+    // True when the session is ready or initialization failed permanently.
+    bool PollWarmup(ID3D11Device1* device, ID3D11DeviceContext1* context,
+        ID3D11Texture2D* image);
     bool Generate(ID3D11Device1* device,ID3D11DeviceContext1* context,ID3D11Texture2D* image,
         unsigned multiplier,int64_t timestamp,Batch& batch,
-        bool nativeSharedOriginals = false, bool inspectMotion = false, const DepthInput* depth = nullptr);
+        bool nativeSharedOriginals = false, bool inspectMotion = false, const DepthInput* depth = nullptr,
+        const FrameGeometry* geometry = nullptr);
     FlowMotion TakeFlowMotion(int64_t pts);
     // x1 Auto: keep the source frame in the SAME queued presenter without NGX.
     bool CaptureOriginal(ID3D11Texture2D* image,int64_t timestamp,Batch& batch,const DepthInput* depth = nullptr);
     // Non-blocking completion and NGX validity check for a synthetic phase.
     // No presentation lock or CPU fence wait is performed here.
     bool Ready(uint64_t serial,unsigned index) const;
-    FrameSurface Frame(uint64_t serial,unsigned index) const;
+    FrameSurface Frame(uint64_t serial,unsigned index,int64_t current = -1) const;
+    MotionOverlay OverlayMotion(uint64_t serial, int64_t pts) const;
+    DepthPreview OverlayDepth(uint64_t serial, int64_t pts) const;
     // Mark the generated bank as consumed AFTER D3D11 presentation work is
     // enqueued. The producer waits for this fence before reusing its outputs.
     void MarkConsumed(uint64_t serial);
@@ -76,6 +101,7 @@ public:
     std::wstring WorkDescription() const;
     void Reset();
     void ResetHistory();
+    void ResetDepthHistory();
     bool Failed() const {return failed_;}
     const std::wstring& Status() const {return status_;}
 };

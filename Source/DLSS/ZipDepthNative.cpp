@@ -48,7 +48,7 @@ void Check(HRESULT hr)
 #include "DirectMLGraph/GraphHelpers.h"
 
 namespace {
-constexpr unsigned TensorBytes = ZipDepthPack::Side * ZipDepthPack::Side * sizeof(float);
+constexpr unsigned TensorBytes = ZipDepthPack::Pixels * sizeof(float);
 constexpr auto Uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 constexpr auto CopyDest = D3D12_RESOURCE_STATE_COPY_DEST;
 
@@ -142,7 +142,7 @@ struct ZipDepthNative::Impl {
     bool fp16 = false;
 
     Impl(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Resource* image,
-        ID3D12Resource* depth, const std::filesystem::path& model, const std::filesystem::path& directml)
+        ID3D12Resource* depth, std::span<const std::uint8_t> model, const std::filesystem::path& directml)
         : library(directml)
     {
         const auto create = reinterpret_cast<decltype(&DMLCreateDevice)>(
@@ -151,8 +151,7 @@ struct ZipDepthNative::Impl {
         Check(create(device, DML_CREATE_DEVICE_FLAG_NONE, IID_PPV_ARGS(dml.GetAddressOf())));
         Check(dml->CreateCommandRecorder(IID_PPV_ARGS(recorder.GetAddressOf())));
 
-        const auto pack = ZipDepthPack::ReadFile(model);
-        const auto entries = ZipDepthPack::Read(pack);
+        const auto entries = ZipDepthPack::Read(model);
         const auto serialized = entries.at(ZipDepthPack::GraphFile);
         flatbuffers::Verifier verifier(serialized.data(), serialized.size());
         if (!dml::ir::VerifyDmlGraphDescBuffer(verifier))
@@ -310,7 +309,7 @@ struct ZipDepthNative::Impl {
 };
 
 ZipDepthNative::ZipDepthNative(ID3D12Device* device, ID3D12CommandQueue* queue,
-    ID3D12Resource* image, ID3D12Resource* depth, const std::filesystem::path& model,
+    ID3D12Resource* image, ID3D12Resource* depth, std::span<const std::uint8_t> model,
     const std::filesystem::path& directml)
     : m_impl(std::make_unique<Impl>(device, queue, image, depth, model, directml))
 {

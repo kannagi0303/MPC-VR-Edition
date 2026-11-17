@@ -25,8 +25,8 @@
 
 namespace fs = std::filesystem;
 using Microsoft::WRL::ComPtr;
-using ZipDepthPack::Side;
-constexpr std::size_t Pixels = Side * Side;
+using ZipDepthPack::Shape;
+using ZipDepthPack::Pixels;
 
 void Check(HRESULT hr, const char* stage)
 {
@@ -160,7 +160,7 @@ ComPtr<ID3D12Device> OpenDevice()
     return device;
 }
 
-void ValidateTensor(const OrtApi* api, OrtSession* session, bool input)
+Shape ValidateTensor(const OrtApi* api, OrtSession* session, bool input)
 {
     std::size_t count = 0;
     Check(api, input ? api->SessionGetInputCount(session, &count) : api->SessionGetOutputCount(session, &count));
@@ -188,18 +188,23 @@ void ValidateTensor(const OrtApi* api, OrtSession* session, bool input)
         throw std::runtime_error("ZipDepth requires rank-four float32 tensors");
     std::array<int64_t, 4> actual{};
     Check(api, api->GetDimensions(tensor, actual.data(), actual.size()));
-    const std::array<int64_t, 4> expected{1, input ? 3 : 1, Side, Side};
-    if (actual != expected) throw std::runtime_error("ZipDepth requires fixed 384x384 tensors in NCHW order");
+    for (const auto shape : {Shape::Square, Shape::Wide}) {
+        const std::array<int64_t, 4> expected{1, input ? 3 : 1,
+            ZipDepthPack::Height(shape), ZipDepthPack::Width(shape)};
+        if (actual == expected) return shape;
+    }
+    throw std::runtime_error("ZipDepth requires fixed 384x384 or 512x288 tensors in NCHW order");
 }
 
-std::vector<float> TestImage()
+std::vector<float> TestImage(Shape shape)
 {
+    const auto width = ZipDepthPack::Width(shape), height = ZipDepthPack::Height(shape);
     std::vector<float> image(3 * Pixels);
-    for (std::size_t y = 0; y < Side; ++y) {
-        for (std::size_t x = 0; x < Side; ++x) {
-            const auto i = y * Side + x;
-            image[i] = float(x) / (Side - 1);
-            image[Pixels + i] = float(y) / (Side - 1);
+    for (std::size_t y = 0; y < height; ++y) {
+        for (std::size_t x = 0; x < width; ++x) {
+            const auto i = y * width + x;
+            image[i] = float(x) / (width - 1);
+            image[Pixels + i] = float(y) / (height - 1);
             image[2 * Pixels + i] = 0.125f + 0.75f * ((x / 32 + y / 32) % 2);
         }
     }
@@ -207,15 +212,16 @@ std::vector<float> TestImage()
     return image;
 }
 
-std::vector<float> ValidateExecution(const OrtApi* api, OrtSession* session)
+std::vector<float> ValidateExecution(const OrtApi* api, OrtSession* session, Shape shape)
 {
-    auto image = TestImage();
+    auto image = TestImage(shape);
     OrtAllocator* allocator = nullptr;
     Check(api, api->GetAllocatorWithDefaultOptions(&allocator));
     OrtHandle<OrtMemoryInfo, &OrtApi::ReleaseMemoryInfo> memory(api);
     Check(api, api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &memory.value));
     OrtHandle<OrtValue, &OrtApi::ReleaseValue> input(api), output(api);
-    constexpr int64_t inputShape[]{1, 3, Side, Side}, outputShape[]{1, 1, Side, Side};
+    const auto width = ZipDepthPack::Width(shape), height = ZipDepthPack::Height(shape);
+    const int64_t inputShape[]{1, 3, height, width}, outputShape[]{1, 1, height, width};
     constexpr auto fp32 = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
     Check(api, api->CreateTensorWithDataAsOrtValue(memory.value, image.data(), image.size() * sizeof(float),
         inputShape, std::size(inputShape), fp32, &input.value));
@@ -253,7 +259,7 @@ std::vector<float> ValidateExecution(const OrtApi* api, OrtSession* session)
     return {depth, depth + Pixels};
 }
 
-std::vector<float> ExportGraph(const fs::path& model, const fs::path& runtime, const fs::path& dmlPath)
+std::vector<float> ExportGraph(const fs::path& model, const fs::path& runtime, const fs::path& dmlPath, Shape& shape)
 {
     const Library directml(dmlPath);
     const Library ort(runtime / L"onnxruntime.dll");
@@ -292,9 +298,10 @@ std::vector<float> ExportGraph(const fs::path& model, const fs::path& runtime, c
     Check(api, dml->SessionOptionsAppendExecutionProvider_DML1(options.value, ml.Get(), queue.Get()));
     OrtHandle<OrtSession, &OrtApi::ReleaseSession> session(api);
     Check(api, api->CreateSession(env.value, model.c_str(), options.value, &session.value));
-    ValidateTensor(api, session.value, true);
-    ValidateTensor(api, session.value, false);
-    return ValidateExecution(api, session.value);
+    shape = ValidateTensor(api, session.value, true);
+    if (ValidateTensor(api, session.value, false) != shape)
+        throw std::runtime_error("ZipDepth input and output sizes must match");
+    return ValidateExecution(api, session.value, shape);
 }
 
 void ValidateNative(const fs::path& model, const fs::path& directml, std::span<const float> reference)
@@ -325,9 +332,10 @@ void ValidateNative(const fs::path& model, const fs::path& directml, std::span<c
     const auto input = makeBuffer(inBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
     const auto output = makeBuffer(outBytes, D3D12_HEAP_TYPE_DEFAULT, uav);
     const auto readback = makeBuffer(outBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
-    const ZipDepthNative native(device.Get(), queue.Get(), input.Get(), output.Get(), model, directml);
+    const auto pack = ZipDepthPack::ReadFile(model);
+    const ZipDepthNative native(device.Get(), queue.Get(), input.Get(), output.Get(), pack, directml);
 
-    const auto image = TestImage();
+    const auto image = TestImage(ZipDepthPack::ReadShape(pack));
     const D3D12_RANGE empty{0, 0}, uploaded{0, inBytes}, downloaded{0, outBytes};
     void* mapped = nullptr;
     Check(upload->Map(0, &empty, &mapped), "Map native test input");
@@ -376,7 +384,7 @@ void ValidateNative(const fs::path& model, const fs::path& directml, std::span<c
 }
 
 void WritePack(const fs::path& graphDirectory, const fs::path& destination,
-    const fs::path& directml, std::span<const float> reference)
+    const fs::path& directml, std::span<const float> reference, Shape shape)
 {
     unsigned partitions = 0;
     for (const auto& entry : fs::directory_iterator(graphDirectory)) {
@@ -415,7 +423,7 @@ void WritePack(const fs::path& graphDirectory, const fs::path& destination,
     const fs::path staging = destination.wstring() + L".partial-" + UniqueSuffix();
     try {
         std::ofstream file(staging, std::ios::binary);
-        ZipDepthPack::Write(file, entries);
+        ZipDepthPack::Write(file, entries, shape);
         file.close();
         if (!file) throw std::runtime_error("Cannot finish writing model pack");
         ValidateNative(staging, directml, reference);
@@ -471,8 +479,9 @@ int wmain(int argc, wchar_t** argv)
         // Use an isolated model directory because ORT exports the graph beside the current working directory.
         fs::copy_file(input, model);
         fs::current_path(temp.path);
-        const auto reference = ExportGraph(model, temp.path, directml);
-        WritePack(temp.path / L"zipdepth", output, directml, reference);
+        Shape shape;
+        const auto reference = ExportGraph(model, temp.path, directml, shape);
+        WritePack(temp.path / L"zipdepth", output, directml, reference, shape);
         std::cout << "ZipDepth model pack ready." << std::endl;
         return 0;
     } catch (const std::exception& error) {

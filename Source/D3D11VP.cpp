@@ -481,6 +481,13 @@ ID3D11Texture2D* CD3D11VP::GetNextInputTexture(const D3D11_VIDEO_FRAME_FORMAT vf
 	return *m_VideoTextures.GetTexture();
 }
 
+HRESULT CD3D11VP::CheckInputTexture(ID3D11Texture2D* texture) const
+{
+	D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC view{};
+	view.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+	return m_pVideoDevice->CreateVideoProcessorInputView(texture, m_pVideoProcessorEnum, &view, nullptr);
+}
+
 HRESULT CD3D11VP::SetInputVideoData(ID3D11Texture2D* pTexture, IMediaSample* pSample, UINT ArraySlice, const D3D11_VIDEO_FRAME_FORMAT vframeFormat)
 {
 	if (!pTexture || !pSample) return E_POINTER;

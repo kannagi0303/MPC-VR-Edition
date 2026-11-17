@@ -139,7 +139,7 @@ public:
             }
             group.pictures.push_back({deadline, stamp, batch.serial, index, nativeInput,
                                       index == MaxGenerated ? batch.original : nullptr,
-                                      index == MaxGenerated ? -1 : batch.previous});
+                                      index == MaxGenerated ? -1 : batch.previous, presentAt + videoDelay});
             if (index != MaxGenerated) ++generatedPending_;
         };
         if (phases && span > 0) {
@@ -158,6 +158,14 @@ public:
         append(batch.current, timing.End(batch.current), MaxGenerated);
         groups_.push_back(std::move(group));
         return drops;
+    }
+
+    std::vector<QueuedFrame> TakeBufferedGroup() {
+        if (groups_.empty()) return {};
+        auto pictures = std::move(groups_.front().pictures);
+        groups_.pop_front();
+        generatedPending_ = 0;
+        return pictures;
     }
 
     bool Next(int64_t& deadline, int64_t submitLeadTicks = 0, int64_t originalLeadTicks = -1) const {

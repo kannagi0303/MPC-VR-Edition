@@ -74,6 +74,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="DX11VideoProcessorMfg.cpp" />
+    <ClCompile Include="DX11VideoProcessorCompletedFrames.cpp" />
     <ClCompile Include="CustomAllocator.cpp" />
     <ClCompile Include="D3D11VP.cpp" />
     <ClCompile Include="D3DUtil\D3D11Font.cpp" />
@@ -85,6 +86,7 @@
     <ClCompile Include="DX11Helper.cpp" />
     <ClCompile Include="DLSS\DlssOpticalFlow.cpp" />
     <ClCompile Include="DLSS\ZipDepthGpu.cpp" />
+    <ClCompile Include="DLSS\DecodedFrameLookahead.cpp" />
     <ClCompile Include="DLSS\ZipDepthNative.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <AdditionalIncludeDirectories>$(SolutionDir)vendor\zipdepth\include;$(SolutionDir)vendor\zipdepth\flatbuffers\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -137,6 +139,9 @@
     <ClInclude Include="DLSS\ZipDepthNative.h" />
     <ClInclude Include="DLSS\ZipDepthPack.h" />
     <ClInclude Include="DLSS\ZipDepthGpuShaders.h" />
+    <ClInclude Include="DLSS\ZipDepthTemporalShaders.h" />
+    <ClInclude Include="DLSS\DecodedFrameLookahead.h" />
+    <ClInclude Include="DLSS\ZipDepthLookahead.h" />
     <ClInclude Include="DLSS\ZipDepth.h" />
     <ClInclude Include="DLSS\NvOF\nvOpticalFlowCommon.h" />
     <ClInclude Include="DLSS\NvOF\nvOpticalFlowD3D11.h" />

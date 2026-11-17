@@ -1,72 +1,87 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "stdafx.h"
 #include "ZipDepth.h"
+#include "ZipDepthTemporalShaders.h"
+#include "ZipDepthLookahead.h"
 #include "NgxRuntime.h"
 #include "Mfg/MotionShaders.h"
 #include <d3dcompiler.h>
+#include <cstdio>
+#include <mutex>
 
 using Microsoft::WRL::ComPtr;
 
 namespace {
+class DepthTrace {
+    FILE* m_file = nullptr;
+    std::mutex m_lock;
+public:
+    DepthTrace() {
+        wchar_t path[1024]{};
+        DWORD length = GetEnvironmentVariableW(L"MPCVR_ZIPDEPTH_TRACE", path, _countof(path));
+        if (!length && zipdepth::LookaheadMs())
+            length = GetPrivateProfileStringW(L"ZipDepth", L"Trace", L"", path, _countof(path), zipdepth::LookaheadConfig().c_str());
+        if (!length || length >= _countof(path) || _wfopen_s(&m_file, path, L"wb") || !m_file) return;
+        std::fputs("event,pts_100ns,estimate_pts_100ns,media_age_ms,processing_ms,gpu_pack_ms,gpu_model_ms,gpu_post_ms,cut,ready_ahead_ms\n",
+            m_file);
+    }
+    ~DepthTrace() { if (m_file) std::fclose(m_file); }
+    bool Enabled() const { return m_file != nullptr; }
+    void Record(const char* event, int64_t pts, int64_t estimatePts, double processingMs = 0,
+        CZipDepthGpu::Timings timings = {}, bool cut = false, int64_t ahead = 0) {
+        if (!m_file) return;
+        std::lock_guard guard(m_lock);
+        std::fprintf(m_file, "%s,%lld,%lld,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%.3f\n", event,
+            (long long)pts, (long long)estimatePts, estimatePts >= 0 ? double(pts - estimatePts) / 10000.0 : -1.0, processingMs,
+            timings.available ? timings.packMs : -1.0, timings.available ? timings.modelMs : -1.0,
+            timings.available ? timings.postMs : -1.0, unsigned(cut), double(ahead) / 10000.0);
+    }
+};
+
+DepthTrace& TraceDepth() {
+    static DepthTrace trace;
+    return trace;
+}
+
 constexpr char CaptureShader[] = R"(
 Texture2D<float4> Source : register(t0);
+Texture2D<float2> Chroma : register(t1);
 SamplerState Linear : register(s0);
 cbuffer Settings : register(b0) {
     float4 Picture; // normalized origin and extent in the source texture
-    float4 Model;   // content scale in the square model input, input size
+    float4 Model;   // tensor width, height, clockwise rotation, full range NV12
     float4 Padding;
 };
-float4 Main(float4 pos : SV_POSITION) : SV_TARGET {
-    float2 uv = saturate((pos.xy / Model.z - 0.5) / Model.xy + 0.5);
+float2 SourceUV(float4 pos) {
+    float2 uv = pos.xy / Model.xy;
+    if (Model.z > 0.5)
+        uv = float2(uv.y, 1.0 - uv.x);
     uint w, h;
     Source.GetDimensions(w, h);
     float2 halfPixel = 0.5 / float2(w, h);
-    float2 sampleUV = clamp(Picture.xy + uv * Picture.zw,
+    return clamp(Picture.xy + uv * Picture.zw,
         Picture.xy + halfPixel, Picture.xy + Picture.zw - halfPixel);
-    return float4(saturate(Source.SampleLevel(Linear, sampleUV, 0).rgb), 1.0);
 }
-)";
-
-constexpr char TemporalShader[] = R"(
-Texture2D<float> NewDepth : register(t0);
-Texture2D<float> History : register(t1);
-Texture2D<float2> Motion : register(t2);
-SamplerState Linear : register(s0);
-cbuffer Settings : register(b0) {
-    float4 Picture; // origin and extent, in output pixels
-    float4 Model;   // content scale, has new estimate, has history
-    float4 Frame;   // output width and height, estimate age in frames, reverse Z
-};
-float Main(float4 pos : SV_POSITION) : SV_TARGET {
-    float2 uv = (pos.xy - Picture.xy) / Picture.zw;
-    if (any(uv < 0.0) || any(uv >= 1.0))
-        return 0.5;
-
-    // Both callers provide current-to-previous vectors in output pixels.
-    float2 mv = Motion.Load(int3(uint2(pos.xy), 0));
-    float2 prior = pos.xy + mv;
-    bool inPicture = all(prior >= Picture.xy) && all(prior < Picture.xy + Picture.zw);
-    prior = clamp(prior, Picture.xy + 0.5, Picture.xy + Picture.zw - 0.5);
-    float depth = Model.w > 0.5 && inPicture ? History.SampleLevel(Linear, prior / Frame.xy, 0) : 0.5;
-    depth = lerp(depth, 0.5, 0.005);
-    if (Model.z > 0.5) {
-        float2 aligned = uv + mv * min(Frame.z, 4.0) / Picture.zw;
-        if (all(aligned >= 0.0) && all(aligned < 1.0)) {
-            float2 square = (aligned - 0.5) * Model.xy + 0.5;
-            float estimate = NewDepth.SampleLevel(Linear, square, 0);
-            if (Frame.w > 0.5)
-                estimate = 1.0 - estimate;
-            depth = lerp(depth, estimate, Model.w > 0.5 ? 0.30 : 1.0);
-        }
+float4 Main(float4 pos : SV_POSITION) : SV_TARGET {
+    return float4(saturate(Source.SampleLevel(Linear, SourceUV(pos), 0).rgb), 1.0);
+}
+float4 Nv12(float4 pos : SV_POSITION) : SV_TARGET {
+    const float2 uv = SourceUV(pos);
+    float y = Source.SampleLevel(Linear, uv, 0).r;
+    float2 c = Chroma.SampleLevel(Linear, uv, 0) - 128.0 / 255.0;
+    if (Model.w < 0.5) {
+        y = (y * 255.0 - 16.0) / 219.0;
+        c *= 255.0 / 224.0;
     }
-    return clamp(depth, 0.44, 0.56);
+    return float4(saturate(y + float3(1.5748*c.y, -0.187324*c.x-0.468124*c.y, 1.8556*c.x)), 1.0);
 }
 )";
 
-bool CreatePixelShader(ID3D11Device1* device, const char* text, size_t size, ID3D11PixelShader** shader)
+bool CreatePixelShader(ID3D11Device1* device, const char* text, size_t size, ID3D11PixelShader** shader,
+    const char* entry = "Main")
 {
     ComPtr<ID3DBlob> code;
-    return SUCCEEDED(D3DCompile(text, size, nullptr, nullptr, nullptr, "Main", "ps_5_0",
+    return SUCCEEDED(D3DCompile(text, size, nullptr, nullptr, nullptr, entry, "ps_5_0",
         D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, code.GetAddressOf(), nullptr)) &&
         SUCCEEDED(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, shader));
 }
@@ -79,24 +94,15 @@ bool CreateInputs(ID3D11Device1* device,
     desc.AddressU = desc.AddressV = desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     desc.MaxLOD = D3D11_FLOAT32_MAX;
     D3D11_BUFFER_DESC buffer{};
-    buffer.ByteWidth = 48;
+    buffer.ByteWidth = 80;
     buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     return SUCCEEDED(device->CreateSamplerState(&desc, sampler)) &&
         SUCCEEDED(device->CreateBuffer(&buffer, nullptr, constants));
 }
 
-std::array<float, 2> ContentScale(SIZE size)
+bool RotateModelInput(SIZE picture, SIZE tensor)
 {
-    const float side = float((std::max)(size.cx, size.cy));
-    return {float(size.cx) / side, float(size.cy) / side};
-}
-
-SIZE DepthPictureSize(SIZE modelSize)
-{
-    constexpr LONG side = CZipDepth::Size;
-    const LONG longest = (std::max)(modelSize.cx, modelSize.cy);
-    return {(std::max)(1, MulDiv(side, modelSize.cx, longest)),
-            (std::max)(1, MulDiv(side, modelSize.cy, longest))};
+    return tensor.cx > tensor.cy && picture.cy > picture.cx;
 }
 }
 
@@ -114,7 +120,11 @@ bool CZipDepth::Initialize(ID3D11Device1* device)
         FAILED(device->CreateVertexShader(vertex->GetBufferPointer(), vertex->GetBufferSize(),
             nullptr, m_vertex.GetAddressOf())) ||
         !CreatePixelShader(device, CaptureShader, sizeof(CaptureShader) - 1, m_captureShader.GetAddressOf()) ||
-        !CreatePixelShader(device, TemporalShader, sizeof(TemporalShader) - 1, m_temporalShader.GetAddressOf()) ||
+        !CreatePixelShader(device, CaptureShader, sizeof(CaptureShader) - 1, m_captureNv12Shader.GetAddressOf(), "Nv12") ||
+        !CreatePixelShader(device, ZipDepthTemporalShaders, sizeof(ZipDepthTemporalShaders) - 1,
+            m_temporalShader.GetAddressOf(), "Stabilize") ||
+        !CreatePixelShader(device, ZipDepthTemporalShaders, sizeof(ZipDepthTemporalShaders) - 1,
+            m_expandDepthShader.GetAddressOf(), "Expand") ||
         !CreateInputs(device, m_sampler.GetAddressOf(), m_constants.GetAddressOf()))
         return false;
 
@@ -150,6 +160,60 @@ void CZipDepth::RecordResultAge(int64_t age, uint64_t now)
 void CZipDepth::Update(ID3D11Device1* device, ID3D11DeviceContext1* context,
     ID3D11ShaderResourceView* source, const RECT& picture, SIZE modelSize, int64_t pts)
 {
+    if (m_lookahead) {
+        PollCompleted();
+        return;
+    }
+    Capture(device, context, source, picture, modelSize, pts);
+}
+
+bool CZipDepth::PrefetchNv12(ID3D11Device1* device, ID3D11DeviceContext1* context,
+    ID3D11Texture2D* frame, const RECT& picture, bool fullRange, int64_t pts)
+{
+    Prepare(device);
+    PollCompleted();
+    if (!m_initialized || m_gpu.Capacity() <= CZipDepthGpu::NormalSlots || !m_gpu.CanStart()) return true;
+    if (!m_gpu.CanAccept()) return false;
+    if (m_playbackPts >= 0 && pts < m_playbackPts) return true;
+    D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
+    desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    desc.Texture2D.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_R8_UNORM;
+    ComPtr<ID3D11ShaderResourceView> luma, chroma;
+    if (FAILED(device->CreateShaderResourceView(frame, &desc, &luma))) return true;
+    desc.Format = DXGI_FORMAT_R8G8_UNORM;
+    if (FAILED(device->CreateShaderResourceView(frame, &desc, &chroma))) return true;
+    m_lookahead = true;
+    Capture(device, context, luma.Get(), picture, {picture.right - picture.left, picture.bottom - picture.top},
+        pts, chroma.Get(), fullRange);
+    return true;
+}
+
+void CZipDepth::PlaybackFrame(int64_t pts, int64_t duration)
+{
+    m_playbackPts = pts;
+    if (!m_lookahead) return;
+    PollCompleted();
+    if (!TraceDepth().Enabled()) return;
+    auto ordered = m_resultPts;
+    std::sort(ordered.begin(), ordered.end());
+    auto ready = pts;
+    const auto estimatePts = EstimateAtOrBefore(pts).pts;
+    auto last = estimatePts;
+    if (last >= SceneStart(pts) && pts - last <= std::max<int64_t>(duration, 1)) {
+        for (const auto future : ordered) {
+            if (future <= pts) continue;
+            if (future - last > std::max<int64_t>(duration + duration / 2, 1)) break;
+            ready = last = future;
+        }
+    }
+    TraceDepth().Record("lookahead_ready", pts, estimatePts, 0, {}, false, ready - pts);
+}
+
+void CZipDepth::Capture(ID3D11Device1* device, ID3D11DeviceContext1* context,
+    ID3D11ShaderResourceView* source, const RECT& picture, SIZE modelSize, int64_t pts,
+    ID3D11ShaderResourceView* chroma, bool fullRange)
+{
     if (!source || pts < 0 || modelSize.cx <= 0 || modelSize.cy <= 0)
         return;
     Prepare(device);
@@ -165,7 +229,7 @@ void CZipDepth::Update(ID3D11Device1* device, ID3D11DeviceContext1* context,
     m_lastSourcePts = pts;
 
     PollCompleted();
-    if (CoolingDown(GetTickCount64()) || !m_gpu.CanAccept()) return;
+    if ((!m_lookahead && CoolingDown(GetTickCount64())) || !m_gpu.CanAccept()) return;
 
     ComPtr<ID3D11Resource> resource;
     source->GetResource(resource.GetAddressOf());
@@ -177,33 +241,42 @@ void CZipDepth::Update(ID3D11Device1* device, ID3D11DeviceContext1* context,
         picture.bottom > LONG(desc.Height) || picture.right <= picture.left || picture.bottom <= picture.top)
         return;
 
-    const auto scale = ContentScale(modelSize);
-    const float data[12]{float(picture.left) / desc.Width, float(picture.top) / desc.Height,
+    const SIZE captureSize{LONG(desc.Width), LONG(desc.Height)};
+    if (m_captureSize.cx && (m_captureSize.cx != captureSize.cx || m_captureSize.cy != captureSize.cy ||
+        !EqualRect(&picture, &m_capturePicture))) {
+        ResetHistory();
+        m_lastSourcePts = pts;
+    }
+    m_captureSize = captureSize;
+    m_capturePicture = picture;
+    const auto tensor = TensorSize();
+    const float data[20]{float(picture.left) / desc.Width, float(picture.top) / desc.Height,
         float(picture.right - picture.left) / desc.Width, float(picture.bottom - picture.top) / desc.Height,
-        scale[0], scale[1], float(CZipDepth::Size), 0};
-    constexpr float side = float(CZipDepth::Size);
-    const D3D11_VIEWPORT viewport{0, 0, side, side, 0, 1};
+        float(tensor.cx), float(tensor.cy), RotateModelInput(modelSize, tensor) ? 1.f : 0.f, fullRange ? 1.f : 0.f};
+    const D3D11_VIEWPORT viewport{0, 0, float(tensor.cx), float(tensor.cy), 0, 1};
     ComPtr<ID3DDeviceContextState> previous;
     context->SwapDeviceContextState(m_state.Get(), previous.GetAddressOf());
     context->RSSetViewports(1, &viewport);
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context->VSSetShader(m_vertex.Get(), nullptr, 0);
-    context->PSSetShader(m_captureShader.Get(), nullptr, 0);
+    context->PSSetShader(chroma ? m_captureNv12Shader.Get() : m_captureShader.Get(), nullptr, 0);
     auto* constants = m_constants.Get();
     auto* sampler = m_sampler.Get();
     auto* target = m_gpu.Target();
     context->UpdateSubresource(constants, 0, nullptr, data, 0, 0);
     context->PSSetConstantBuffers(0, 1, &constants);
     context->PSSetSamplers(0, 1, &sampler);
-    context->PSSetShaderResources(0, 1, &source);
+    ID3D11ShaderResourceView* inputs[]{source, chroma};
+    context->PSSetShaderResources(0, 2, inputs);
     context->OMSetRenderTargets(1, &target, nullptr);
     context->Draw(3, 0);
     context->OMSetRenderTargets(0, nullptr, nullptr);
-    ID3D11ShaderResourceView* empty = nullptr;
-    context->PSSetShaderResources(0, 1, &empty);
+    ID3D11ShaderResourceView* empty[2]{};
+    context->PSSetShaderResources(0, 2, empty);
     context->SwapDeviceContextState(previous.Get(), nullptr);
-    const auto slot = unsigned(std::min_element(m_resultPts.begin(), m_resultPts.end()) - m_resultPts.begin());
-    if (m_gpu.Submit(context, {pts, m_generation, slot}, DepthPictureSize(modelSize))) {
+    const auto slot = unsigned(std::min_element(m_resultPts.begin(), m_resultPts.begin() + m_gpu.Capacity()) - m_resultPts.begin());
+    if (m_lookahead && m_resultPts[slot] > m_playbackPts) return;
+    if (m_gpu.Submit(context, {pts, m_generation, slot})) {
         // Stop advertising this slot before the GPU can overwrite it. The
         // D3D11 fence also retires its earlier uses on this immediate context.
         m_resultPts[slot] = -1;
@@ -220,12 +293,16 @@ void CZipDepth::PollCompleted()
     CZipDepthGpu::Result estimate;
     if (m_gpu.Take(estimate) && estimate.valid &&
         estimate.generation == m_generation && estimate.pts <= m_lastSourcePts) {
+        if (estimate.sceneCut) MarkSceneCut(estimate.pts);
         m_counters.inferenceMs = estimate.inferenceMs;
         m_counters.gpuTimings = estimate.timings;
         m_resultPts[estimate.slot] = estimate.pts;
         ++m_counters.maps;
-        if (estimate.pts >= SceneStart(m_lastSourcePts))
-            RecordResultAge(m_lastSourcePts - estimate.pts, now);
+        const auto clockPts = m_lookahead && m_playbackPts >= 0 ? m_playbackPts : m_lastSourcePts;
+        TraceDepth().Record("estimate", clockPts, estimate.pts, estimate.inferenceMs,
+            estimate.timings, estimate.sceneCut);
+        if (estimate.pts >= SceneStart(clockPts))
+            RecordResultAge(std::max<int64_t>(0, clockPts - estimate.pts), now);
     }
     if (!m_mapRateTick) {
         m_mapRateTick = now;
@@ -256,7 +333,7 @@ CZipDepth::Estimate CZipDepth::EstimateAtOrBefore(int64_t pts) const
     for (unsigned slot = 0; slot < m_resultPts.size(); ++slot) {
         const auto resultPts = m_resultPts[slot];
         if (resultPts > estimate.pts && resultPts <= pts)
-            estimate = {m_gpu.View(slot), resultPts, m_modelSize};
+            estimate = {m_gpu.View(slot), resultPts, RotateModelInput(m_modelSize, TensorSize())};
     }
     return estimate;
 }
@@ -288,6 +365,7 @@ void CZipDepth::ResetHistory()
     m_lastSourcePts = m_lastSubmittedPts = -1;
     m_resultPts.fill(-1);
     m_sceneCuts.fill(-1);
+    m_captureSize = {};
     m_gpu.SetSceneStart(-1);
 }
 
@@ -299,7 +377,9 @@ void CZipDepth::Stop()
     m_state.Reset();
     m_vertex.Reset();
     m_captureShader.Reset();
+    m_captureNv12Shader.Reset();
     m_temporalShader.Reset();
+    m_expandDepthShader.Reset();
     m_sampler.Reset();
     m_constants.Reset();
     m_counters = {};
@@ -320,7 +400,8 @@ const wchar_t* CZipDepth::Status() const
 bool CZipDepthHistory::Draw(ID3D11Device1* device, ID3D11DeviceContext1* context,
     const CZipDepth& source, ID3D11Texture2D* output, ID3D11RenderTargetView* target,
     ID3D11ShaderResourceView* motion, const RECT& picture, SIZE modelSize,
-    int64_t pts, float frameTimeMs, bool inverted)
+    int64_t pts, float frameTimeMs, bool inverted, const FramePair* pair,
+    ID3D11ShaderResourceView* active, ID3D11ShaderResourceView* previousActive)
 {
     if (m_failed || !source.m_initialized || pts < 0 || modelSize.cx <= 0 || modelSize.cy <= 0 ||
         picture.right <= picture.left || picture.bottom <= picture.top)
@@ -337,44 +418,77 @@ bool CZipDepthHistory::Draw(ID3D11Device1* device, ID3D11DeviceContext1* context
         Reset();
     }
     const auto estimate = source.ForFrame(pts);
-    const bool hasHistory = m_estimatePts >= 0;
-    const bool hasNew = estimate.view && estimate.pts > m_estimatePts;
+    bool hasHistory = m_estimatePts >= 0 && (!pair || m_historyPts == pair->previousPts);
+    const bool exact = !pair || !pair->requireAdjacentEstimate || estimate.pts == pts || estimate.pts == pair->previousPts;
+    const bool hasNew = exact && estimate.view && estimate.pts > m_estimatePts;
     if (!hasHistory && !hasNew) return false;
 
     D3D11_TEXTURE2D_DESC desc{};
     output->GetDesc(&desc);
+    const auto tensor = source.TensorSize();
+    if (tensor.cx <= 0 || tensor.cy <= 0) return false;
+    const bool rotated = RotateModelInput(modelSize, tensor);
+    const SIZE gridSize = rotated ? SIZE{tensor.cy, tensor.cx} : tensor;
     if (m_size.cx != LONG(desc.Width) || m_size.cy != LONG(desc.Height)) {
         Reset();
+        hasHistory = false;
         if (!hasNew) return false;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        desc.MiscFlags = 0;
-        if (FAILED(device->CreateTexture2D(&desc, nullptr, m_history.ReleaseAndGetAddressOf())) ||
-            FAILED(device->CreateShaderResourceView(m_history.Get(), nullptr, m_historyView.ReleaseAndGetAddressOf()))) {
-            m_failed = true;
-            return false;
-        }
         m_size = {LONG(desc.Width), LONG(desc.Height)};
     }
+    if (gridSize.cx != m_gridSize.cx || gridSize.cy != m_gridSize.cy) {
+        Reset();
+        hasHistory = false;
+        if (!hasNew) return false;
+        const D3D11_TEXTURE2D_DESC gridDesc{UINT(gridSize.cx), UINT(gridSize.cy), 1, 1,
+            DXGI_FORMAT_R16G16B16A16_FLOAT, {1, 0}, D3D11_USAGE_DEFAULT,
+            D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE};
+        for (auto& grid : m_grids) {
+            if (FAILED(device->CreateTexture2D(&gridDesc, nullptr, grid.texture.ReleaseAndGetAddressOf())) ||
+                FAILED(device->CreateShaderResourceView(grid.texture.Get(), nullptr, grid.view.ReleaseAndGetAddressOf())) ||
+                FAILED(device->CreateRenderTargetView(grid.texture.Get(), nullptr, grid.target.ReleaseAndGetAddressOf()))) {
+                m_failed = true;
+                return false;
+            }
+        }
+        m_gridSize = gridSize;
+    }
 
-    const auto scale = ContentScale(modelSize);
     const float age = hasNew && frameTimeMs > 0.f ? float(pts - estimate.pts) / (10000.f * frameTimeMs) : 0.f;
-    const float data[12]{float(picture.left), float(picture.top), float(picture.right - picture.left),
-        float(picture.bottom - picture.top), scale[0], scale[1], hasNew ? 1.f : 0.f,
-        m_estimatePts >= 0 ? 1.f : 0.f, float(desc.Width), float(desc.Height), age, inverted ? 1.f : 0.f};
+    const float elapsed = hasNew && hasHistory ? float(estimate.pts - m_estimatePts) / 1e7f : frameTimeMs / 1000.f;
+    const float data[20]{float(picture.left), float(picture.top), float(picture.right - picture.left),
+        float(picture.bottom - picture.top), estimate.rotated ? 1.f : 0.f, elapsed, hasNew ? 1.f : 0.f,
+        hasHistory ? 1.f : 0.f, float(desc.Width), float(desc.Height), age, inverted ? 1.f : 0.f,
+        pair && pair->currentLuma && pair->previousLuma ? 1.f : 0.f,
+        pair && estimate.pts == pair->previousPts ? 1.f : 0.f,
+        active ? 1.f : 0.f, previousActive ? 1.f : 0.f, float(gridSize.cx), float(gridSize.cy), OutputDepthSpan};
     auto* constants = source.m_constants.Get();
     auto* sampler = source.m_sampler.Get();
-    ID3D11ShaderResourceView* inputs[]{estimate.view, m_historyView.Get(), motion};
+    ID3D11ShaderResourceView* inputs[]{hasNew ? estimate.view : nullptr,
+        hasHistory ? m_grids[m_gridIndex].view.Get() : nullptr, motion,
+        pair ? pair->currentLuma : nullptr, pair ? pair->previousLuma : nullptr, active, previousActive};
     context->UpdateSubresource(constants, 0, nullptr, data, 0, 0);
     context->PSSetConstantBuffers(0, 1, &constants);
     context->PSSetSamplers(0, 1, &sampler);
-    context->PSSetShaderResources(0, 3, inputs);
+    context->PSSetShaderResources(0, UINT(std::size(inputs)), inputs);
     context->PSSetShader(source.m_temporalShader.Get(), nullptr, 0);
+    m_gridIndex ^= 1;
+    const D3D11_VIEWPORT gridViewport{0, 0, float(gridSize.cx), float(gridSize.cy), 0, 1};
+    context->RSSetViewports(1, &gridViewport);
+    context->OMSetRenderTargets(1, m_grids[m_gridIndex].target.GetAddressOf(), nullptr);
+    context->Draw(3, 0);
+    context->OMSetRenderTargets(0, nullptr, nullptr);
+
+    const D3D11_VIEWPORT outputViewport{0, 0, float(desc.Width), float(desc.Height), 0, 1};
+    context->RSSetViewports(1, &outputViewport);
+    context->PSSetShaderResources(1, 1, m_grids[m_gridIndex].view.GetAddressOf());
+    context->PSSetShader(source.m_expandDepthShader.Get(), nullptr, 0);
     context->OMSetRenderTargets(1, &target, nullptr);
     context->Draw(3, 0);
     context->OMSetRenderTargets(0, nullptr, nullptr);
-    ID3D11ShaderResourceView* empty[3]{};
-    context->PSSetShaderResources(0, 3, empty);
-    context->CopyResource(m_history.Get(), output);
+    ID3D11ShaderResourceView* empty[std::size(inputs)]{};
+    context->PSSetShaderResources(0, UINT(std::size(empty)), empty);
     if (hasNew) m_estimatePts = estimate.pts;
+    m_historyPts = pts;
+    TraceDepth().Record(inverted ? "mfg_use" : "sr_use", pts, m_estimatePts);
     return true;
 }

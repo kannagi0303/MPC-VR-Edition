@@ -19,6 +19,7 @@ struct QueuedFrame {
     bool nativeInput=false;
     std::shared_ptr<OriginalSnapshot> original; // populated only for source frames
     int64_t interpolationStart=-1;
+    int64_t presentationTime=0; // graph time, including the configured video delay
 };
 using GeneratedReady = std::function<bool(uint64_t, unsigned)>;
 struct QueueDrops {

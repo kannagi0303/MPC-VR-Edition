@@ -292,6 +292,7 @@ public:
 
 	ID3D11Texture2D* GetNextInputTexture(const D3D11_VIDEO_FRAME_FORMAT vframeFormat);
 	HRESULT SetInputVideoData(ID3D11Texture2D* pTexture, IMediaSample* pSample, UINT ArraySlice, const D3D11_VIDEO_FRAME_FORMAT vframeFormat);
+	HRESULT CheckInputTexture(ID3D11Texture2D* texture) const;
 	void ResetFrameOrder();
 
 	HRESULT SetRectangles(const RECT * pSrcRect, const RECT* pDstRect);

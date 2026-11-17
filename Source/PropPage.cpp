@@ -89,10 +89,14 @@ void CVRMainPPage::SetControls()
 	ComboBox_SelectByItemData(m_hWnd, IDC_COMBO1, m_SetsPP.iTexFormat);
 	CheckDlgButton(IDC_MFG_MULTIPLIER, m_SetsPP.iMfgMultiplier >= 2 ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_MFG_LOW_MOTION, m_SetsPP.bMfgLowMotion ? BST_CHECKED : BST_UNCHECKED);
-	CheckDlgButton(IDC_USE_ZIPDEPTH, m_SetsPP.bUseZipDepth ? BST_CHECKED : BST_UNCHECKED);
+	CheckDlgButton(IDC_USE_ZIPDEPTH_SR, m_SetsPP.bUseZipDepthSr ? BST_CHECKED : BST_UNCHECKED);
+	CheckDlgButton(IDC_USE_ZIPDEPTH_MFG, m_SetsPP.bUseZipDepthMfg ? BST_CHECKED : BST_UNCHECKED);
+	CheckDlgButton(IDC_ADAPTIVE_MFG_DEPTH, m_SetsPP.bAdaptiveMfgDepth ? BST_CHECKED : BST_UNCHECKED);
+	CheckDlgButton(IDC_SHOW_MFG_MOTION, m_SetsPP.bShowMfgMotion ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_SHOW_DEPTH_OVERLAY, m_SetsPP.bShowDepthOverlay ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_MFG_FEATURE_BADGES, m_SetsPP.bShowFeatureBadges ? BST_CHECKED : BST_UNCHECKED);
 	ComboBox_SelectByItemData(m_hWnd, IDC_MFG_PROCESSING_MODE, m_SetsPP.iMfgProcessingMode);
+	ComboBox_SelectByItemData(m_hWnd, IDC_EXTENDED_STARTUP, m_SetsPP.bWaitForExtendedStartup);
 
 	CheckDlgButton(IDC_CHECK7, m_SetsPP.VPFmts.bNV12          ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK8, m_SetsPP.VPFmts.bP01x          ? BST_CHECKED : BST_UNCHECKED);
@@ -194,11 +198,14 @@ void CVRMainPPage::EnableControls()
 	GetDlgItem(IDC_MFG_MULTIPLIER).EnableWindow(m_SetsPP.bUseD3D11 && IsWindows10OrGreater());
 	GetDlgItem(IDC_MFG_PROCESSING_MODE).EnableWindow(bMfgEnabled);
 	GetDlgItem(IDC_MFG_LOW_MOTION).EnableWindow(bMfgEnabled);
-	const BOOL canUseZipDepth = m_SetsPP.bUseD3D11 && IsWindows10OrGreater() &&
-		(bMfgEnabled || m_SetsPP.bDlssSR);
-	GetDlgItem(IDC_USE_ZIPDEPTH).EnableWindow(canUseZipDepth);
-	GetDlgItem(IDC_SHOW_DEPTH_OVERLAY).EnableWindow(canUseZipDepth && m_SetsPP.bUseZipDepth);
 	const BOOL canUseDlssSR = m_SetsPP.bUseD3D11 && IsWindows10OrGreater();
+	const bool srEnabled = canUseDlssSR && m_SetsPP.bDlssSR;
+	GetDlgItem(IDC_USE_ZIPDEPTH_SR).EnableWindow(srEnabled);
+	GetDlgItem(IDC_USE_ZIPDEPTH_MFG).EnableWindow(bMfgEnabled);
+	GetDlgItem(IDC_ADAPTIVE_MFG_DEPTH).EnableWindow(bMfgEnabled && m_SetsPP.bUseZipDepthMfg);
+	GetDlgItem(IDC_SHOW_MFG_MOTION).EnableWindow(bMfgEnabled);
+	GetDlgItem(IDC_SHOW_DEPTH_OVERLAY).EnableWindow(
+		(srEnabled && m_SetsPP.bUseZipDepthSr) || (bMfgEnabled && m_SetsPP.bUseZipDepthMfg));
 	GetDlgItem(IDC_DLSS_SR_SOURCE_LIMIT).EnableWindow(canUseDlssSR);
 }
 
@@ -344,6 +351,9 @@ HRESULT CVRMainPPage::OnActivate()
 	ComboBox_AddStringData(m_hWnd, IDC_MFG_PROCESSING_MODE,
 		L"MFG then upscale", 1);
 
+	ComboBox_AddStringData(m_hWnd, IDC_EXTENDED_STARTUP, L"Play first", 0);
+	ComboBox_AddStringData(m_hWnd, IDC_EXTENDED_STARTUP, L"Wait for Extended", 1);
+
 	// The public MFG setting is now a checkbox. The internal Auto cadence
 	// algorithm remains unchanged (Off=0, Auto=7).
 	if (!::GetDlgItem(m_hWnd, IDC_MFG_MULTIPLIER)) return E_FAIL;
@@ -368,11 +378,25 @@ HRESULT CVRMainPPage::OnActivate()
 		L"Choose whether to upscale before or after MFG. Both orders support RTX VSR and DLSS SR.\n"
 		L"After-MFG upscaling uses the native-size path when the video and output support it.\n"
 		L"The new order applies immediately. Pending original frames are presented before the route changes; a brief pause is possible.");
-	AddHint(IDC_USE_ZIPDEPTH,
-		L"Use ZipDepth for DLSS SR, DLAA and MFG whenever enabled and supported.\n"
+	AddHint(IDC_EXTENDED_STARTUP,
+		L"Play first: Show video while Extended features load.\n"
+		L"Wait for Extended: Prepare enabled features before playback.\n"
+		L"Applies when you open a video.");
+	AddHint(IDC_USE_ZIPDEPTH_SR,
+		L"Use ZipDepth for DLSS SR and DLAA on supported video.\n"
+		L"Use flat depth while an estimate is unavailable.");
+	AddHint(IDC_USE_ZIPDEPTH_MFG,
+		L"Use ZipDepth for MFG on supported video.\n"
 		L"Flat depth is used while an estimate is unavailable.");
 	AddHint(IDC_SHOW_DEPTH_OVERLAY,
-		L"Blend the ZipDepth grayscale map into the video at 95% opacity before DLSS SR or MFG.");
+		L"Show the stabilized depth used by MFG at 95% opacity.\n"
+		L"Without MFG, show the normalized ZipDepth map.");
+	AddHint(IDC_ADAPTIVE_MFG_DEPTH,
+		L"Accept new depth estimates only for the current or previous source frame.\n"
+		L"MFG can still reuse aligned depth history.");
+	AddHint(IDC_SHOW_MFG_MOTION,
+		L"Draw MFG motion arrows on the final picture.\n"
+		L"Arrows point from the current source frame to the previous source frame.");
 	AddHint(IDC_MFG_LOW_MOTION,
 		L"Skips interpolation when sustained low image difference and recent optical flow both indicate low motion. Repeat replacement takes priority. Progressive SDR NV12/P010 only.");
 	AddHint(IDC_MFG_FEATURE_BADGES,
@@ -525,13 +549,14 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 				return (LRESULT)1;
 			}
 
-			if (nID == IDC_USE_ZIPDEPTH) {
-				m_SetsPP.bUseZipDepth = IsDlgButtonChecked(IDC_USE_ZIPDEPTH) == BST_CHECKED;
+			if (nID == IDC_USE_ZIPDEPTH_SR || nID == IDC_USE_ZIPDEPTH_MFG) {
+				m_SetsPP.bUseZipDepthSr = IsDlgButtonChecked(IDC_USE_ZIPDEPTH_SR) == BST_CHECKED;
+				m_SetsPP.bUseZipDepthMfg = IsDlgButtonChecked(IDC_USE_ZIPDEPTH_MFG) == BST_CHECKED;
 				EnableControls();
 				SetDirty();
 				return (LRESULT)1;
 			}
-			if (nID == IDC_SHOW_DEPTH_OVERLAY) {
+			if (nID == IDC_SHOW_DEPTH_OVERLAY || nID == IDC_ADAPTIVE_MFG_DEPTH || nID == IDC_SHOW_MFG_MOTION) {
 				SetDirty();
 				return (LRESULT)1;
 			}
@@ -564,6 +589,14 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 		}
 
 		if (action == CBN_SELCHANGE) {
+			if (nID == IDC_EXTENDED_STARTUP) {
+				lValue = ComboBox_GetCurItemData(m_hWnd, nID);
+				if ((lValue == 0 || lValue == 1) && m_SetsPP.bWaitForExtendedStartup != (lValue == 1)) {
+					m_SetsPP.bWaitForExtendedStartup = lValue == 1;
+					SetDirty();
+				}
+				return (LRESULT)1;
+			}
             if (nID == IDC_DLSS_SR_SOURCE_LIMIT) {
                 const LRESULT choice = ComboBox_GetCurItemData(m_hWnd, nID);
                 if (choice >= DLSSSR_SOURCE_Disable && choice <= DLSSSR_SOURCE_1440p &&
@@ -781,7 +814,10 @@ HRESULT CVRMainPPage::OnApplyChanges()
 	// notification.  Reject a missing selection instead of interpreting -1 as
 	// a multiplier or overwriting another saved preference.
 	m_SetsPP.bMfgLowMotion = IsDlgButtonChecked(IDC_MFG_LOW_MOTION) == BST_CHECKED;
-	m_SetsPP.bUseZipDepth = IsDlgButtonChecked(IDC_USE_ZIPDEPTH) == BST_CHECKED;
+	m_SetsPP.bUseZipDepthSr = IsDlgButtonChecked(IDC_USE_ZIPDEPTH_SR) == BST_CHECKED;
+	m_SetsPP.bUseZipDepthMfg = IsDlgButtonChecked(IDC_USE_ZIPDEPTH_MFG) == BST_CHECKED;
+	m_SetsPP.bAdaptiveMfgDepth = IsDlgButtonChecked(IDC_ADAPTIVE_MFG_DEPTH) == BST_CHECKED;
+	m_SetsPP.bShowMfgMotion = IsDlgButtonChecked(IDC_SHOW_MFG_MOTION) == BST_CHECKED;
 	m_SetsPP.bShowDepthOverlay = IsDlgButtonChecked(IDC_SHOW_DEPTH_OVERLAY) == BST_CHECKED;
 	m_SetsPP.bShowFeatureBadges = IsDlgButtonChecked(IDC_MFG_FEATURE_BADGES) == BST_CHECKED;
     const LRESULT srLimit = ComboBox_GetCurItemData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT);
@@ -795,6 +831,9 @@ HRESULT CVRMainPPage::OnApplyChanges()
 	const LRESULT processing = ComboBox_GetCurItemData(m_hWnd, IDC_MFG_PROCESSING_MODE);
 	if (processing != 0 && processing != 1) return E_INVALIDARG;
 	m_SetsPP.iMfgProcessingMode = static_cast<unsigned>(processing);
+	const LRESULT startup = ComboBox_GetCurItemData(m_hWnd, IDC_EXTENDED_STARTUP);
+	if (startup != 0 && startup != 1) return E_INVALIDARG;
+	m_SetsPP.bWaitForExtendedStartup = startup == 1;
 	m_pVideoRenderer->SetSettings(m_SetsPP);
 	const HRESULT saved = m_pVideoRenderer->SaveSettings();
 	if (FAILED(saved)) return saved;

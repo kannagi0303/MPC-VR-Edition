@@ -16,12 +16,17 @@
 namespace ZipDepthPack {
 inline constexpr wchar_t ModelFile[] = L"zipdepth.dmlpack";
 inline constexpr char GraphFile[] = "Partition_0.bin";
-inline constexpr unsigned Side = 384;
+enum class Shape { Square, Wide };
+constexpr unsigned Width(Shape shape) { return shape == Shape::Wide ? 512 : 384; }
+constexpr unsigned Height(Shape shape) { return shape == Shape::Wide ? 288 : 384; }
+inline constexpr unsigned Pixels = Width(Shape::Square) * Height(Shape::Square);
+static_assert(Pixels == Width(Shape::Wide) * Height(Shape::Wide));
 inline constexpr std::size_t Limit = 256 * 1024 * 1024;
 inline constexpr std::uint32_t MaxEntries = 4096;
 // Align payloads for the serialized DirectML graph's 64-bit fields.
 inline constexpr std::size_t Alignment = 8;
 inline constexpr std::array<std::uint8_t, 8> Magic{'Z', 'D', 'D', 'M', 'L', 0, 1, 0};
+inline constexpr std::array<std::uint8_t, 8> WideMagic{'Z', 'D', 'D', 'M', 'L', 0, 2, 0};
 using Bytes = std::vector<std::uint8_t>;
 using Entries = std::map<std::string, std::span<const std::uint8_t>, std::less<>>;
 
@@ -49,6 +54,16 @@ inline bool ValidName(std::string_view name)
     return true;
 }
 
+inline Shape ReadShape(std::span<const std::uint8_t> data)
+{
+    if (data.size() >= Magic.size()) {
+        const auto header = data.first(Magic.size());
+        if (std::ranges::equal(header, Magic)) return Shape::Square;
+        if (std::ranges::equal(header, WideMagic)) return Shape::Wide;
+    }
+    throw std::runtime_error("Unknown ZipDepth model pack version");
+}
+
 inline Entries Read(std::span<const std::uint8_t> data)
 {
     if (data.size() > Limit) throw std::runtime_error("ZipDepth model pack is too large");
@@ -65,8 +80,7 @@ inline Entries Read(std::span<const std::uint8_t> data)
             std::uint32_t(bytes[2]) << 16 | std::uint32_t(bytes[3]) << 24;
     };
 
-    if (!std::ranges::equal(take(Magic.size()), Magic))
-        throw std::runtime_error("Unknown ZipDepth model pack version");
+    ReadShape(take(Magic.size()));
     const auto count = read32();
     if (!count || count > MaxEntries) throw std::runtime_error("Invalid ZipDepth model pack entry count");
 
@@ -87,7 +101,7 @@ inline Entries Read(std::span<const std::uint8_t> data)
     return entries;
 }
 
-inline void Write(std::ostream& stream, const Entries& entries)
+inline void Write(std::ostream& stream, const Entries& entries, Shape shape = Shape::Square)
 {
     if (entries.empty() || entries.size() > MaxEntries || !entries.contains(GraphFile))
         throw std::runtime_error("Invalid ZipDepth model pack entries");
@@ -106,7 +120,8 @@ inline void Write(std::ostream& stream, const Entries& entries)
         total += bytes.size();
         if (total > Limit) throw std::runtime_error("ZipDepth model pack is too large");
     }
-    stream.write(reinterpret_cast<const char*>(Magic.data()), Magic.size());
+    const auto& header = shape == Shape::Wide ? WideMagic : Magic;
+    stream.write(reinterpret_cast<const char*>(header.data()), header.size());
     write32(static_cast<std::uint32_t>(entries.size()));
     total = Magic.size() + 4;
     for (const auto& [name, bytes] : entries) {

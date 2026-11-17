@@ -391,12 +391,14 @@ struct Settings_t {
 	int reservedDlssSRMotionQuality = {}; // Legacy Settings_t slot.
 	bool reservedDlssSRDepthCues = {}; // Legacy Settings_t slot.
 	int reservedDlssSRDepthMode = {}; // Legacy Settings_t slot.
-	bool reservedMfgPulldown = {}; // Legacy Settings_t slot.
+	bool bWaitForExtendedStartup = false; // Reuses the retired pulldown slot.
 	bool bMfgLowMotion = false;
-	bool bUseZipDepth = false;
+	bool bUseZipDepthSr = false;
 	unsigned char reservedMfgOriginalProtection = {}; // Legacy Settings_t slot.
 	bool bShowDepthOverlay = false;
-	BYTE reservedDepthOverlayOpacity = {}; // Legacy Settings_t slot.
+	bool bUseZipDepthMfg = false; // Reuses the retired one-byte opacity slot.
+	bool bAdaptiveMfgDepth = true;
+	bool bShowMfgMotion = false;
 
 	Settings_t() {
 		SetDefault();
@@ -405,11 +407,15 @@ struct Settings_t {
 	void SetDefault() {
 		iMfgMultiplier = 0;
 		iMfgProcessingMode = 0;
+		bWaitForExtendedStartup = false;
 		bShowFeatureBadges = true;
         iDlssSRSourceLimit = DLSSSR_SOURCE_Disable;
 		bDlssSRTemporalHistory = true;
 		bMfgLowMotion = false;
-		bUseZipDepth = false;
+		bUseZipDepthSr = false;
+		bUseZipDepthMfg = false;
+		bAdaptiveMfgDepth = true;
+		bShowMfgMotion = false;
 		bShowDepthOverlay = false;
 		if (IsWindows8OrGreater()) {
 			bUseD3D11                   = true;

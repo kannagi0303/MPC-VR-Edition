@@ -141,7 +141,7 @@ STDMETHODIMP CVideoRendererInputPin::NewSegment(REFERENCE_TIME startTime, REFERE
 {
 	CAutoLock cReceiveLock(&m_csReceive);
 
-	m_pBaseRenderer->NewSegment(startTime);
+	m_pBaseRenderer->NewSegment(startTime, rate);
 	return CRendererInputPin::NewSegment(startTime, stopTime, rate);
 }
 
@@ -149,6 +149,12 @@ STDMETHODIMP CVideoRendererInputPin::BeginFlush()
 {
 	CAutoLock cReceiveLock(&m_csReceive);
 	return CRendererInputPin::BeginFlush();
+}
+
+STDMETHODIMP CVideoRendererInputPin::EndOfStream()
+{
+	m_pBaseRenderer->DrainLookahead();
+	return CRendererInputPin::EndOfStream();
 }
 
 // IMFGetService

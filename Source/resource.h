@@ -34,7 +34,11 @@
 #define IDC_MFG_FEATURE_BADGES        5012
 #define IDC_DLSS_SR_SOURCE_LIMIT      5013
 #define IDC_MFG_LOW_MOTION                5020
-#define IDC_USE_ZIPDEPTH                  5021
+#define IDC_USE_ZIPDEPTH_MFG              5021
+#define IDC_USE_ZIPDEPTH_SR               5024
+#define IDC_ADAPTIVE_MFG_DEPTH            5025
+#define IDC_SHOW_MFG_MOTION               5026
+#define IDC_EXTENDED_STARTUP              5027
 #define IDC_SHOW_DEPTH_OVERLAY            5023
 #define IDD_SECTION_SOURCE              4002
 #define IDD_SECTION_CHROMA              4003

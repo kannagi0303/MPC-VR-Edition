@@ -51,6 +51,8 @@ $uninstall64 = Join-Path $PSScriptRoot 'Uninstall_MPCVR_64.cmd'
 
 $gplLicense = Join-Path $root '.github\LICENSE.md'
 $readme = Join-Path $PSScriptRoot 'README.dist.md'
+$defaultModel = Join-Path $root 'models\zipdepth_384x384_mixed_fp16\zipdepth.dmlpack'
+$defaultModelHash = '659AF6BE9F3C35E3DAB58E5889DFA7A65C1A217853F9AACB50E6FFFE8D381C88'
 
 $nvidiaLicense = Join-Path $root 'vendor\nvidia\LICENSE.txt'
 $zipSource = Join-Path $root 'runtime\zipdepth'
@@ -59,7 +61,7 @@ $zipSource = Join-Path $root 'runtime\zipdepth'
 
 
 
-foreach ($required in @($ax,$shim,$converter,$install,$uninstall64,$readme,$gplLicense,$nvidiaLicense)) {
+foreach ($required in @($ax,$shim,$converter,$install,$uninstall64,$readme,$gplLicense,$nvidiaLicense,$defaultModel)) {
 
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
 
@@ -69,6 +71,9 @@ foreach ($required in @($ax,$shim,$converter,$install,$uninstall64,$readme,$gplL
 
 }
 
+if ((Get-Sha256Hex -FilePath $defaultModel) -ne $defaultModelHash) {
+    throw 'Default ZipDepth model pack SHA-256 mismatch.'
+}
 
 
 function Get-NvidiaRuntime {
@@ -135,6 +140,7 @@ foreach ($runtime in $runtimes) {
 $dist = Join-Path $root 'dist'
 
 $stage = Join-Path $root ('dist.stage-' + [Guid]::NewGuid().ToString('N'))
+$archive = "$stage.zip"
 
 $old = Join-Path $root ('dist.previous-' + [Guid]::NewGuid().ToString('N'))
 
@@ -173,56 +179,9 @@ try {
 
     Copy-Item -LiteralPath $uninstall64 -Destination (Join-Path $stage 'Uninstall_MPCVR_64.cmd') -ErrorAction Stop
 
-    $modelSource = Join-Path $PSScriptRoot 'models\zipdepth_edgepad_384_mixed.onnx'
-    $modelHash = '4ab14c8b586a16f61ae60776dcfe3ef3612694e44722682df130cc4571b9496a'
-    if ((Get-Sha256Hex -FilePath $modelSource) -ne $modelHash) {
-        throw 'ZipDepth mixed FP16 ONNX model hash mismatch.'
-    }
-    $directml = Join-Path $edition 'DirectML.dll'
-    Copy-Item -LiteralPath (Join-Path $zipSource 'DirectML.dll') -Destination $directml
-
-    $stagedModel = Join-Path $edition 'zipdepth.dmlpack'
-    $modelCache = Join-Path $root '.zipdepth-directml-cache'
-    $null = New-Item -ItemType Directory -Force -Path $modelCache
-    $converterHash = Get-Sha256Hex -FilePath $converter
-    $dmlHash = Get-Sha256Hex -FilePath $directml
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try {
-        $keyBytes = [Text.Encoding]::ASCII.GetBytes("$modelHash|${converterHash}|${dmlHash}")
-        $modelKey = [BitConverter]::ToString($sha.ComputeHash($keyBytes)).Replace('-', '')
-    } finally { $sha.Dispose() }
-    $cachedModel = Join-Path $modelCache ($modelKey + '.dmlpack')
-    $cachedDigest = $cachedModel + '.sha256'
-    if ((Test-Path -LiteralPath $cachedModel -PathType Leaf) -and
-        (Test-Path -LiteralPath $cachedDigest -PathType Leaf) -and
-        ((Get-Sha256Hex -FilePath $cachedModel) -eq [IO.File]::ReadAllText($cachedDigest).Trim())) {
-        Copy-Item -LiteralPath $cachedModel -Destination $stagedModel
-        Write-Host '[INFO] Reused verified default ZipDepth model pack.'
-    } else {
-        Write-Host '[INFO] Converting default ZipDepth model with DirectML...'
-        # The converter resolves DirectML.dll next to its executable. Keep
-        # the build-time copy in staging only for the duration of conversion.
-        $stagedConverter = Join-Path $edition 'zipdepth-convert.exe'
-        try {
-            Copy-Item -LiteralPath $converter -Destination $stagedConverter
-            & $stagedConverter $modelSource $stagedModel
-            if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $stagedModel -PathType Leaf)) {
-                throw 'ZipDepth conversion failed. Default model generation needs a compatible Direct3D 12 GPU.'
-            }
-        } finally {
-            Remove-Item -LiteralPath $stagedConverter -Force
-        }
-        $digest = Get-Sha256Hex -FilePath $stagedModel
-        $cacheTemp = Join-Path $modelCache ([Guid]::NewGuid().ToString('N') + '.dmlpack')
-        try {
-            Copy-Item -LiteralPath $stagedModel -Destination $cacheTemp
-            [IO.File]::WriteAllText($cacheTemp + '.sha256', $digest)
-            Move-Item -LiteralPath $cacheTemp -Destination $cachedModel -Force
-            Move-Item -LiteralPath ($cacheTemp + '.sha256') -Destination $cachedDigest -Force
-        } finally {
-            Remove-Item -LiteralPath @($cacheTemp, ($cacheTemp + '.sha256')) -Force -ErrorAction SilentlyContinue
-        }
-    }
+    Copy-Item -LiteralPath (Join-Path $zipSource 'DirectML.dll') -Destination (Join-Path $edition 'DirectML.dll')
+    Copy-Item -LiteralPath $defaultModel -Destination (Join-Path $edition 'zipdepth.dmlpack')
+    Write-Host '[INFO] Staged the 384x384 mixed FP16 ZipDepth model.'
     Copy-Item -LiteralPath $readme -Destination (Join-Path $stage 'README.md')
     $playbackNotices = [ordered]@{
         'NVIDIA DLSS and NGX SDK' = $nvidiaLicense
@@ -239,9 +198,15 @@ try {
     }
     Write-LicenseDocument -Destination (Join-Path $stage 'LICENSE.md') -ProjectLicense $gplLicense -Notices $playbackNotices
 
+    # Archive only the staged playback files, then publish the ZIP beside them.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::CreateFromDirectory($stage, $archive, [IO.Compression.CompressionLevel]::Optimal, $false)
+    Move-Item -LiteralPath $archive -Destination (Join-Path $stage 'MPC-VR-Edition.zip')
+
     $tools = Join-Path $root 'tools'
     $null = New-Item -ItemType Directory -Force -Path $tools
     $tool = Join-Path $tools 'zipdepth-convert.exe'
+    $converterHash = Get-Sha256Hex -FilePath $converter
     if (!(Test-Path -LiteralPath $tool -PathType Leaf) -or (Get-Sha256Hex -FilePath $tool) -ne $converterHash) {
         $toolStage = $tool + '.tmp-' + [Guid]::NewGuid().ToString('N')
         try {
@@ -266,7 +231,7 @@ try {
 
     Write-Host ('[OK] Clean distribution ready: ' + $dist)
 
-    Write-Host '[INFO] Contents: MPCVRMFG64.ax, x64 install/uninstall, README.md, LICENSE.md and five playback files in edition.'
+    Write-Host ('[OK] Playback ZIP: ' + (Join-Path $dist 'MPC-VR-Edition.zip'))
     Write-Host ('[OK] Optional model converter: ' + $tool)
 
     # One-time cleanup of an obsolete build-support template from earlier ZIPs.
@@ -292,6 +257,8 @@ try {
     }
 
 } finally {
+
+    if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue }
 
     if (-not $published -and $previousMoved -and -not (Test-Path -LiteralPath $dist)) {
 

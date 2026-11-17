@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include "Times.h"
 
 #define SYNC_OFFSET_EX 0
@@ -80,6 +82,7 @@ class CFrameStats : public CFrameTimestamps<REFERENCE_TIME, 301>
 {
 private:
 	REFERENCE_TIME m_startFrameDuration = 400000;
+	unsigned m_backwardsTimestamps = 0;
 
 	inline unsigned GetPrev10Index(unsigned idx) const {
 		if (idx < 10) {
@@ -89,7 +92,42 @@ private:
 		return idx;
 	}
 
+	REFERENCE_TIME GetReorderedFrameDuration() const {
+		std::array<REFERENCE_TIME, 11> recent{};
+		auto index = GetPrev10Index(m_index);
+		for (auto& pts : recent) {
+			pts = m_timestamps[index];
+			index = GetNextIndex(index);
+		}
+		if (std::is_sorted(recent.begin(), recent.end())) return 0;
+		std::sort(recent.begin(), recent.end());
+		std::array<REFERENCE_TIME, 10> gaps{};
+		for (size_t i = 0; i < gaps.size(); ++i) gaps[i] = recent[i + 1] - recent[i];
+		std::sort(gaps.begin(), gaps.end());
+		const auto middle = gaps[gaps.size() / 2];
+		if (middle <= 0) return 0;
+		// An out-of-order delivery can leave holes at either end of the
+		// sample window. Prefer its dominant PTS gap when the cadence agrees.
+		const auto tolerance = (std::max)(REFERENCE_TIME(1), middle / 1000);
+		const auto matching = std::count_if(gaps.begin(), gaps.end(), [=](auto gap) {
+			return gap >= middle - tolerance && gap <= middle + tolerance;
+		});
+		return matching >= 7 ? middle : 0;
+	}
+
 public:
+	void Reset() {
+		CFrameTimestamps::Reset();
+		m_backwardsTimestamps = 0;
+	}
+
+	void Add(REFERENCE_TIME timestamp) {
+		if (m_frames && timestamp < m_timestamps[m_index]) ++m_backwardsTimestamps;
+		CFrameTimestamps::Add(timestamp);
+	}
+
+	unsigned GetBackwardsTimestamps() const { return m_backwardsTimestamps; }
+
 	REFERENCE_TIME GetAverageFrameDuration() const override {
 		REFERENCE_TIME frame_duration;
 		if (m_frames > intervals) {
@@ -104,6 +142,9 @@ public:
 		}
 
 		if (m_frames > 10) {
+			if (m_backwardsTimestamps) {
+				if (const auto reordered = GetReorderedFrameDuration()) return reordered;
+			}
 			REFERENCE_TIME frame_duration10 = (m_timestamps[m_index] - m_timestamps[GetPrev10Index(m_index)]) / 10;
 			if (abs(frame_duration - frame_duration10) > 10000) {
 				frame_duration = frame_duration10;

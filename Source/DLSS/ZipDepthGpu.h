@@ -10,9 +10,9 @@
 class CZipDepthGpu final
 {
 public:
-    static constexpr unsigned Size = 384;
     // Retain estimates while the MFG presenter is behind the source thread.
-    static constexpr unsigned Slots = 8;
+    static constexpr unsigned NormalSlots = 8;
+    static constexpr unsigned Slots = 320;
     struct Timings {
         double packMs = 0;
         double modelMs = 0;
@@ -25,6 +25,7 @@ public:
         unsigned slot = 0;
         double inferenceMs = 0;
         bool valid = false;
+        bool sceneCut = false;
         Timings timings;
     };
 
@@ -34,11 +35,15 @@ public:
     void Stop();
     const wchar_t* Status(bool hasEstimate) const;
     const wchar_t* ModelPrecision() const;
+    bool Loading() const;
     void SetSceneStart(int64_t pts);
     bool CanAccept() const;
+    bool CanStart() const;
+    unsigned Capacity() const;
+    SIZE ModelSize() const;
     ID3D11RenderTargetView* Target() const;
     ID3D11ShaderResourceView* View(unsigned slot) const;
-    bool Submit(ID3D11DeviceContext1* context, Result frame, SIZE picture);
+    bool Submit(ID3D11DeviceContext1* context, Result frame);
     bool Take(Result& result);
 
 private:

@@ -21,7 +21,7 @@ public:
         qpcFrequency_ = GetPreciseTicksPerSecond();
         std::fprintf(file_, "event,qpc,qpc_frequency,source_pts_100ns,stream_time_100ns,serial,phase,"
                             "effective_multiplier,ngx_generated,due_qpc,precomposed,"
-                            "lost_generated_total,result_hresult\n");
+                            "lost_generated_total,result_hresult,duration_qpc,presentation_time_100ns\n");
         std::fflush(file_);
     }
     ~CadenceTrace() { if (file_) std::fclose(file_); }
@@ -31,14 +31,14 @@ public:
     void Record(const char* event, int64_t qpc, int64_t pts, int64_t stream,
                 uint64_t serial, unsigned phase, unsigned effective,
                 unsigned generated, int64_t due, bool prepared,
-                uint64_t lostGenerated, long result) {
+                uint64_t lostGenerated, long result, uint64_t duration = 0, int64_t presentationTime = -1) {
         if (!file_) return;
         std::lock_guard<std::mutex> lock(mutex_);
-        std::fprintf(file_, "%s,%lld,%.0f,%lld,%lld,%llu,%u,%u,%u,%lld,%u,%llu,%ld\n",
+        std::fprintf(file_, "%s,%lld,%.0f,%lld,%lld,%llu,%u,%u,%u,%lld,%u,%llu,%ld,%llu,%lld\n",
                      event, (long long)qpc, qpcFrequency_, (long long)pts, (long long)stream,
                      (unsigned long long)serial, phase, effective, generated,
                      (long long)due, prepared ? 1u : 0u,
-                     (unsigned long long)lostGenerated, result);
+                     (unsigned long long)lostGenerated, result, (unsigned long long)duration, (long long)presentationTime);
         if (++pending_ >= 64) { std::fflush(file_); pending_ = 0; }
     }
 };

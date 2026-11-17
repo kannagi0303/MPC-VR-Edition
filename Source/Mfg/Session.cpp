@@ -19,6 +19,9 @@
 #include <cmath>
 #include <cwchar>
 #include <limits>
+#include <thread>
+#include "Letterbox.h"
+#include "LetterboxTrace.h"
 using Microsoft::WRL::ComPtr;
 #pragma comment(lib,"d3d12.lib")
 #pragma comment(lib,"d3dcompiler.lib")
@@ -100,6 +103,7 @@ struct Session::Impl {
     struct Bank {
         std::shared_ptr<OriginalSnapshot> original;
         Shared real,depth,motion;
+        PictureTexture activePicture;
         std::array<Shared,MaxGenerated> generated;
         std::array<ComPtr<ID3D12Resource>,MaxGenerated> disabled;
         ComPtr<ID3D12Resource> readback;
@@ -108,12 +112,20 @@ struct Session::Impl {
         uint64_t serial=0;
         GpuBankTimeline timeline;
         unsigned generatedCount=0;
+        RECT motionPicture{};
+        bool previewDepth = false;
+        int64_t motionPrevious = -1, motionCurrent = -1;
         bool checked=false,valid=false,multiplierRetry=false;
     };
     std::array<Bank,4> banks;
     unsigned activeBanks=3; // 2/3/4 selectable, 4 supports longer Live Flow group retention.
     ComPtr<ID3D12Resource> zero;
     CDlssOpticalFlow flow;
+    Letterbox letterbox;
+    LetterboxTrace letterboxTrace;
+    PictureTexture priorActivePicture;
+    RECT lastPicture{};
+    bool detectBars = true;
     CZipDepthHistory zipHistory;
     bool zipDepthActive = false;
     UINT w=0,h=0,sourceW=0,sourceH=0,multiplier=0,allocated=0;
@@ -215,8 +227,8 @@ struct Session::Impl {
             break;
         }
     }
-    void Init(ID3D11Device1* d,ID3D11DeviceContext1* c,const D3D11_TEXTURE2D_DESC& desc,bool nativeSharedOriginals) {
-        device11=d;context=c;sourceW=desc.Width;sourceH=desc.Height;
+    void CreateResources(ID3D11Device1* d,const D3D11_TEXTURE2D_DESC& desc,bool nativeSharedOriginals) {
+        device11=d;sourceW=desc.Width;sourceH=desc.Height;
         w=sourceW;h=sourceH;
         const UINT limit=MaxGenerationHeight();
         if(sourceH>limit) {
@@ -232,7 +244,7 @@ struct Session::Impl {
         if(GetEnvironmentVariableW(L"MPCVR_MFG_BANKS",bankSetting,_countof(bankSetting)) &&
            bankSetting[1]==L'\0' && bankSetting[0]>=L'2' && bankSetting[0]<=L'4')
             activeBanks=unsigned(bankSetting[0]-L'0');
-        Check(device11.As(&device5));Check(context.As(&context4));
+        Check(device11.As(&device5));
         ComPtr<IDXGIDevice> dxgi;ComPtr<IDXGIAdapter> adapter;Check(device11.As(&dxgi));Check(dxgi->GetAdapter(&adapter));
         Check(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device12)));
         D3D12_COMMAND_QUEUE_DESC q{};Check(device12->CreateCommandQueue(&q,IID_PPV_ARGS(&queue)));
@@ -296,12 +308,35 @@ struct Session::Impl {
         compile("VS","vs_5_0");Check(d->CreateVertexShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&vs));
         compile("Luma","ps_5_0");Check(d->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&luma));
         compile("Copy","ps_5_0");Check(d->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&copy));
-        compile("Vectors","ps_5_0");Check(d->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&vectors));
-        D3D11_BUFFER_DESC cb{};cb.ByteWidth=32;cb.Usage=D3D11_USAGE_DEFAULT;cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        compile("MfgVectors","ps_5_0");Check(d->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&vectors));
+        D3D11_BUFFER_DESC cb{};cb.ByteWidth=48;cb.Usage=D3D11_USAGE_DEFAULT;cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         Check(d->CreateBuffer(&cb,nullptr,&constants));
-        CDlssOpticalFlow::Options options;options.bidirectional=false;options.cost=false;
-        if(!flow.Init(d,c,w,h,options)) throw std::runtime_error("NVIDIA Optical Flow initialization failed");
+        wchar_t letterboxSetting[8]{};
+        const auto settingLength = GetEnvironmentVariableW(L"MPCVR_MFG_LETTERBOX", letterboxSetting, _countof(letterboxSetting));
+        detectBars = (format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM) &&
+            (settingLength != 1 || letterboxSetting[0] != L'0');
+        Check(letterbox.Init(d, h));
+        letterboxTrace.Init(d);
+        Check(priorActivePicture.Create(d, 1, DXGI_FORMAT_R32G32B32A32_SINT));
+        for (unsigned i = 0; i < activeBanks; ++i)
+            Check(banks[i].activePicture.Create(d, 1, DXGI_FORMAT_R32G32B32A32_SINT));
         allocated=multiplier-1;
+    }
+    void BindContext(ID3D11DeviceContext1* c) {
+        context = c;
+        Check(context.As(&context4));
+        CDlssOpticalFlow::Options options;
+        options.bidirectional = false;
+        options.cost = false;
+        if (!flow.Init(device11.Get(), c, w, h, options))
+            throw std::runtime_error("NVIDIA Optical Flow initialization failed");
+    }
+    void Init(ID3D11Device1* d,ID3D11DeviceContext1* c,const D3D11_TEXTURE2D_DESC& desc,bool nativeSharedOriginals) {
+        CreateResources(d, desc, nativeSharedOriginals);
+        BindContext(c);
+    }
+    bool Matches(ID3D11Device1* device, const D3D11_TEXTURE2D_DESC& desc) const {
+        return device11.Get() == device && sourceW == desc.Width && sourceH == desc.Height && format == desc.Format;
     }
     void Reconfigure(unsigned multiple) {
         const unsigned count=multiple-1;
@@ -326,6 +361,8 @@ struct Session::Impl {
         if (depth && depth->captureSource) depth->source.Update(device11.Get(), context.Get(), bank.original->view.Get(),
             depth->picture, depth->modelSize, timestamp);
         bank.serial=++serial;
+        bank.motionPicture = {};
+        bank.previewDepth = false;
         batch={serial,0,previous,timestamp,bank.original};
         previous=-1;
         zipHistory.Reset();
@@ -333,10 +370,16 @@ struct Session::Impl {
         flow.Reset();
         return true;
     }
-    bool Generate(ID3D11Texture2D* image,int64_t timestamp,Batch& batch,bool inspectMotion,const DepthInput* depth) {
+    RECT WorkPicture(const RECT& picture) const {
+        const auto x = [this](LONG value) { return LONG(std::lround(double(value) * w / sourceW)); };
+        const auto y = [this](LONG value) { return LONG(std::lround(double(value) * h / sourceH)); };
+        return {x(picture.left), y(picture.top), x(picture.right), y(picture.bottom)};
+    }
+    bool Generate(ID3D11Texture2D* image,int64_t timestamp,Batch& batch,bool inspectMotion,const DepthInput* depth,
+        const FrameGeometry* geometry) {
         const bool reset=previous<0||timestamp<=previous||timestamp-previous>2500000;
         zipDepthActive = false;
-        if (reset || !depth) zipHistory.Reset();
+        if (reset || !depth || !depth->applyDepth) zipHistory.Reset();
         if (reset) {
             flow.Reset();
             motionCheck.Reset();
@@ -363,15 +406,30 @@ struct Session::Impl {
         context->VSSetShader(vs.Get(),nullptr,0);context->RSSetState(nullptr);
         context->OMSetBlendState(nullptr,nullptr,0xffffffff);context->OMSetDepthStencilState(nullptr,0);
         D3D11_VIEWPORT viewport{0,0,float(w),float(h),0,1};context->RSSetViewports(1,&viewport);
+        const RECT workBounds{0, 0, LONG(w), LONG(h)};
+        const RECT picture = geometry ? WorkPicture(geometry->picture) : workBounds;
+        RECT visible{};
+        if (!IntersectRect(&visible, &picture, &workBounds)) visible = workBounds;
+        // A clipped presentation rectangle is not evidence of a coded bar.
+        const bool maskBars = detectBars && EqualRect(&picture, &visible);
+        const bool probeBars = maskBars || (letterboxTrace.Enabled() &&
+            (format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM) &&
+            EqualRect(&picture, &visible));
+        const bool resetPicture = reset || !EqualRect(&visible, &lastPicture);
+        lastPicture = visible;
         // SV_Position-based copy must map the *entire* native source into the
         // lower-resolution NGX target, not crop its top-left corner.
-        const UINT copyParams[8]={w,h,sourceW,sourceH,flow.GridSize(),0,0,0};
+        const int copyParams[12]={int(w),int(h),int(sourceW),int(sourceH),int(flow.GridSize()),int(probeBars) | (maskBars ? 2 : 0),0,0,
+            visible.left,visible.top,visible.right,visible.bottom};
         context->UpdateSubresource(constants.Get(),0,nullptr,copyParams,0,0);
         ID3D11Buffer* cb=constants.Get();context->PSSetConstantBuffers(0,1,&cb);
         ID3D11ShaderResourceView* srvs[2]={bank.original->view.Get(),nullptr};context->PSSetShaderResources(0,2,srvs);
         ID3D11RenderTargetView* target=bank.real.rtv.Get();context->OMSetRenderTargets(1,&target,nullptr);
         context->PSSetShader(copy.Get(),nullptr,0);context->Draw(3,0);
-        context->OMSetRenderTargets(0,nullptr,nullptr);srvs[0]=bank.real.srv.Get();context->PSSetShaderResources(0,2,srvs);
+        context->OMSetRenderTargets(0,nullptr,nullptr);
+        auto* active = letterbox.Draw(context.Get(), bank.real.srv.Get(), bank.activePicture, h, probeBars, resetPicture);
+        context->RSSetViewports(1,&viewport);
+        srvs[0]=bank.real.srv.Get();context->PSSetShaderResources(0,2,srvs);
         target=flow.FrameTarget();context->OMSetRenderTargets(1,&target,nullptr);
         context->PSSetShader(luma.Get(),nullptr,0);context->Draw(3,0);
         target=nullptr;context->OMSetRenderTargets(0,nullptr,nullptr);srvs[0]=nullptr;context->PSSetShaderResources(0,2,srvs);
@@ -379,27 +437,37 @@ struct Session::Impl {
         if(flow.LastExecuteFailed()) throw std::runtime_error("NVIDIA Optical Flow execution failed");
         if (inspectMotion && hasFlow) {
             motionCheck.Submit(device11.Get(), context.Get(), flow.ForwardFlow(),
-                flow.OutputWidth(), flow.OutputHeight(), timestamp);
+                flow.OutputWidth(), flow.OutputHeight(), timestamp, active, flow.GridSize());
         }
         const FLOAT flat[4]={.5f,0,0,0},none[4]={0,0,0,0};
         if(hasFlow) {
-            // Same constants as the copy pass; the vector shader reads grid.
             srvs[1]=flow.ForwardFlow();context->PSSetShaderResources(0,2,srvs);
+            context->PSSetShaderResources(6,1,&active);
             target=bank.motion.rtv.Get();context->OMSetRenderTargets(1,&target,nullptr);
             context->PSSetShader(vectors.Get(),nullptr,0);context->Draw(3,0);
+            ID3D11ShaderResourceView* empty = nullptr;
+            context->PSSetShaderResources(6,1,&empty);
         } else context->ClearRenderTargetView(bank.motion.rtv.Get(),none);
         context->OMSetRenderTargets(0,nullptr,nullptr);srvs[1]=nullptr;context->PSSetShaderResources(0,2,srvs);
         if (!hasFlow) zipHistory.Reset();
-        if (depth && hasFlow && !reset) {
-            const auto scaleX = [this](LONG x) { return LONG((int64_t(x) * w + sourceW / 2) / sourceW); };
-            const auto scaleY = [this](LONG y) { return LONG((int64_t(y) * h + sourceH / 2) / sourceH); };
-            const RECT picture{scaleX(depth->picture.left), scaleY(depth->picture.top),
-                scaleX(depth->picture.right), scaleY(depth->picture.bottom)};
+        if (depth && depth->applyDepth && hasFlow && !reset) {
+            const RECT picture = WorkPicture(depth->picture);
+            const CZipDepthHistory::FramePair pair{previous, flow.CurrentFrame(), flow.PreviousFrame(), depth->adaptive};
             zipDepthActive = zipHistory.Draw(device11.Get(), context.Get(), depth->source,
                 bank.depth.d11.Get(), bank.depth.rtv.Get(), bank.motion.srv.Get(), picture,
-                depth->modelSize, timestamp, float(timestamp - previous) / 10000.f, true);
+                depth->modelSize, timestamp, float(timestamp - previous) / 10000.f, true,
+                &pair, active, resetPicture ? nullptr : priorActivePicture.view.Get());
         }
         if (!zipDepthActive) context->ClearRenderTargetView(bank.depth.rtv.Get(), flat);
+        context->CopyResource(priorActivePicture.texture.Get(), bank.activePicture.texture.Get());
+        if (geometry && hasFlow && letterboxTrace.Enabled()) {
+            // The ZipDepth pass uses its own b0 binding and leaves it bound.
+            context->PSSetConstantBuffers(0, 1, &cb);
+            letterboxTrace.Submit(context.Get(), previous, timestamp, serial + 1, bankIndex,
+                geometry->picture, geometry->crop, geometry->present, visible, {LONG(sourceW), LONG(sourceH)},
+                {LONG(w), LONG(h)}, bank.original->view.Get(), flow.ForwardFlow(), bank.motion.srv.Get(),
+                bank.real.srv.Get(), letterbox.Candidate(), active);
+        }
 
         const auto inputReady=++inputValue;
         Check(context4->Signal(inputFence11.Get(),inputReady));context->Flush();
@@ -439,21 +507,113 @@ struct Session::Impl {
         // Only generated surfaces are gated by the completion fence. Originals
         // remain separate snapshots and may be presented independently.
         bank.serial=++serial;
+        bank.motionPicture = hasFlow && !reset && geometry ? picture : RECT{};
+        bank.previewDepth = depth && depth->applyDepth && !IsRectEmpty(&bank.motionPicture);
+        bank.motionPrevious = previous;
+        bank.motionCurrent = timestamp;
         batch={serial,bank.valid ? multiplier-1 : 0,previous,timestamp,bank.original};
         previous=accepted ? timestamp : -1;
         if(!accepted) zipDepthActive=false;
         return true;
     }
 };
+struct Session::WarmupJob {
+    ComPtr<ID3D11Device1> device;
+    D3D11_TEXTURE2D_DESC desc{};
+    std::unique_ptr<Impl> result;
+    std::wstring failure;
+    std::atomic<bool> done{false};
+    // Join before destroying any data the worker can access.
+    std::jthread worker;
+};
+
 Session::Session()=default;Session::~Session(){Reset();}
+bool Session::PollWarmup(ID3D11Device1* device, ID3D11DeviceContext1* context, ID3D11Texture2D* image)
+{
+    if (failed_) return true;
+    D3D11_TEXTURE2D_DESC desc{};
+    image->GetDesc(&desc);
+    if (impl_ && impl_->Matches(device, desc)) return true;
+    if (impl_) Reset();
+    if (warmup_) {
+        if (!warmup_->done.load(std::memory_order_acquire)) return false;
+        auto job = std::move(warmup_);
+        if (job->device.Get() == device && job->desc.Width == desc.Width &&
+            job->desc.Height == desc.Height && job->desc.Format == desc.Format) {
+            try {
+                if (!job->result) {
+                    status_ = std::move(job->failure);
+                    failed_ = true;
+                    return true;
+                }
+                // NVOFA needs the playback immediate context. Bind it on
+                // the render thread after background D3D12 initialization.
+                job->result->BindContext(context);
+                impl_ = std::move(job->result);
+                status_ = L"MFG: resources prepared during playback";
+            } catch (const std::exception& e) {
+                const std::string what = e.what();
+                status_.assign(what.begin(), what.end());
+                failed_ = true;
+            }
+            return true;
+        }
+    }
+    {
+        std::lock_guard guard(Impl::retiredMutex);
+        std::erase_if(Impl::retired, [](const auto& old) { return old->Safe(); });
+        if (!Impl::retired.empty()) return false;
+    }
+    try {
+        auto job = std::make_unique<WarmupJob>();
+        job->device = device;
+        job->desc = desc;
+        job->worker = std::jthread([pending = job.get()] {
+            const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            std::unique_ptr<Impl> next;
+            try {
+                next = std::make_unique<Impl>();
+                next->CreateResources(pending->device.Get(), pending->desc, false);
+                pending->result = std::move(next);
+            } catch (const std::exception& e) {
+                const std::string what = e.what();
+                pending->failure.assign(what.begin(), what.end());
+                if (next && !next->Safe()) {
+                    std::lock_guard guard(Impl::retiredMutex);
+                    Impl::retired.emplace_back(std::move(next));
+                }
+            }
+            next.reset();
+            if (SUCCEEDED(com)) CoUninitialize();
+            pending->done.store(true, std::memory_order_release);
+        });
+        warmup_ = std::move(job);
+        status_ = L"MFG: preparing resources";
+    } catch (const std::exception& e) {
+        const std::string what = e.what();
+        status_.assign(what.begin(), what.end());
+        failed_ = true;
+        return true;
+    }
+    return false;
+}
 bool Session::Warmup(ID3D11Device1* device, ID3D11DeviceContext1* context,
     ID3D11Texture2D* image, unsigned multiplier,
     bool nativeSharedOriginals) {
     if(failed_ || !device || !context || !image || multiplier<2 || multiplier>MaxMultiplier) return false;
     D3D11_TEXTURE2D_DESC desc{};image->GetDesc(&desc);
     // Do not disturb an already initialized/running session during Pause.
-    if(impl_ && impl_->sourceW==desc.Width && impl_->sourceH==desc.Height &&
-       impl_->format==desc.Format) return true;
+    if(impl_ && impl_->Matches(device, desc)) return true;
+    // A changed startup preference may leave background work in flight.
+    // Reuse compatible work in preroll before considering a new session.
+    if (warmup_) {
+        warmup_->worker.join();
+        if (!nativeSharedOriginals && warmup_->device.Get() == device &&
+            warmup_->desc.Width == desc.Width && warmup_->desc.Height == desc.Height &&
+            warmup_->desc.Format == desc.Format)
+            return PollWarmup(device, context, image) && !failed_;
+        warmup_.reset();
+    }
     if(impl_) Reset();
     std::unique_ptr<Impl> next;
     try {
@@ -485,6 +645,11 @@ void Session::ResetHistory() {
         impl_->previous = -1;
         impl_->flow.Reset();
         impl_->motionCheck.Reset();
+        ResetDepthHistory();
+    }
+}
+void Session::ResetDepthHistory() {
+    if (impl_) {
         impl_->zipHistory.Reset();
         impl_->zipDepthActive = false;
     }
@@ -500,10 +665,10 @@ void Session::Reset() {
 }
 bool Session::Generate(ID3D11Device1* device,ID3D11DeviceContext1* context,ID3D11Texture2D* image,
     unsigned multiplier,int64_t timestamp,Batch& batch,
-    bool nativeSharedOriginals, bool inspectMotion, const DepthInput* depth) {
+    bool nativeSharedOriginals, bool inspectMotion, const DepthInput* depth, const FrameGeometry* geometry) {
     if(failed_||!image||multiplier<2||multiplier>MaxMultiplier) return false;
     D3D11_TEXTURE2D_DESC desc{};image->GetDesc(&desc);
-    if(impl_&&(impl_->sourceW!=desc.Width||impl_->sourceH!=desc.Height||impl_->format!=desc.Format)) Reset();
+    if(impl_&&!impl_->Matches(device, desc)) Reset();
     try {
         if(!impl_) {
             {
@@ -523,7 +688,7 @@ bool Session::Generate(ID3D11Device1* device,ID3D11DeviceContext1* context,ID3D1
             timestamp - impl_->previous <= 2'500'000;
         multiplier = impl_->runtime.SelectMultiplier(multiplier, continuous);
         if(impl_->multiplier!=multiplier)impl_->Reconfigure(multiplier);
-        const bool ok=impl_->Generate(image,timestamp,batch,inspectMotion,depth);
+        const bool ok=impl_->Generate(image,timestamp,batch,inspectMotion,depth,geometry);
         status_=L"MFG x"+std::to_wstring(multiplier)+L"; internal "+
             std::to_wstring(impl_->w)+L"x"+std::to_wstring(impl_->h)+
             L" from "+std::to_wstring(impl_->sourceW)+L"x"+std::to_wstring(impl_->sourceH)+
@@ -574,11 +739,11 @@ bool Session::Ready(uint64_t serial,unsigned index) const {
     }
     return false;
 }
-FrameSurface Session::Frame(uint64_t serial,unsigned index) const {
+FrameSurface Session::Frame(uint64_t serial,unsigned index,int64_t current) const {
     if(!impl_)return {};
     for(unsigned i=0;i<impl_->activeBanks;++i) {
         const auto& bank=impl_->banks[i];
-        if(bank.serial!=serial)continue;
+        if(bank.serial!=serial || (current >= 0 && bank.motionCurrent != current))continue;
         // Original frames are obtained from Batch::original instead; never
         // resolve them through a recyclable bank. This branch is defensive.
         if(index==MaxGenerated)return {};
@@ -590,6 +755,27 @@ FrameSurface Session::Frame(uint64_t serial,unsigned index) const {
             if(!impl_->CheckBank(const_cast<Impl::Bank&>(bank))) return {};
             return {bank.generated[index].d11.Get(),bank.generated[index].srv.Get(),false};
         }
+    }
+    return {};
+}
+MotionOverlay Session::OverlayMotion(uint64_t serial, int64_t pts) const {
+    if (!impl_ || !serial) return {};
+    for (unsigned i = 0; i < impl_->activeBanks; ++i) {
+        const auto& bank = impl_->banks[i];
+        if (bank.serial == serial && !IsRectEmpty(&bank.motionPicture) &&
+            pts > bank.motionPrevious && pts <= bank.motionCurrent &&
+            bank.timeline.ProducerReady(impl_->fence->GetCompletedValue()))
+            return {bank.motion.srv.Get(), bank.motionPicture, bank.activePicture.view.Get()};
+    }
+    return {};
+}
+DepthPreview Session::OverlayDepth(uint64_t serial, int64_t pts) const {
+    if (!impl_ || !serial) return {};
+    for (unsigned i = 0; i < impl_->activeBanks; ++i) {
+        const auto& bank = impl_->banks[i];
+        if (bank.previewDepth && bank.serial == serial && pts > bank.motionPrevious && pts <= bank.motionCurrent &&
+            bank.timeline.ProducerReady(impl_->fence->GetCompletedValue()))
+            return {bank.depth.srv.Get(), bank.motionPicture, {LONG(impl_->w), LONG(impl_->h)}};
     }
     return {};
 }

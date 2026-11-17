@@ -48,11 +48,19 @@ Use **Edition Extended** to turn on the features you want.
   Adds frames based on video timing and the display refresh rate.
 - **Processing order**<br>
   Choose whether to upscale or add frames first.
-- **Use ZipDepth**<br>
-  Uses the included model to estimate depth for SR, DLAA, and MFG.<br>
-  Playback uses flat depth while an estimate is unavailable.
+- **ZipDepth for SR / DLAA**<br>
+  Uses the included depth model for DLSS SR and DLAA.
+- **ZipDepth for MFG**<br>
+  Uses the same depth model for frame generation.<br>
+  Each feature uses flat depth while an estimate is unavailable.
+- **Stabilize MFG depth**<br>
+  Compares nearby pixels across two source frames before reusing depth.<br>
+  Turn it off to compare with the original filter.
 - **Show depth overlay**<br>
   Blends the grayscale depth map into the video before DLSS processing.
+- **Show optical flow**<br>
+  Draws MFG motion arrows on the final picture.<br>
+  Arrows point from the current source frame to the previous one.
 
 ## Package Files
 
@@ -65,8 +73,20 @@ Use **Edition Extended** to turn on the features you want.
 | `edition/nvngx_dlssg.dll` | NVIDIA runtime for frame generation |
 | `edition/mpcvrmfg_nvngx.dll` | Edition bridge for frame generation |
 | `edition/DirectML.dll` | DirectML runtime for ZipDepth |
-| `edition/zipdepth.dmlpack` | Default ZipDepth model |
+| `edition/zipdepth.dmlpack` | Default 384×384 mixed FP16 ZipDepth model |
 | [`LICENSE.md`](LICENSE.md) | Project license and third-party notices |
+
+## Change the ZipDepth Model
+
+The renderer reads `edition\zipdepth.dmlpack` when ZipDepth starts.<br>
+It detects 384×384 and 512×288 models from the file.
+
+1. Close the player.
+2. Download a pack from [ZipDepth Models](https://github.com/kannagi0303/MPC-VR-Edition/tree/main/models).
+3. Replace `edition\zipdepth.dmlpack` with the downloaded file.
+4. Open the player again.
+
+To restore the default model, repeat these steps with the 384×384 pack.
 
 ## References
 

@@ -191,6 +191,7 @@ public:
     void SignalTimerFired();
     virtual HRESULT CancelNotification();
     virtual HRESULT ClearPendingSample();
+    virtual void OnReceiveMediaTime(IMediaSample *pMediaSample);
 
     // Called when the filter changes state
 

@@ -8,9 +8,18 @@ namespace {
 
 constexpr char ReduceFlow[] = R"(
 Texture2D<int2> vectors : register(t0);
+Texture2D<int4> active : register(t1);
+cbuffer Params : register(b0) { int grid; };
 RWStructuredBuffer<uint> result : register(u0);
 groupshared uint moving[64];
 groupshared uint localMotion[64];
+groupshared uint covered[64];
+
+bool InContent(uint2 p, int4 bounds)
+{
+    const int2 origin = int2(p) * grid;
+    return all(origin < bounds.zw) && all(origin + grid > bounds.xy);
+}
 
 bool MovesAtLeast(uint2 p, float limit)
 {
@@ -25,27 +34,33 @@ void main(uint3 id : SV_DispatchThreadID, uint index : SV_GroupIndex)
     uint2 size;
     vectors.GetDimensions(size.x, size.y);
     const uint2 p = id.xy;
+    const int4 bounds = active.Load(int3(0, 0, 0));
+    const bool inside = all(p < size) && InContent(p, bounds);
     uint moderate = 0, coherent = 0;
-    if (all(p < size)) {
+    if (inside) {
         moderate = MovesAtLeast(p, 32.0);
         if (MovesAtLeast(p, 128.0)) {
-            coherent = (p.x + 1 < size.x && MovesAtLeast(p + uint2(1, 0), 128.0)) ||
-                       (p.y + 1 < size.y && MovesAtLeast(p + uint2(0, 1), 128.0));
+            const uint2 right = p + uint2(1, 0), below = p + uint2(0, 1);
+            coherent = (right.x < size.x && InContent(right, bounds) && MovesAtLeast(right, 128.0)) ||
+                       (below.y < size.y && InContent(below, bounds) && MovesAtLeast(below, 128.0));
         }
     }
     moving[index] = moderate;
     localMotion[index] = coherent;
+    covered[index] = inside;
     GroupMemoryBarrierWithGroupSync();
     for (uint step = 32; step > 0; step /= 2) {
         if (index < step) {
             moving[index] += moving[index + step];
             localMotion[index] |= localMotion[index + step];
+            covered[index] += covered[index + step];
         }
         GroupMemoryBarrierWithGroupSync();
     }
     if (index == 0) {
         if (moving[0]) InterlockedAdd(result[0], moving[0]);
         if (localMotion[0]) InterlockedOr(result[1], 1);
+        if (covered[0]) InterlockedAdd(result[2], covered[0]);
     }
 }
 )";
@@ -61,13 +76,13 @@ bool FlowMotionCheck::Initialize(ID3D11Device* device)
             nullptr, &reduce_))) return false;
 
     D3D11_BUFFER_DESC desc{};
-    desc.ByteWidth = 2 * sizeof(UINT);
+    desc.ByteWidth = 3 * sizeof(UINT);
     desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
     desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
     desc.StructureByteStride = sizeof(UINT);
     D3D11_UNORDERED_ACCESS_VIEW_DESC view{};
     view.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-    view.Buffer.NumElements = 2;
+    view.Buffer.NumElements = 3;
     if (FAILED(device->CreateBuffer(&desc, nullptr, &result_)) ||
         FAILED(device->CreateUnorderedAccessView(result_.Get(), &view, &resultView_))) return false;
 
@@ -76,7 +91,8 @@ bool FlowMotionCheck::Initialize(ID3D11Device* device)
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     for (auto& sample : samples_)
         if (FAILED(device->CreateBuffer(&desc, nullptr, &sample.staging))) return false;
-    return true;
+    D3D11_BUFFER_DESC params{16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
+    return SUCCEEDED(device->CreateBuffer(&params, nullptr, &params_));
 }
 
 void FlowMotionCheck::Reset()
@@ -85,9 +101,10 @@ void FlowMotionCheck::Reset()
 }
 
 void FlowMotionCheck::Submit(ID3D11Device* device, ID3D11DeviceContext* context,
-                            ID3D11ShaderResourceView* vectors, UINT width, UINT height, int64_t pts)
+                            ID3D11ShaderResourceView* vectors, UINT width, UINT height, int64_t pts,
+                            ID3D11ShaderResourceView* active, UINT grid)
 {
-    if (!vectors || !width || !height || pts < 0) return;
+    if (!vectors || !active || !width || !height || pts < 0) return;
     if (!tried_) {
         tried_ = true;
         if (!Initialize(device)) reduce_.Reset();
@@ -99,17 +116,21 @@ void FlowMotionCheck::Submit(ID3D11Device* device, ID3D11DeviceContext* context,
     const UINT zero[4]{};
     context->ClearUnorderedAccessViewUint(resultView_.Get(), zero);
     auto* uav = resultView_.Get();
+    auto* params = params_.Get();
+    const UINT values[4]{grid};
+    context->UpdateSubresource(params, 0, nullptr, values, 0, 0);
+    context->CSSetConstantBuffers(0, 1, &params);
     context->CSSetShader(reduce_.Get(), nullptr, 0);
-    context->CSSetShaderResources(0, 1, &vectors);
+    ID3D11ShaderResourceView* inputs[]{vectors, active};
+    context->CSSetShaderResources(0, 2, inputs);
     context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
     context->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
-    vectors = nullptr;
+    ID3D11ShaderResourceView* empty[2]{};
     uav = nullptr;
-    context->CSSetShaderResources(0, 1, &vectors);
+    context->CSSetShaderResources(0, 2, empty);
     context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
     context->CSSetShader(nullptr, nullptr, 0);
     context->CopyResource(sample.staging.Get(), result_.Get());
-    sample.cells = uint64_t(width) * height;
     sample.pts = pts;
 }
 
@@ -123,9 +144,10 @@ FlowMotion FlowMotionCheck::Take(ID3D11DeviceContext* context, int64_t pts)
         if (FAILED(context->Map(sample.staging.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &data)))
             return FlowMotion::Unknown;
         const auto* counts = static_cast<const UINT*>(data.pData);
-        const bool active = uint64_t(counts[0]) * 10 >= sample.cells || counts[1] != 0;
+        const auto result = !counts[2] ? FlowMotion::Unknown :
+            (uint64_t(counts[0]) * 10 >= counts[2] || counts[1] != 0 ? FlowMotion::Active : FlowMotion::Quiet);
         context->Unmap(sample.staging.Get(), 0);
-        return active ? FlowMotion::Active : FlowMotion::Quiet;
+        return result;
     }
     return FlowMotion::Unknown;
 }

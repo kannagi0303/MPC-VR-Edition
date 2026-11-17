@@ -33,6 +33,9 @@
     <ClCompile Include="VideoRenderer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DX11VideoProcessorCompletedFrames.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="Helper.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -58,6 +61,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="DLSS\ZipDepthGpu.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DLSS\DecodedFrameLookahead.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="DLSS\ZipDepthNative.cpp">
@@ -189,6 +195,15 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="DLSS\ZipDepthGpuShaders.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\ZipDepthTemporalShaders.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\DecodedFrameLookahead.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\ZipDepthLookahead.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="DLSS\DlssSR.h">

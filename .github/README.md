@@ -63,16 +63,41 @@ can run before or after MFG.<br>
 Upscaling first gives MFG a larger image to work with.<br>
 Running MFG first can let it work at the original video size.
 
+### Startup
+
+- **Play first** (default)<br>
+  Play video while MFG and the ZipDepth model load.<br>
+  Extended features turn on when their setup finishes.
+- **Wait for Extended**<br>
+  Prepare MFG and DLSS SR before playback.<br>
+  MFG starts adding frames once it has a pair of source frames.
+
 ### Depth estimation
 
 When enabled, ZipDepth uses DirectML to estimate depth on the GPU.<br>
 DLSS SR, DLAA, and MFG can share the estimate.<br>
 They use flat depth while an estimate is unavailable.
 
+### Change the ZipDepth Model
+
+- **384×384 mixed FP16**<br>
+  The default pack for general playback. It has a smaller file size.
+- **512×288 FP32**<br>
+  An optional pack for widescreen videos.<br>
+  It uses a 16:9 input and more horizontal pixels.
+
+1. Close the player.
+2. Download your pack from [ZipDepth Models](../models/README.md).
+3. Replace `edition/zipdepth.dmlpack` with the downloaded file.
+4. Open the player again.
+
+Keep the file name `zipdepth.dmlpack`.<br>
+To restore the default, use the 384×384 pack.
+
 ## References
 
 - [NVIDIA DLSS](https://github.com/NVIDIA/DLSS)
-- [ZipDepth model credits and license](../build-support/models/LICENSE-ZipDepth.txt)
+- [ZipDepth model downloads and license](../models/README.md)
 - [Playback guide](../build-support/README.dist.md)
 - [ZipDepth converter guide](../tools/zipdepth-convert.md)
 - [Windows x64 build script](../build-x64.cmd)

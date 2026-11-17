@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include <mfidl.h>
 #include <dxva2api.h>
 #include <thread>
@@ -34,6 +36,8 @@
 #include <FilterInterfacesImpl.h>
 #include <SubRenderIntf.h>
 #include "SubPic/ISubPic.h"
+
+namespace mfg { class AvcPresentationClock; }
 
 const AMOVIESETUP_MEDIATYPE sudPinTypesIn[] = {
 	{&MEDIATYPE_Video, &MEDIASUBTYPE_NV12},
@@ -93,6 +97,7 @@ class __declspec(uuid("71F080AA-8661-4093-B15E-4F6903E77D0A"))
 {
 private:
 	friend class CVideoRendererInputPin;
+	friend class DecodedFrameLookahead;
 	friend class CVideoProcessor;
 	friend class CDX9VideoProcessor;
 	friend class CDX11VideoProcessor;
@@ -183,11 +188,38 @@ private:
 	// The film the source reads, for the logo library: read when the input pin connects,
 	// and never asked of the graph again (CompleteConnect).
 	std::wstring m_strFilm;
+	std::unique_ptr<class DecodedFrameLookahead> m_depthLookahead;
+	bool m_localFile = false;
+	std::unique_ptr<mfg::AvcPresentationClock> m_avcSourceClock;
+	unsigned m_correctedSourcePts = 0;
+	HRESULT ReceiveWithSourceTime(IMediaSample* sample);
+	void ResetSourceTime();
+	double m_completedSegmentRate = 1.0;
+	bool m_schedulingCompletedSample = false;
+	uint64_t m_completedEpoch = 0;
+	std::optional<HRESULT> ReceiveCompletedSample(IMediaSample* sample);
+	std::atomic<bool> m_completedEndOfStream{false};
+	HRESULT EndOfStream() override;
+	bool TryCompleteBufferedEndOfStream();
+	void OnReceiveMediaTime(IMediaSample* sample) override;
+	void ReportCompletedMediaTime(REFERENCE_TIME pts, REFERENCE_TIME end);
+	BOOL ScheduleSample(IMediaSample* sample) override;
+	HRESULT ReceiveScheduled(IMediaSample* sample, uint64_t epoch);
+	HRESULT WaitForRenderTime(uint64_t epoch);
+	bool LookaheadCancelled(uint64_t epoch) const;
+	bool PrefetchZipDepth(IMediaSample* sample, int64_t pts, uint64_t epoch);
+	void DrainLookahead();
+	void ReportLookaheadError(HRESULT hr);
 
 	ISubRenderCallback* m_pSubCallBack = nullptr;
 	ISubRender11Callback* m_pSub11CallBack = nullptr;
 
 	CRect m_windowRect, m_videoRect;
+	std::mutex m_pendingGeometryLock;
+	std::optional<CRect> m_pendingWindowRect, m_pendingVideoRect;
+	std::atomic_bool m_geometryPosted{false};
+	void ApplyPendingGeometry();
+	HRESULT ApplyWindowPosition(const CRect& windowRect);
 
 	bool m_bForceRedrawing = true;
 
@@ -209,7 +241,7 @@ public:
 	CMpcVideoRenderer(LPUNKNOWN pUnk, HRESULT* phr);
 	~CMpcVideoRenderer();
 
-	void NewSegment(REFERENCE_TIME startTime);
+	void NewSegment(REFERENCE_TIME startTime, double rate);
 	long CalcImageSize(CMediaType& mt, bool redefine_mt);
 
 	// CBaseRenderer

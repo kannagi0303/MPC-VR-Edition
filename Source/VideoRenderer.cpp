@@ -19,6 +19,8 @@
  */
 
 #include "stdafx.h"
+#include "DLSS/DecodedFrameLookahead.h"
+#include "DLSS/ZipDepthLookahead.h"
 #include <atomic>
 #include <optional>
 #include <evr.h> // for MR_VIDEO_ACCELERATION_SERVICE, because the <mfapi.h> does not contain it
@@ -27,6 +29,7 @@
 #include "PropPage.h"
 #include "SettingsPage/SettingsPage.h"
 #include "Mfg/SettingsScope.h"
+#include "Mfg/AvcPresentationClock.h"
 #include "VideoRendererInputPin.h"
 #include "Version.h"
 #include "VideoRenderer.h"
@@ -37,6 +40,8 @@
 // The video-window thread owns the label. Streaming threads only post state
 // changes and never block on UI painting while holding renderer locks.
 static const UINT WM_VR_STARTUP_OVERLAY = WM_APP + 0x3A2;
+static const UINT WM_VR_GEOMETRY = WM_APP + 0x3A3;
+static const UINT_PTR VR_GEOMETRY_TIMER = 0x3A3;
 
 // MPCVR-Plus keeps its settings apart from the original renderer's (TakeSettingsOver).
 #define OPT_REGKEY_VIDEORENDERER           L"Software\\MPC-VR-MFG"
@@ -137,6 +142,7 @@ static void ReadSettings(CRegKey& key, Settings_t& sets)
 	if (ERROR_SUCCESS == key.QueryDWORDValue(L"MfgProcessingMode", dw)) {
 		sets.iMfgProcessingMode = dw <= 1 ? dw : 0;
 	}
+	sets.bWaitForExtendedStartup = key.QueryDWORDValue(L"WaitForExtendedStartup", dw) == ERROR_SUCCESS && dw == 1;
 	if (ERROR_SUCCESS == key.QueryDWORDValue(L"ShowFeatureBadges", dw)) {
 		sets.bShowFeatureBadges = dw != 0;
 	}
@@ -361,13 +367,15 @@ static void ReadSettings(CRegKey& key, Settings_t& sets)
 	}
 #endif
 	if (key.QueryDWORDValue(L"UseZipDepth", dw) == ERROR_SUCCESS) {
-		sets.bUseZipDepth = dw != 0;
+		sets.bUseZipDepthSr = sets.bUseZipDepthMfg = dw != 0;
 	} else {
-		// Either previously enabled consumer opts into the shared switch.
-		const bool mfgDepth = key.QueryDWORDValue(L"MfgZipDepth", dw) == ERROR_SUCCESS && dw != 0;
-		const bool srDepth = key.QueryDWORDValue(L"DlssSRDepthMode", dw) == ERROR_SUCCESS && dw == 2;
-		sets.bUseZipDepth = mfgDepth || srDepth;
+		sets.bUseZipDepthMfg = key.QueryDWORDValue(L"MfgZipDepth", dw) == ERROR_SUCCESS && dw != 0;
+		sets.bUseZipDepthSr = key.QueryDWORDValue(L"DlssSRDepthMode", dw) == ERROR_SUCCESS && dw == 2;
 	}
+	if (key.QueryDWORDValue(L"UseZipDepthSr", dw) == ERROR_SUCCESS) sets.bUseZipDepthSr = dw != 0;
+	if (key.QueryDWORDValue(L"UseZipDepthMfg", dw) == ERROR_SUCCESS) sets.bUseZipDepthMfg = dw != 0;
+	if (key.QueryDWORDValue(L"AdaptiveMfgDepth", dw) == ERROR_SUCCESS) sets.bAdaptiveMfgDepth = dw != 0;
+	if (key.QueryDWORDValue(L"ShowMfgMotion", dw) == ERROR_SUCCESS) sets.bShowMfgMotion = dw != 0;
 	if (key.QueryDWORDValue(L"ShowDepthOverlay", dw) == ERROR_SUCCESS) {
 		sets.bShowDepthOverlay = dw != 0;
 	}
@@ -394,8 +402,13 @@ static void WriteSettings(CRegKey& key, const Settings_t& sets)
 {
 	key.SetDWORDValue(L"MfgMultiplier", sets.iMfgMultiplier);
 	key.SetDWORDValue(L"MfgProcessingMode", sets.iMfgProcessingMode);
+	key.SetDWORDValue(L"WaitForExtendedStartup", sets.bWaitForExtendedStartup);
 	key.SetDWORDValue(L"MfgLowMotion", sets.bMfgLowMotion);
-	key.SetDWORDValue(L"UseZipDepth", sets.bUseZipDepth);
+	key.SetDWORDValue(L"UseZipDepth", sets.bUseZipDepthSr || sets.bUseZipDepthMfg);
+	key.SetDWORDValue(L"UseZipDepthSr", sets.bUseZipDepthSr);
+	key.SetDWORDValue(L"UseZipDepthMfg", sets.bUseZipDepthMfg);
+	key.SetDWORDValue(L"AdaptiveMfgDepth", sets.bAdaptiveMfgDepth);
+	key.SetDWORDValue(L"ShowMfgMotion", sets.bShowMfgMotion);
 	key.SetDWORDValue(L"ShowDepthOverlay", sets.bShowDepthOverlay);
 	key.SetDWORDValue(L"ShowFeatureBadges", sets.bShowFeatureBadges);
 	key.SetDWORDValue(OPT_UseD3D11,            sets.bUseD3D11);
@@ -898,6 +911,11 @@ void CMpcVideoRenderer::RemoveToggleKeyHook()
 
 CMpcVideoRenderer::~CMpcVideoRenderer()
 {
+	if (m_depthLookahead) {
+		m_depthLookahead->Cancel();
+		SetEvent(m_ThreadSignal);
+		m_depthLookahead->Shutdown();
+	}
 	DLog(L"CMpcVideoRenderer::~CMpcVideoRenderer()");
 
 	RemoveToggleKeyHook();
@@ -926,11 +944,18 @@ CMpcVideoRenderer::~CMpcVideoRenderer()
 	g_nInstance--; // always decrement g_nInstance in the destructor
 }
 
-void CMpcVideoRenderer::NewSegment(REFERENCE_TIME startTime)
+void CMpcVideoRenderer::NewSegment(REFERENCE_TIME startTime, double rate)
 {
 	DLog(L"CMpcVideoRenderer::NewSegment()");
 
 	m_rtStartTime = startTime;
+	if (m_depthLookahead) m_depthLookahead->Cancel();
+	CAutoLock lock(&m_RendererLock);
+	m_completedSegmentRate = rate;
+	++m_completedEpoch;
+	ResetSourceTime();
+	m_completedEndOfStream = false;
+	if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) dx11->ClearCompletedFrames(false);
 }
 
 HRESULT CMpcVideoRenderer::BeginFlush()
@@ -938,6 +963,11 @@ HRESULT CMpcVideoRenderer::BeginFlush()
 	DLog(L"CMpcVideoRenderer::BeginFlush()");
 
 	m_bFlushing = true;
+	if (m_depthLookahead) m_depthLookahead->Cancel();
+	++m_completedEpoch;
+	ResetSourceTime();
+	m_completedEndOfStream = false;
+	if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) dx11->ClearCompletedFrames(false);
 	return __super::BeginFlush();
 }
 
@@ -1095,6 +1125,9 @@ HRESULT CMpcVideoRenderer::SetMediaType(const CMediaType *pmt)
 HRESULT CMpcVideoRenderer::CompleteConnect(IPin* pReceivePin)
 {
 	m_strFilm.clear();
+	m_localFile = false;
+	m_avcSourceClock.reset();
+	m_correctedSourcePts = 0;
 	CComPtr<IEnumFilters> filters;
 	if (m_pGraph && SUCCEEDED(m_pGraph->EnumFilters(&filters))) {
 		CComPtr<IBaseFilter> filter;
@@ -1105,9 +1138,28 @@ HRESULT CMpcVideoRenderer::CompleteConnect(IPin* pReceivePin)
 				const std::wstring name(path);
 				CoTaskMemFree(path);
 				m_strFilm = name.substr(name.find_last_of(L"\\/") + 1);
+				const auto attributes = GetFileAttributesW(name.c_str());
+				m_localFile = name.size() >= 3 && name[1] == L':' && GetDriveTypeW(name.substr(0, 3).c_str()) == DRIVE_FIXED &&
+					attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+				if (m_localFile) {
+					try {
+						auto timing = std::make_unique<mfg::AvcPresentationClock>();
+						timing->Load(name.c_str());
+						if (timing->Available()) m_avcSourceClock = std::move(timing);
+					} catch (const std::bad_alloc&) {
+						DLog(L"AVC presentation timing inspection unavailable");
+					}
+				}
 				break;
 			}
 			filter.Release();
+		}
+	}
+	if (m_localFile && !m_depthLookahead && zipdepth::LookaheadMs()) {
+		try {
+			m_depthLookahead = std::make_unique<DecodedFrameLookahead>(*this, zipdepth::LookaheadMs());
+		} catch (...) {
+			DLog(L"ZipDepth lookahead worker unavailable");
 		}
 	}
 	return __super::CompleteConnect(pReceivePin);
@@ -1224,6 +1276,11 @@ void CMpcVideoRenderer::NoteWhoKeepsTime()
 // sitting in WaitForRenderTime.
 HRESULT CMpcVideoRenderer::WaitForRenderTime()
 {
+	return WaitForRenderTime(0);
+}
+
+HRESULT CMpcVideoRenderer::WaitForRenderTime(uint64_t epoch)
+{
 	HANDLE objects[2] = { m_ThreadSignal, m_RenderEvent };
 	const ULONGLONG waitStart = GetTickCount64();
 	bool bSaidSo = false;
@@ -1247,6 +1304,7 @@ HRESULT CMpcVideoRenderer::WaitForRenderTime()
 	}
 
 	for (;;) {
+		if (LookaheadCancelled(epoch)) return Leave(VFW_E_STATE_CHANGED);
 		DWORD quantum = 500;
 		if (m_bClockStalled) {
 			const ULONGLONG now = GetTickCount64();
@@ -1343,9 +1401,205 @@ HRESULT CMpcVideoRenderer::WaitForRenderTime()
 
 HRESULT CMpcVideoRenderer::Receive(IMediaSample* pSample)
 {
+	if (!m_depthLookahead) {
+		return ReceiveWithSourceTime(pSample);
+	}
+	if (!m_depthLookahead || !m_localFile || m_bFlushing) return ReceiveScheduled(pSample, 0);
+	const auto epoch = m_depthLookahead->Epoch();
+	CComPtr<IMediaSample> detached;
+	int64_t pts = -1;
+	uint64_t bytes = 0;
+	{
+		CAutoLock lock(&m_RendererLock);
+		if (m_filterState == State_Running && !m_bFlushing) {
+			if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get()))
+				detached = dx11->CloneLookaheadSample(pSample, pts, bytes);
+		}
+	}
+	if (detached) {
+		try {
+			m_depthLookahead->Push(detached, pts, bytes, epoch);
+			return S_OK;
+		} catch (const std::bad_alloc&) {
+			detached.Release();
+		}
+	}
+	DrainLookahead();
+	if (LookaheadCancelled(epoch)) return S_OK;
+	{
+		CAutoLock lock(&m_RendererLock);
+		if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get()))
+			dx11->StopZipDepthLookahead();
+	}
+	return ReceiveScheduled(pSample, 0);
+}
+
+void CMpcVideoRenderer::ResetSourceTime()
+{
+	if (m_avcSourceClock) m_avcSourceClock->Reset();
+	m_correctedSourcePts = 0;
+}
+
+HRESULT CMpcVideoRenderer::ReceiveWithSourceTime(IMediaSample* sample)
+{
+	struct RestoreTime {
+		IMediaSample* sample;
+		REFERENCE_TIME start = 0, end = 0;
+		bool changed = false;
+		~RestoreTime() { if (changed) sample->SetTime(&start, &end); }
+	} original{sample};
+	if (m_avcSourceClock) {
+		CAutoLock lock(&m_RendererLock);
+		const auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get());
+		if (!m_bFlushing && m_filterState != State_Stopped && m_completedSegmentRate == 1.0 &&
+			m_Sets.iMfgMultiplier && dx11 && !dx11->m_bInterlaced && m_inputMT.subtype == MEDIASUBTYPE_NV12 &&
+			sample->IsPreroll() != S_OK && sample->GetTime(&original.start, &original.end) == S_OK) {
+			AM_MEDIA_TYPE* changed = nullptr;
+			const bool changesFormat = sample->GetMediaType(&changed) == S_OK;
+			if (changed) DeleteMediaType(changed);
+			if (changesFormat) {
+				ResetSourceTime();
+			} else if (auto time = m_avcSourceClock->Next(original.start, original.end, sample->IsDiscontinuity() == S_OK);
+				time && (time->first != original.start || time->second != original.end)) {
+				original.changed = SUCCEEDED(sample->SetTime(&time->first, &time->second));
+				if (original.changed) {
+					if (time->first != original.start) ++m_correctedSourcePts;
+				} else {
+					ResetSourceTime();
+				}
+			}
+		} else if (!m_Sets.iMfgMultiplier) {
+			ResetSourceTime();
+		}
+	}
+	if (const auto hr = ReceiveCompletedSample(sample)) return *hr;
+	return ReceiveScheduled(sample, 0);
+}
+
+BOOL CMpcVideoRenderer::ScheduleSample(IMediaSample* sample)
+{
+	if (!m_schedulingCompletedSample) return CBaseVideoRenderer2::ScheduleSample(sample);
+	REFERENCE_TIME start, stop;
+	if (sample->GetTime(&start, &stop) == S_OK) m_FrameStats.Add(start);
+	return TRUE;
+}
+
+std::optional<HRESULT> CMpcVideoRenderer::ReceiveCompletedSample(IMediaSample* sample)
+{
+	if (!m_localFile) return {};
+	REFERENCE_TIME pts = 0, end = 0;
+	AM_MEDIA_TYPE* changed = nullptr;
+	const bool changesFormat = sample->GetMediaType(&changed) == S_OK;
+	if (changed) DeleteMediaType(changed);
+	const bool valid = !changesFormat && sample->IsPreroll() != S_OK &&
+		sample->GetTime(&pts, &end) == S_OK && pts >= 0 && end > pts;
+	const bool discontinuity = sample->IsDiscontinuity() == S_OK;
+	std::optional<uint64_t> epoch;
+	for (;;) {
+		{
+			CAutoLock state(&m_InterfaceLock);
+			CAutoLock render(&m_RendererLock);
+			if (!epoch) epoch = m_completedEpoch;
+			if (m_bFlushing || m_State == State_Stopped || *epoch != m_completedEpoch) return S_OK;
+			auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get());
+			if (!dx11) return {};
+			if (dx11->m_completedPresenter.Failed()) dx11->ClearCompletedFrames(true);
+			const bool pending = dx11->CompletedFramesPending() && !dx11->m_completedPresenter.Failed();
+			if (m_State != State_Running || !m_bStreaming) {
+				if (!pending) return {};
+			} else if (!valid || m_completedSegmentRate != 1.0 || !dx11->CanBufferCompletedSample()) {
+				if (!pending) return {};
+			} else if ((!discontinuity || !pending) && !dx11->LegacyFramesPending() &&
+			           dx11->CanProduceCompletedFrame(pts)) {
+				if (dx11->PrepareCompletedTarget()) {
+					m_schedulingCompletedSample = true;
+					const auto prepared = PrepareReceive(sample);
+					m_schedulingCompletedSample = false;
+					if (FAILED(prepared)) {
+						dx11->m_completedTarget.reset();
+						return prepared == VFW_E_SAMPLE_REJECTED ? S_OK : prepared;
+					}
+					m_bInReceive = FALSE;
+					const auto hr = dx11->RenderCompletedSample(sample);
+					ClearPendingSample();
+					CancelNotification();
+					return hr;
+				}
+				if (!pending) return {};
+			}
+		}
+		// Capacity and timeline waits must allow the presenter and BeginFlush through.
+		Sleep(2);
+	}
+}
+
+HRESULT CMpcVideoRenderer::EndOfStream()
+{
+	auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get());
+	if (dx11 && dx11->CompletedFramesPending() && !dx11->m_completedPresenter.Failed()) {
+		m_completedEndOfStream = true;
+		dx11->m_completedPresenter.Wake();
+		return S_OK;
+	}
+	return __super::EndOfStream();
+}
+
+bool CMpcVideoRenderer::TryCompleteBufferedEndOfStream()
+{
+	if (!m_completedEndOfStream || !m_InterfaceLock.TryLock()) return false;
+	struct Unlock { CCritSec& lock; ~Unlock() { lock.Unlock(); } } state{m_InterfaceLock};
+	if (!m_RendererLock.TryLock()) return false;
+	Unlock render{m_RendererLock};
+	auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get());
+	if (!m_completedEndOfStream || m_bFlushing || m_State != State_Running ||
+	    (dx11 && dx11->CompletedFramesPending())) return false;
+	m_completedEndOfStream = false;
+	__super::EndOfStream();
+	return true;
+}
+
+void CMpcVideoRenderer::OnReceiveMediaTime(IMediaSample* sample)
+{
+	if (!m_schedulingCompletedSample) __super::OnReceiveMediaTime(sample);
+}
+
+void CMpcVideoRenderer::ReportCompletedMediaTime(REFERENCE_TIME pts, REFERENCE_TIME end)
+{
+	if (m_pPosition) m_pPosition->RegisterMediaTime(pts, end);
+}
+
+bool CMpcVideoRenderer::LookaheadCancelled(uint64_t epoch) const
+{
+	return epoch && m_depthLookahead->Epoch() != epoch;
+}
+
+bool CMpcVideoRenderer::PrefetchZipDepth(IMediaSample* sample, int64_t pts, uint64_t epoch)
+{
+	CAutoLock lock(&m_RendererLock);
+	if (LookaheadCancelled(epoch) || m_bFlushing || m_filterState == State_Stopped) return true;
+	if (m_filterState == State_Paused) return false;
+	auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get());
+	return !dx11 || dx11->PrefetchZipDepth(sample, pts);
+}
+
+void CMpcVideoRenderer::DrainLookahead()
+{
+	if (m_depthLookahead) m_depthLookahead->Drain();
+}
+
+void CMpcVideoRenderer::ReportLookaheadError(HRESULT hr)
+{
+	CAutoLock lock(&m_InterfaceLock);
+	if (m_bFlushing || m_filterState == State_Stopped) return;
+	m_depthLookahead->Cancel();
+	NotifyEvent(EC_ERRORABORT, hr, 0);
+}
+
+HRESULT CMpcVideoRenderer::ReceiveScheduled(IMediaSample* pSample, uint64_t epoch)
+{
 	// override CBaseRenderer::Receive() for the implementation of the search during the pause
 
-	if (m_bFlushing) {
+	if (m_bFlushing || LookaheadCancelled(epoch)) {
 		DLog(L"CMpcVideoRenderer::Receive() - flushing, skip sample");
 		return S_OK;
 	}
@@ -1388,9 +1642,17 @@ HRESULT CMpcVideoRenderer::Receive(IMediaSample* pSample)
 	// awoken by the clock firing or by a state change. The rendering call
 	// will lock the critical section and check we can still render the data
 
-	hr = WaitForRenderTime();
+	hr = WaitForRenderTime(epoch);
 	if (FAILED(hr)) {
 		m_bInReceive = FALSE;
+		if (LookaheadCancelled(epoch)) {
+			CAutoLock cVideoLock(&m_InterfaceLock);
+			CAutoLock cRendererLock(&m_RendererLock);
+			if (m_pMediaSample == pSample) {
+				ClearPendingSample();
+				CancelNotification();
+			}
+		}
 		return NOERROR;
 	}
 
@@ -1412,7 +1674,7 @@ HRESULT CMpcVideoRenderer::Receive(IMediaSample* pSample)
 
 	// Deal with this sample
 
-	if (m_State == State_Running) {
+	if (m_State == State_Running && !LookaheadCancelled(epoch)) {
 		Render(m_pMediaSample);
 	}
 
@@ -1533,7 +1795,12 @@ STDMETHODIMP CMpcVideoRenderer::Run(REFERENCE_TIME rtStart)
 	m_bClockStalled = false;
 	NoteWhoKeepsTime();
 
-	return CBaseVideoRenderer2::Run(rtStart);
+	const auto hr = CBaseVideoRenderer2::Run(rtStart);
+	if (SUCCEEDED(hr)) {
+		CAutoLock lock(&m_RendererLock);
+		if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) dx11->m_completedPresenter.Wake();
+	}
+	return hr;
 }
 
 STDMETHODIMP CMpcVideoRenderer::Pause()
@@ -1563,6 +1830,7 @@ STDMETHODIMP CMpcVideoRenderer::Stop()
 	DLog(L"CMpcVideoRenderer::Stop()");
 
 	m_filterState = State_Stopped;
+	if (m_depthLookahead) m_depthLookahead->Cancel();
 	m_bValidBuffer = false;
 	m_bStartupOverlayPending.store(false, std::memory_order_release);
 	// Stopped is not initialization; don't keep (or resurrect) the label.
@@ -1570,6 +1838,9 @@ STDMETHODIMP CMpcVideoRenderer::Stop()
 
 	{
 		CAutoLock cRendererLock(&m_RendererLock);
+		++m_completedEpoch;
+		ResetSourceTime();
+		m_completedEndOfStream = false;
 		m_VideoProcessor->Flush();
 	}
 
@@ -1736,18 +2007,11 @@ STDMETHODIMP CMpcVideoRenderer::SetDestinationPosition(long Left, long Top, long
 		return S_OK;
 	}
 
-	if (videoRect != m_videoRect) {
-		m_videoRect = videoRect;
-
-		CAutoLock cRendererLock(&m_RendererLock);
-
-		m_VideoProcessor->SetVideoRect(videoRect);
+	{
+		std::lock_guard lock(m_pendingGeometryLock);
+		m_pendingVideoRect = videoRect;
 	}
-
-	if (m_bForceRedrawing) {
-		Redraw();
-	}
-
+	ApplyPendingGeometry();
 	return S_OK;
 }
 
@@ -2029,13 +2293,55 @@ STDMETHODIMP CMpcVideoRenderer::get_MessageDrain(OAHWND* Drain)
 STDMETHODIMP CMpcVideoRenderer::SetWindowPosition(long Left, long Top, long Width, long Height)
 {
 	const CRect windowRect(Left, Top, Left + Width, Top + Height);
+	{
+		std::lock_guard lock(m_pendingGeometryLock);
+		m_pendingWindowRect = windowRect;
+	}
+	ApplyPendingGeometry();
+	return S_OK;
+}
+
+void CMpcVideoRenderer::ApplyPendingGeometry()
+{
+	const HWND window = m_hWndWindow;
+	if (window && !m_RendererLock.TryLock()) {
+		// DXGI may be waiting for this window to process a synchronous message.
+		// Coalesce geometry changes and give the message pump back to the player.
+		if (!m_geometryPosted.exchange(true) && !PostMessageW(window, WM_VR_GEOMETRY, 0, 0)) {
+			m_geometryPosted = false;
+		}
+		return;
+	}
+	if (!window) m_RendererLock.Lock();
+	struct Unlock { CCritSec& lock; ~Unlock() { lock.Unlock(); } } render{m_RendererLock};
+	std::optional<CRect> windowRect, videoRect;
+	{
+		std::lock_guard lock(m_pendingGeometryLock);
+		windowRect.swap(m_pendingWindowRect);
+		videoRect.swap(m_pendingVideoRect);
+	}
+	if (windowRect) ApplyWindowPosition(*windowRect);
+	if (videoRect && *videoRect != m_videoRect) {
+		m_videoRect = *videoRect;
+		m_VideoProcessor->SetVideoRect(*videoRect);
+	}
+	auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get());
+	const bool presenting = dx11 && m_filterState == State_Running &&
+		(dx11->CompletedFramesPending() || dx11->m_completedLast);
+	if ((windowRect || videoRect) && m_bForceRedrawing && !presenting) Redraw();
+}
+
+HRESULT CMpcVideoRenderer::ApplyWindowPosition(const CRect& windowRect)
+{
 	if (windowRect == m_windowRect) {
 		return S_OK;
 	}
 
 	m_windowRect = windowRect;
-
-	CAutoLock cRendererLock(&m_RendererLock);
+	const auto Left = windowRect.left;
+	const auto Top = windowRect.top;
+	const auto Width = windowRect.Width();
+	const auto Height = windowRect.Height();
 
 	std::optional<bool> bFullScreenOpt;
 
@@ -2075,7 +2381,8 @@ STDMETHODIMP CMpcVideoRenderer::SetWindowPosition(long Left, long Top, long Widt
 	}
 
 	if (m_hWndWindow && !m_bExclusiveScreen) {
-		SetWindowPos(m_hWndWindow, nullptr, Left, Top, Width, Height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
+		SetWindowPos(m_hWndWindow, nullptr, Left, Top, Width, Height,
+			SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_ASYNCWINDOWPOS);
 		if (Left < 0) {
 			m_windowRect.OffsetRect(-Left, 0);
 		}
@@ -2093,10 +2400,6 @@ STDMETHODIMP CMpcVideoRenderer::SetWindowPosition(long Left, long Top, long Widt
 		DLog(L"CMpcVideoRenderer::SetWindowPosition() : Switch {} FullScreen", m_bFullScreen ? L"to" : L"from");
 
 		m_VideoProcessor->SwitchFullScreen(m_bFullScreen);
-	}
-
-	if (m_bForceRedrawing) {
-		Redraw();
 	}
 
 	return S_OK;
@@ -2137,6 +2440,7 @@ STDMETHODIMP CMpcVideoRenderer::GetVideoProcessorInfo(std::wstring& str)
 	const auto hr=m_VideoProcessor->GetVPInfo(str);
 	str += std::format(L"\nRenderer requested MFG: {}", m_Sets.iMfgMultiplier >= 2 ? L"Auto" : L"Off");
 	str += L"\n" + m_VideoProcessor->GetMfgStatus();
+	if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) str += dx11->CompletedBufferInfo();
 	return hr;
 }
 
@@ -2208,12 +2512,17 @@ STDMETHODIMP CMpcVideoRenderer::SaveSettings()
 	if (read != ERROR_SUCCESS) return HRESULT_FROM_WIN32(read);
 	DWORD savedMode = 0;
 	if (key.QueryDWORDValue(L"MfgProcessingMode", savedMode) != ERROR_SUCCESS) return E_FAIL;
-	DWORD savedZipDepth = 0;
-	if (key.QueryDWORDValue(L"UseZipDepth", savedZipDepth) != ERROR_SUCCESS) return E_FAIL;
+	DWORD savedStartup = 0;
+	if (key.QueryDWORDValue(L"WaitForExtendedStartup", savedStartup) != ERROR_SUCCESS) return E_FAIL;
+	DWORD savedZipDepthSr = 0, savedZipDepthMfg = 0;
+	if (key.QueryDWORDValue(L"UseZipDepthSr", savedZipDepthSr) != ERROR_SUCCESS ||
+		key.QueryDWORDValue(L"UseZipDepthMfg", savedZipDepthMfg) != ERROR_SUCCESS) return E_FAIL;
 	DWORD savedDepthOverlay = 0;
 	if (key.QueryDWORDValue(L"ShowDepthOverlay", savedDepthOverlay) != ERROR_SUCCESS) return E_FAIL;
 	return saved == snapshot.iMfgMultiplier && savedMode == snapshot.iMfgProcessingMode &&
-		savedZipDepth == static_cast<DWORD>(snapshot.bUseZipDepth) &&
+		savedStartup == static_cast<DWORD>(snapshot.bWaitForExtendedStartup) &&
+		savedZipDepthSr == static_cast<DWORD>(snapshot.bUseZipDepthSr) &&
+		savedZipDepthMfg == static_cast<DWORD>(snapshot.bUseZipDepthMfg) &&
 		savedDepthOverlay == static_cast<DWORD>(snapshot.bShowDepthOverlay) ? S_OK : E_FAIL;
 }
 
@@ -2856,7 +3165,7 @@ const wchar_t* CMpcVideoRenderer::FeatureStatusText(bool dlssSR, bool vsr, bool 
 
 void CMpcVideoRenderer::BeginStartupOverlay()
 {
-	if (!m_Sets.bShowFeatureBadges || m_VideoProcessor->Type() != VP_DX11) return;
+	if (!m_Sets.bWaitForExtendedStartup || !m_Sets.bShowFeatureBadges || m_VideoProcessor->Type() != VP_DX11) return;
 	const bool dlssSR = m_Sets.bDlssSR;
 	const bool vsr = m_Sets.iVPSuperRes > SUPERRES_Disable &&
 		m_Sets.iVPSuperRes != SUPERRES_DLSS_SR;
@@ -2886,6 +3195,16 @@ void CMpcVideoRenderer::ResizeStartupOverlay(HWND hwnd)
 
 LRESULT CMpcVideoRenderer::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+	if (uMsg == WM_VR_GEOMETRY) {
+		if (!SetTimer(hwnd, VR_GEOMETRY_TIMER, 15, nullptr)) m_geometryPosted = false;
+		return 0;
+	}
+	if (uMsg == WM_TIMER && wParam == VR_GEOMETRY_TIMER) {
+		KillTimer(hwnd, VR_GEOMETRY_TIMER);
+		m_geometryPosted = false;
+		ApplyPendingGeometry();
+		return 0;
+	}
 	if (uMsg == WM_CREATE) {
 		// The label is a native child window, not a video/MFG OSD. It can
 		// paint on the black area before the first GPU frame exists.
@@ -2904,14 +3223,17 @@ LRESULT CMpcVideoRenderer::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam,
 		}
 		return 0;
 	}
-	if (uMsg == WM_SIZE) {
+	if (uMsg == WM_SIZE && m_bStartupOverlayPending.load(std::memory_order_acquire)) {
 		ResizeStartupOverlay(hwnd);
 	}
 	if (uMsg == WM_VR_STARTUP_OVERLAY) {
 		if (m_hStartupOverlay && GetParent(m_hStartupOverlay) == hwnd) {
 			// Use the current state, not a potentially stale queued command.
 			const bool show = m_bStartupOverlayPending.load(std::memory_order_acquire);
-			if (show) SetWindowTextW(m_hStartupOverlay, m_startupFeatureText.load(std::memory_order_relaxed));
+			if (show) {
+				ResizeStartupOverlay(hwnd);
+				SetWindowTextW(m_hStartupOverlay, m_startupFeatureText.load(std::memory_order_relaxed));
+			}
 			ShowWindow(m_hStartupOverlay, show ? SW_SHOWNOACTIVATE : SW_HIDE);
 			if (show) SetWindowPos(m_hStartupOverlay, HWND_TOP, 0, 0, 0, 0,
 				SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -2925,6 +3247,7 @@ LRESULT CMpcVideoRenderer::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam,
 		return reinterpret_cast<LRESULT>(GetStockObject(BLACK_BRUSH));
 	}
 	if (uMsg == WM_DESTROY && hwnd == m_hWndWindow) {
+		m_geometryPosted = false;
 		// Windows destroys children automatically. No cross-thread wait or
 		// extra DestroyWindow call is needed during player shutdown.
 		m_hStartupOverlay = nullptr;

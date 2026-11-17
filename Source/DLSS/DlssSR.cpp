@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "stdafx.h"
+#include "Times.h"
+#include "Mfg/CadenceTrace.h"
 #include "DlssSR.h"
 #include "DlssOpticalFlow.h"
 #include "ZipDepth.h"
@@ -9,6 +11,12 @@
 #include "Helper.h"
 #include "DX11Helper.h"
 #include <d3dcompiler.h>
+#include <d3d11_4.h>
+#include <dxgi1_2.h>
+#include <atomic>
+#include <thread>
+#include <exception>
+#include <mutex>
 #include <array>
 #include <filesystem>
 #include <cwchar>
@@ -29,14 +37,18 @@ public:
 	ContextStateScope(ID3D11DeviceContext1* context, ID3DDeviceContextState* state)
 		: m_context(context)
 	{
-		m_context->SwapDeviceContextState(state, &m_previous);
+		if (m_context) m_context->SwapDeviceContextState(state, &m_previous);
 	}
 
 	~ContextStateScope()
 	{
-		m_context->SwapDeviceContextState(m_previous, nullptr);
+		if (m_context) m_context->SwapDeviceContextState(m_previous, nullptr);
 	}
 };
+
+// Serialize D3D11 NGX calls across SR instances. Play first evaluates only
+// when the lock is available.
+std::mutex NgxD3D11Lock;
 
 constexpr auto kProjectId = "a34c75e7-d396-4b6e-b429-c424fd42e453";
 
@@ -69,11 +81,23 @@ float4 Main(float4 pos : SV_POSITION) : SV_TARGET {
 
 struct CDlssSR::Session
 {
+	// NGX uses a private immediate context in Play first mode. Video conversion,
+	// optical flow and ZipDepth keep using the renderer's original context.
+	CComPtr<ID3D11Device1> ngxDevice;
+	CComPtr<ID3D11DeviceContext> ngxContext;
+	CComPtr<ID3D11DeviceContext4> renderSync, ngxSync;
+	CComPtr<ID3D11Fence> renderFence, ngxFence;
+	CComPtr<ID3D11Texture2D> ngxInput, ngxOutput, ngxDepth, ngxMotion;
+	UINT64 fenceValue = 0;
+	bool background = false;
+	bool flowBound = false;
+	bool validationShadersPrepared = false;
 	CComPtr<ID3D11Device1> device;
 	CComPtr<ID3D11DeviceContext1> context;
 	CComPtr<ID3DDeviceContextState> state;
 	CComPtr<ID3D11VertexShader> vertex;
 	CComPtr<ID3D11PixelShader> luma, vectors, validatedVectors, costValidatedVectors;
+	CComPtr<ID3D11PixelShader> refinedVectors, refinedCostVectors;
     CZipDepthHistory zipHistory;
     bool zipDepthActive = false;
     bool depthIsFlat = true;
@@ -307,13 +331,13 @@ struct CDlssSR::Session
 			sample.start.Release();
 			sample.end.Release();
 			D3D11_QUERY_DESC desc{D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
-			if (FAILED(device->CreateQuery(&desc, &sample.disjoint))) {
+			if (FAILED(ngxDevice->CreateQuery(&desc, &sample.disjoint))) {
 				gpuTimingAvailable = false;
 				break;
 			}
 			desc.Query = D3D11_QUERY_TIMESTAMP;
-			if (FAILED(device->CreateQuery(&desc, &sample.start)) ||
-				FAILED(device->CreateQuery(&desc, &sample.end))) {
+			if (FAILED(ngxDevice->CreateQuery(&desc, &sample.start)) ||
+				FAILED(ngxDevice->CreateQuery(&desc, &sample.end))) {
 				gpuTimingAvailable = false;
 				break;
 			}
@@ -334,12 +358,12 @@ struct CDlssSR::Session
 		for (auto& sample : gpuSamples) {
 			if (!sample.pending) continue;
 			D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
-			const HRESULT ready = context->GetData(sample.disjoint, &disjoint, sizeof(disjoint), flags);
+			const HRESULT ready = ngxContext->GetData(sample.disjoint, &disjoint, sizeof(disjoint), flags);
 			if (ready == S_FALSE) continue;
 			if (FAILED(ready)) { sample.pending = false; continue; }
 			UINT64 begin = 0, end = 0;
-			const HRESULT first = context->GetData(sample.start, &begin, sizeof(begin), flags);
-			const HRESULT last = context->GetData(sample.end, &end, sizeof(end), flags);
+			const HRESULT first = ngxContext->GetData(sample.start, &begin, sizeof(begin), flags);
+			const HRESULT last = ngxContext->GetData(sample.end, &end, sizeof(end), flags);
 			if (first == S_FALSE || last == S_FALSE) continue;
 			sample.pending = false;
 			if (SUCCEEDED(first) && SUCCEEDED(last) && !disjoint.Disjoint &&
@@ -357,8 +381,8 @@ struct CDlssSR::Session
 		if (lastGpuSampleMs && now - lastGpuSampleMs < 250) return nullptr;
 		for (auto& sample : gpuSamples) {
 			if (sample.pending) continue;
-			context->Begin(sample.disjoint);
-			context->End(sample.start);
+			ngxContext->Begin(sample.disjoint);
+			ngxContext->End(sample.start);
 			lastGpuSampleMs = now;
 			return &sample;
 		}
@@ -368,27 +392,74 @@ struct CDlssSR::Session
 	void EndGpuTiming(GpuSample* sample)
 	{
 		if (!sample) return;
-		context->End(sample->end);
-		context->End(sample->disjoint);
+		ngxContext->End(sample->end);
+		ngxContext->End(sample->disjoint);
 		sample->pending = true;
 	}
 
 	~Session()
 	{
 		if (initialized) {
-			ContextStateScope scope(context, state);
+			if (background && ngxFence && (fenceValue || feature) && SignalNgx()) {
+				ngxFence->SetEventOnCompletion(fenceValue, nullptr);
+			}
+			ContextStateScope scope(background ? nullptr : context.p, state);
+			std::lock_guard lock(NgxD3D11Lock);
 			if (feature) {
 				NVSDK_NGX_D3D11_ReleaseFeature(feature);
 			}
 			if (parameters) {
 				NVSDK_NGX_D3D11_DestroyParameters(parameters);
 			}
-			NVSDK_NGX_D3D11_Shutdown1(device);
+			NVSDK_NGX_D3D11_Shutdown1(ngxDevice);
 		}
 	}
 
 
-	bool Open(ID3D11Device1* renderDevice)
+	bool OpenInterop()
+	{
+		CComQIPtr<IDXGIDevice> dxgi(device.p);
+		CComPtr<IDXGIAdapter> adapter;
+		CComPtr<ID3D11Device> privateDevice;
+		if (!dxgi || FAILED(dxgi->GetAdapter(&adapter))) return false;
+		const auto level = device->GetFeatureLevel();
+		if (FAILED(D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0,
+			&level, 1, D3D11_SDK_VERSION, &privateDevice, nullptr, &ngxContext)) ||
+			FAILED(privateDevice.QueryInterface(&ngxDevice))) return false;
+
+		CComQIPtr<ID3D11Device5> device5(device.p), ngxDevice5(ngxDevice.p);
+		if (!device5 || !ngxDevice5 ||
+			FAILED(context.QueryInterface(&renderSync)) || FAILED(ngxContext.QueryInterface(&ngxSync)) ||
+			FAILED(device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&renderFence)))) return false;
+		HANDLE handle = nullptr;
+		if (FAILED(renderFence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &handle))) return false;
+		const auto opened = ngxDevice5->OpenSharedFence(handle, IID_PPV_ARGS(&ngxFence));
+		CloseHandle(handle);
+		return SUCCEEDED(opened);
+	}
+
+	bool OpenTexture(Tex2D_t& texture, DXGI_FORMAT format, UINT width, UINT height,
+		Tex2DType type, CComPtr<ID3D11Texture2D>& alias)
+	{
+		alias.Release();
+		if (!background) return SUCCEEDED(texture.CheckCreate(device, format, width, height, type));
+		texture.Release();
+		auto desc = CreateTex2DDesc(format, width, height, type);
+		desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+		if (FAILED(device->CreateTexture2D(&desc, nullptr, &texture.pTexture)) ||
+			FAILED(device->CreateShaderResourceView(texture.pTexture, nullptr, &texture.pShaderResource))) return false;
+		texture.desc = desc;
+		texture.type = type;
+		CComQIPtr<IDXGIResource1> resource(texture.pTexture.p);
+		HANDLE handle = nullptr;
+		if (!resource || FAILED(resource->CreateSharedHandle(nullptr,
+			DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &handle))) return false;
+		const auto opened = ngxDevice->OpenSharedResource1(handle, IID_PPV_ARGS(&alias));
+		CloseHandle(handle);
+		return SUCCEEDED(opened);
+	}
+
+	bool Open(ID3D11Device1* renderDevice, bool async)
 	{
 		const auto directory = std::filesystem::path(NgxRuntime::EditionDir());
 		std::error_code error;
@@ -418,13 +489,24 @@ struct CDlssSR::Session
 			failure = L"Inactive (D3D11 context state unavailable)";
 			return false;
 		}
-		ContextStateScope scope(context, state);
+		background = async;
+		if (background) {
+			if (!OpenInterop()) {
+				failure = L"Inactive (DLSS SR private D3D11 context unavailable)";
+				return false;
+			}
+		} else {
+			ngxDevice = device;
+			ngxContext = context.p;
+		}
+		ContextStateScope scope(background ? nullptr : context.p, state);
+		std::lock_guard lock(NgxD3D11Lock);
 		const wchar_t* paths[] = {directory.c_str()};
 		NVSDK_NGX_FeatureCommonInfo info{};
 		info.PathListInfo.Path = paths;
 		info.PathListInfo.Length = 1;
 		const auto result = NVSDK_NGX_D3D11_Init_with_ProjectID(
-			kProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "MPC-VR-MFG", cache.c_str(), device, &info);
+			kProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "MPC-VR-MFG", cache.c_str(), ngxDevice, &info);
 		if (NVSDK_NGX_FAILED(result)) {
 			failure = std::format(L"Inactive (NGX init {:#x})", unsigned(result));
 			return false;
@@ -444,7 +526,7 @@ struct CDlssSR::Session
 		return true;
 	}
 
-	bool CreateForOutput(UINT width, UINT height, UINT outputWidth, UINT outputHeight)
+	bool CreateForOutput(UINT width, UINT height, UINT outputWidth, UINT outputHeight, bool smallerOnly = false)
 	{
 		requestedInputWidth = width;
 		requestedInputHeight = height;
@@ -465,15 +547,18 @@ struct CDlssSR::Session
 		if (width == targetWidth && height == targetHeight) {
 			fallbackWidth = targetWidth;
 			fallbackHeight = targetHeight;
-			return Create(width, height, targetWidth, targetHeight);
+			return !smallerOnly && Create(width, height, targetWidth, targetHeight);
 		}
 		// Ultra Performance normally uses a 3x upscale. If the runtime rejects
 		// the full target, retry with a smaller intermediate at that scale.
 		const double scale = std::min({1.0, 3.0 * width / targetWidth, 3.0 * height / targetHeight});
 		fallbackWidth = std::clamp(UINT(targetWidth * scale), width + 1, targetWidth);
 		fallbackHeight = std::clamp(UINT(targetHeight * scale), height + 1, targetHeight);
-		return Create(width, height, targetWidth, targetHeight) ||
-			TrySmallerOutput(width, height);
+		if (smallerOnly) {
+			return (fallbackWidth != targetWidth || fallbackHeight != targetHeight) &&
+				Create(width, height, fallbackWidth, fallbackHeight);
+		}
+		return Create(width, height, targetWidth, targetHeight) || TrySmallerOutput(width, height);
 	}
 
 	bool TrySmallerOutput(UINT width, UINT height)
@@ -488,9 +573,17 @@ struct CDlssSR::Session
 	{
 		workingWidth = outputWidth;
 		workingHeight = outputHeight;
-		failure = L"Inactive (DLSS SR texture or shader setup failed)";
-		ContextStateScope scope(context, state);
+		failure = background ? L"Inactive (DLSS SR shared texture setup failed)" :
+			L"Inactive (DLSS SR texture or shader setup failed)";
+		flowBound = false;
+		ContextStateScope scope(background ? nullptr : context.p, state);
 		if (feature) {
+			if (background && (!SignalNgx() ||
+				FAILED(ngxFence->SetEventOnCompletion(fenceValue, nullptr)))) {
+				failure = L"Inactive (DLSS SR initialization fence failed)";
+				return false;
+			}
+			std::lock_guard lock(NgxD3D11Lock);
 			NVSDK_NGX_D3D11_ReleaseFeature(feature);
 			feature = nullptr;
 		}
@@ -500,25 +593,21 @@ struct CDlssSR::Session
 		costValidatedMotion = false;
 		refinedValidatedMotion = false;
 		refinedCostMotion = false;
-		validatedVectors.Release();
-		costValidatedVectors.Release();
 		autoExposure = false;
 		lastPts = -1;
 		validOutput = false;
 		// Recreated NGX features require a fresh GPU timing sample.
 		SetupGpuTiming();
 		SetupSceneDetection();
-		if (FAILED(input.CheckCreate(device, DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, Tex2D_DefaultShaderRTarget)) ||
-		    FAILED(output.CheckCreate(device, DXGI_FORMAT_R16G16B16A16_FLOAT, outputWidth, outputHeight, Tex2D_DefaultShaderRTargetUAV)) ||
-		    FAILED(depth.CheckCreate(device, DXGI_FORMAT_R32_FLOAT, width, height, Tex2D_DefaultShaderRTarget)) ||
-		    FAILED(motion.CheckCreate(device, DXGI_FORMAT_R16G16_FLOAT, width, height, Tex2D_DefaultShaderRTarget)) ||
+		if (!OpenTexture(input, DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, Tex2D_DefaultShaderRTarget, ngxInput) ||
+		    !OpenTexture(output, DXGI_FORMAT_R16G16B16A16_FLOAT, outputWidth, outputHeight, Tex2D_DefaultShaderRTargetUAV, ngxOutput) ||
+		    !OpenTexture(depth, DXGI_FORMAT_R32_FLOAT, width, height, Tex2D_DefaultShaderRTarget, ngxDepth) ||
+		    !OpenTexture(motion, DXGI_FORMAT_R16G16_FLOAT, width, height, Tex2D_DefaultShaderRTarget, ngxMotion) ||
 		    FAILED(device->CreateRenderTargetView(depth.pTexture, nullptr, &depthView)) ||
 		    FAILED(device->CreateRenderTargetView(motion.pTexture, nullptr, &motionView))) {
 			return false;
 		}
-		const FLOAT flatDepth[4] = {0.5f, 0, 0, 0};
-		context->ClearRenderTargetView(depthView, flatDepth);
-		depthIsFlat = true;
+		depthIsFlat = false;
 		zipHistory.Reset();
 		zipDepthActive = false;
 
@@ -543,60 +632,26 @@ struct CDlssSR::Session
 				return false;
 			}
 		}
-		CDlssOpticalFlow::Options options;
-		// Balanced SR optical flow uses a 4x4 grid with cost and validation.
-		options.gridSize = 4;
-		options.bidirectional = true;
-		options.cost = true;
-		if (!flow.Init(device, context, width, height, options)) {
-			options.cost = false;
-			if (!flow.Init(device, context, width, height, options)) {
-				failure = L"Inactive (NVIDIA Optical Flow unavailable)";
-				return false;
-			}
-		}
-		if (flow.Bidirectional()) {
-			// Balanced 4x4: reconstruct input-resolution motion continuously
-			// *inside* coherent regions. At boundaries retain the center-cell
-			// vector, avoiding interpolation between unrelated moving objects.
-			// A shader compile failure keeps the previously validated path.
+		// Compile the alternatives here so binding flow cannot compile shaders.
+		if (!validationShadersPrepared) {
 			const auto createShader = [&](const char* source, size_t length,
-				const char* entry, CComPtr<ID3D11PixelShader>& shader) -> bool {
+				const char* entry, CComPtr<ID3D11PixelShader>& shader) {
+				if (shader) return;
 				CComPtr<ID3DBlob> code;
-				return SUCCEEDED(D3DCompile(source, length, nullptr, nullptr,
-					nullptr, entry, "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3,
-					0, &code, nullptr)) &&
-					SUCCEEDED(device->CreatePixelShader(code->GetBufferPointer(),
-						code->GetBufferSize(), nullptr, &shader));
-			};
-			if (flow.GridSize() == 4 && createShader(sr_motion::RefineShaders,
-				sizeof(sr_motion::RefineShaders) - 1, "VectorsValidatedSR", validatedVectors)) {
-				refinedValidatedMotion = true;
-				validateMotion = true;
-			} else {
-				validateMotion = createShader(mfg::MotionShaders,
-					sizeof(mfg::MotionShaders) - 1, "VectorsValidated", validatedVectors);
-			}
-			if (validateMotion && flow.HasCost()) {
-				if (refinedValidatedMotion && createShader(sr_motion::RefineShaders,
-					sizeof(sr_motion::RefineShaders) - 1, "VectorsValidatedCostSR", costValidatedVectors)) {
-					refinedCostMotion = true;
-					costValidatedMotion = true;
-				} else {
-					costValidatedMotion = createShader(mfg::MotionShaders,
-						sizeof(mfg::MotionShaders) - 1, "VectorsValidatedCost", costValidatedVectors);
+				if (SUCCEEDED(D3DCompile(source, length, nullptr, nullptr,
+					nullptr, entry, "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, nullptr))) {
+					device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &shader);
 				}
-			}
-		}
-
-		// Do not pay the per-frame cost-output overhead when the additional
-		// validation shader is unsupported or backward flow is unavailable.
-		if (flow.HasCost() && !costValidatedMotion) {
-			options.cost = false;
-			if (!flow.Init(device, context, width, height, options)) {
-				failure = L"Inactive (NVIDIA Optical Flow fallback unavailable)";
-				return false;
-			}
+			};
+			createShader(sr_motion::RefineShaders, sizeof(sr_motion::RefineShaders) - 1,
+				"VectorsValidatedSR", refinedVectors);
+			createShader(sr_motion::RefineShaders, sizeof(sr_motion::RefineShaders) - 1,
+				"VectorsValidatedCostSR", refinedCostVectors);
+			createShader(mfg::MotionShaders, sizeof(mfg::MotionShaders) - 1,
+				"VectorsValidated", validatedVectors);
+			createShader(mfg::MotionShaders, sizeof(mfg::MotionShaders) - 1,
+				"VectorsValidatedCost", costValidatedVectors);
+			validationShadersPrepared = true;
 		}
 
 		const double scale = std::max(double(outputWidth) / width, double(outputHeight) / height);
@@ -605,6 +660,7 @@ struct CDlssSR::Session
 			: scale <= 1.55 ? NVSDK_NGX_PerfQuality_Value_MaxQuality
 			: scale <= 1.85 ? NVSDK_NGX_PerfQuality_Value_Balanced
 			: scale <= 2.25 ? NVSDK_NGX_PerfQuality_Value_MaxPerf : NVSDK_NGX_PerfQuality_Value_UltraPerformance;
+		std::unique_lock lock(NgxD3D11Lock);
 		parameters->Set(NVSDK_NGX_Parameter_Width, width);
 		parameters->Set(NVSDK_NGX_Parameter_Height, height);
 		parameters->Set(NVSDK_NGX_Parameter_OutWidth, outputWidth);
@@ -637,14 +693,14 @@ struct CDlssSR::Session
 		parameters->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,
 			basicFlags | int(NVSDK_NGX_DLSS_Feature_Flags_AutoExposure));
 		parameters->Set(NVSDK_NGX_Parameter_DLSS_Enable_Output_Subrects, 0);
-		auto result = NVSDK_NGX_D3D11_CreateFeature(context, NVSDK_NGX_Feature_SuperSampling, parameters, &feature);
+		auto result = NVSDK_NGX_D3D11_CreateFeature(ngxContext, NVSDK_NGX_Feature_SuperSampling, parameters, &feature);
 		if (NVSDK_NGX_FAILED(result) || !feature) {
 			if (feature) {
 				NVSDK_NGX_D3D11_ReleaseFeature(feature);
 				feature = nullptr;
 			}
 			parameters->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, basicFlags);
-			result = NVSDK_NGX_D3D11_CreateFeature(context, NVSDK_NGX_Feature_SuperSampling, parameters, &feature);
+			result = NVSDK_NGX_D3D11_CreateFeature(ngxContext, NVSDK_NGX_Feature_SuperSampling, parameters, &feature);
 		} else {
 			autoExposure = true;
 		}
@@ -656,12 +712,6 @@ struct CDlssSR::Session
 		activeStatus = std::format(L"Active ({}Auto, requested model {})",
 			dlaa ? L"DLAA, " : L"",
 			wchar_t(L'J' + preset - NVSDK_NGX_DLSS_Hint_Render_Preset_J));
-		activeStatus += std::format(L", optical flow {}x{}", flow.GridSize(), flow.GridSize());
-		if (validateMotion) {
-			activeStatus += costValidatedMotion ? L", cost-aware motion" : L", validated motion";
-			if (costValidatedMotion ? refinedCostMotion : refinedValidatedMotion)
-				activeStatus += L", edge-aware grid";
-		}
 		if (autoExposure) {
 			activeStatus += L", auto exposure";
 		}
@@ -671,10 +721,108 @@ struct CDlssSR::Session
 		if (outputWidth != requestedWidth || outputHeight != requestedHeight) {
 			activeStatus += std::format(L", intermediate {}x{}", outputWidth, outputHeight);
 		}
+		lock.unlock();
+		return !background || PrimeFeature();
+	}
+
+	void SetEvaluationParameters(bool reset, float frameTimeMs)
+	{
+		parameters->Set(NVSDK_NGX_Parameter_Color, static_cast<ID3D11Resource*>(background ? ngxInput.p : input.pTexture.p));
+		parameters->Set(NVSDK_NGX_Parameter_Output, static_cast<ID3D11Resource*>(background ? ngxOutput.p : output.pTexture.p));
+		parameters->Set(NVSDK_NGX_Parameter_Depth, static_cast<ID3D11Resource*>(background ? ngxDepth.p : depth.pTexture.p));
+		parameters->Set(NVSDK_NGX_Parameter_MotionVectors, static_cast<ID3D11Resource*>(background ? ngxMotion.p : motion.pTexture.p));
+		parameters->Set(NVSDK_NGX_Parameter_Reset, int(reset));
+		parameters->Set(NVSDK_NGX_Parameter_MV_Scale_X, 1.f);
+		parameters->Set(NVSDK_NGX_Parameter_MV_Scale_Y, 1.f);
+		parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, 0.f);
+		parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, 0.f);
+		parameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, input.desc.Width);
+		parameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, input.desc.Height);
+		parameters->Set(NVSDK_NGX_Parameter_DLSS_Pre_Exposure, 1.f);
+		parameters->Set(NVSDK_NGX_Parameter_DLSS_Exposure_Scale, 1.f);
+		parameters->Set(NVSDK_NGX_Parameter_FrameTimeDeltaInMsec, frameTimeMs);
+	}
+
+	bool PrimeFeature()
+	{
+		// Warm up lazy NGX work on a synthetic input. No playback frame is consumed.
+		const FLOAT black[4] = {};
+		const FLOAT flat[4] = {0.5f, 0, 0, 0};
+		CComPtr<ID3D11RenderTargetView> color, motionView, depthView;
+		if (FAILED(ngxDevice->CreateRenderTargetView(ngxInput, nullptr, &color)) ||
+			FAILED(ngxDevice->CreateRenderTargetView(ngxMotion, nullptr, &motionView)) ||
+			FAILED(ngxDevice->CreateRenderTargetView(ngxDepth, nullptr, &depthView))) {
+			failure = L"Inactive (DLSS SR warmup texture setup failed)";
+			return false;
+		}
+		ngxContext->ClearRenderTargetView(color, black);
+		ngxContext->ClearRenderTargetView(motionView, black);
+		ngxContext->ClearRenderTargetView(depthView, flat);
+		std::lock_guard lock(NgxD3D11Lock);
+		SetEvaluationParameters(true, 33.3f);
+		const auto result = NVSDK_NGX_D3D11_EvaluateFeature(ngxContext, feature, parameters, nullptr);
+		if (NVSDK_NGX_FAILED(result)) {
+			failure = std::format(L"Inactive (NGX prime {:#x})", unsigned(result));
+			return false;
+		}
+		// The first real frame resets NGX history again.
 		return true;
 	}
 
-	bool Evaluate(REFERENCE_TIME pts, float frameTimeMs, CZipDepth* zipDepth, bool sourceFrame, ID3D11ShaderResourceView* cleanSource)
+	bool SignalNgx()
+	{
+		const auto value = fenceValue + 1;
+		if (FAILED(ngxSync->Signal(ngxFence, value))) return false;
+		fenceValue = value;
+		ngxContext->Flush();
+		return true;
+	}
+
+	bool BindFlow()
+	{
+		if (flowBound) return true;
+		ContextStateScope scope(context, state);
+		CDlssOpticalFlow::Options options;
+		if (!flow.IsReady() || flow.Width() != requestedInputWidth || flow.Height() != requestedInputHeight) {
+			if (!flow.Init(device, context, requestedInputWidth, requestedInputHeight, options)) {
+				options.cost = false;
+				if (!flow.Init(device, context, requestedInputWidth, requestedInputHeight, options)) {
+					failure = L"Inactive (NVIDIA Optical Flow unavailable)";
+					return false;
+				}
+			}
+		}
+		flow.Reset();
+		refinedValidatedMotion = flow.Bidirectional() && flow.GridSize() == 4 && refinedVectors;
+		validateMotion = flow.Bidirectional() && (refinedValidatedMotion || validatedVectors);
+		refinedCostMotion = refinedValidatedMotion && refinedCostVectors;
+		costValidatedMotion = validateMotion && flow.HasCost() && (refinedCostMotion || costValidatedVectors);
+		if (flow.HasCost() && !costValidatedMotion) {
+			options.cost = false;
+			if (!flow.Init(device, context, requestedInputWidth, requestedInputHeight, options)) {
+				failure = L"Inactive (NVIDIA Optical Flow fallback unavailable)";
+				return false;
+			}
+		}
+		activeStatus += std::format(L", optical flow {}x{}", flow.GridSize(), flow.GridSize());
+		if (validateMotion) {
+			activeStatus += costValidatedMotion ? L", cost-aware motion" : L", validated motion";
+			if (costValidatedMotion ? refinedCostMotion : refinedValidatedMotion) activeStatus += L", edge-aware grid";
+		}
+		flowBound = true;
+		return true;
+	}
+
+	bool Matches(ID3D11Device1* renderDevice, UINT width, UINT height,
+		UINT outWidth, UINT outHeight, bool async) const
+	{
+		return device.p == renderDevice && background == async &&
+			requestedInputWidth == width && requestedInputHeight == height &&
+			requestedWidth == outWidth && requestedHeight == outHeight;
+	}
+
+	bool Evaluate(REFERENCE_TIME pts, float frameTimeMs, CZipDepth* zipDepth, bool sourceFrame,
+		ID3D11ShaderResourceView* cleanSource, std::unique_lock<std::mutex>& ngxLock)
 	{
 		if (validOutput && pts >= 0 && pts == lastPts) {
 			return true;
@@ -735,9 +883,9 @@ struct CDlssSR::Session
 				if (costValidatedMotion) {
 					auto* costView = flow.ForwardCost();
 					context->PSSetShaderResources(3, 1, &costView);
-					context->PSSetShader(costValidatedVectors, nullptr, 0);
+					context->PSSetShader(refinedCostMotion ? refinedCostVectors.p : costValidatedVectors.p, nullptr, 0);
 				} else {
-					context->PSSetShader(validatedVectors, nullptr, 0);
+					context->PSSetShader(refinedValidatedMotion ? refinedVectors.p : validatedVectors.p, nullptr, 0);
 				}
 			} else {
 				context->PSSetShader(vectors, nullptr, 0);
@@ -760,8 +908,9 @@ struct CDlssSR::Session
 				zipDepth->PollCompleted();
 			}
 			if (!reset && hasMotion) {
+				const CZipDepthHistory::FramePair pair{lastPts, flow.CurrentFrame(), flow.PreviousFrame(), false};
 				zipDepthActive = zipHistory.Draw(device, context, *zipDepth, depth.pTexture, depthView,
-					motion.pShaderResource, picture, modelSize, pts, frameTimeMs, false);
+					motion.pShaderResource, picture, modelSize, pts, frameTimeMs, false, &pair);
 			}
 		}
 		if (!zipDepth || !hasMotion) zipHistory.Reset();
@@ -773,24 +922,40 @@ struct CDlssSR::Session
 			depthIsFlat = true;
 		}
 		SubmitSceneThumbnail(pts, cleanSource ? cleanSource : input.pShaderResource.p);
-		parameters->Set(NVSDK_NGX_Parameter_Color, static_cast<ID3D11Resource*>(input.pTexture.p));
-		parameters->Set(NVSDK_NGX_Parameter_Output, static_cast<ID3D11Resource*>(output.pTexture.p));
-		parameters->Set(NVSDK_NGX_Parameter_Depth, static_cast<ID3D11Resource*>(depth.pTexture.p));
-		parameters->Set(NVSDK_NGX_Parameter_MotionVectors, static_cast<ID3D11Resource*>(motion.pTexture.p));
-		parameters->Set(NVSDK_NGX_Parameter_Reset, int(reset || !hasMotion));
-		parameters->Set(NVSDK_NGX_Parameter_MV_Scale_X, 1.f);
-		parameters->Set(NVSDK_NGX_Parameter_MV_Scale_Y, 1.f);
-		parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, 0.f);
-		parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, 0.f);
-		parameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, w);
-		parameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, h);
-		parameters->Set(NVSDK_NGX_Parameter_DLSS_Pre_Exposure, 1.f);
-		parameters->Set(NVSDK_NGX_Parameter_DLSS_Exposure_Scale, 1.f);
-		parameters->Set(NVSDK_NGX_Parameter_FrameTimeDeltaInMsec, frameTimeMs);
+		SetEvaluationParameters(reset || !hasMotion, frameTimeMs);
+		if (background) {
+			// The renderer writes color/flow/depth, then the SR device reads them.
+			const auto value = fenceValue + 1;
+			if (FAILED(renderSync->Signal(renderFence, value))) {
+				failure = L"Inactive (DLSS SR input signal failed)";
+				return false;
+			}
+			context->Flush();
+			fenceValue = value;
+			if (FAILED(ngxSync->Wait(ngxFence, value))) {
+				failure = L"Inactive (DLSS SR input fence failed)";
+				return false;
+			}
+		}
 		PollGpuTiming();
 		GpuSample* gpuSample = BeginGpuTiming();
-		const auto result = NVSDK_NGX_D3D11_EvaluateFeature(context, feature, parameters, nullptr);
+		const auto result = NVSDK_NGX_D3D11_EvaluateFeature(ngxContext, feature, parameters, nullptr);
+		ngxLock.unlock();
 		EndGpuTiming(gpuSample);
+		if (background) {
+			// Queue the renderer's output read behind NGX completion on the GPU.
+			const auto value = fenceValue + 1;
+			if (FAILED(ngxSync->Signal(ngxFence, value))) {
+				failure = L"Inactive (DLSS SR output signal failed)";
+				return false;
+			}
+			fenceValue = value;
+			ngxContext->Flush();
+			if (FAILED(renderSync->Wait(renderFence, value))) {
+				failure = L"Inactive (DLSS SR output fence failed)";
+				return false;
+			}
+		}
 		if (NVSDK_NGX_FAILED(result)) {
 			failure = std::format(L"Inactive (NGX evaluate {:#x})", unsigned(result));
 			return false;
@@ -816,17 +981,67 @@ struct CDlssSR::Session
 	}
 };
 
+struct CDlssSR::Preparation {
+	CComPtr<ID3D11Device1> device;
+	UINT width = 0, height = 0, outputWidth = 0, outputHeight = 0;
+	bool discard = false; // Accessed only under RendererLock.
+	std::unique_ptr<Session> session;
+	std::atomic<bool> finished{false};
+	std::jthread worker;
+};
+
 CDlssSR::CDlssSR() = default;
 CDlssSR::~CDlssSR() = default;
 
-Tex2D_t* CDlssSR::Prepare(ID3D11Device1* device, UINT width, UINT height, UINT outputWidth, UINT outputHeight)
+Tex2D_t* CDlssSR::Prepare(ID3D11Device1* device, UINT width, UINT height,
+	UINT outputWidth, UINT outputHeight, bool background)
 {
-	if (m_unavailable) {
+	if (m_preparation) {
+		if (!m_preparation->finished.load(std::memory_order_acquire)) return nullptr;
+		const auto& prepared = m_preparation->session;
+		const bool matches = !m_preparation->discard && background &&
+			m_preparation->device.p == device && m_preparation->width == width &&
+			m_preparation->height == height && m_preparation->outputWidth == outputWidth &&
+			m_preparation->outputHeight == outputHeight;
+		if (matches && prepared && !prepared->sizeFailed) {
+			const auto completed = prepared->ngxFence->GetCompletedValue();
+			if (completed == UINT64_MAX) {
+				prepared->sizeFailed = true;
+				prepared->failure = L"Inactive (DLSS SR device removed during preparation)";
+			} else if (completed < prepared->fenceValue) {
+				return nullptr;
+			}
+		}
+		if (!matches && prepared) {
+			auto retired = std::move(m_preparation->session);
+			m_preparation.reset();
+			StartPreparation(std::move(retired), background ? device : nullptr,
+				width, height, outputWidth, outputHeight, false);
+			return nullptr;
+		}
+		m_session = std::move(m_preparation->session);
+		m_preparation.reset();
+		if (matches && !m_session) {
+			m_unavailable = true;
+			m_failure = L"Inactive (DLSS SR background preparation failed)";
+		}
+	}
+	if (m_unavailable) return nullptr;
+	if (background && (!m_session || !m_session->Matches(device, width, height, outputWidth, outputHeight, true)
+		|| m_retrySmaller)) {
+		const bool smallerOnly = m_retrySmaller && m_session &&
+			m_session->Matches(device, width, height, outputWidth, outputHeight, true);
+		m_retrySmaller = false;
+		StartPreparation(std::move(m_session), device, width, height, outputWidth, outputHeight, smallerOnly);
 		return nullptr;
+	}
+	if (!background && m_session && (m_session->background || m_session->device.p != device)) {
+		Reset();
+		if (m_preparation) return nullptr;
 	}
 	if (!m_session) {
 		m_session = std::make_unique<Session>();
-		if (!m_session->Open(device)) {
+		if (!OpenSession(*m_session, device, false)) {
 			m_failure = m_session->failure;
 			m_session.reset();
 			m_unavailable = true;
@@ -834,23 +1049,134 @@ Tex2D_t* CDlssSR::Prepare(ID3D11Device1* device, UINT width, UINT height, UINT o
 		}
 	}
 	auto& session = *m_session;
-	if (session.requestedInputWidth != width || session.requestedInputHeight != height ||
-	    session.requestedWidth != outputWidth || session.requestedHeight != outputHeight) {
-		session.sizeFailed = !session.CreateForOutput(width, height, outputWidth, outputHeight);
-		m_failure = session.sizeFailed ? session.failure : std::wstring{};
+	if (!background && !session.Matches(device, width, height, outputWidth, outputHeight, false)) {
+		CreateSession(session, width, height, outputWidth, outputHeight, false);
 	}
-	return session.sizeFailed ? nullptr : &session.input;
+	if (!session.sizeFailed && !session.flowBound) {
+		const auto start = GetPreciseTick();
+		session.sizeFailed = !session.BindFlow();
+		const auto now = GetPreciseTick();
+		mfg::SourceCadenceTrace().Record("sr_bind_flow", now, -1, -1, 0, 0, 0, 0, 0, false, 0,
+			session.sizeFailed ? E_FAIL : S_OK, now - start);
+	}
+	if (session.sizeFailed) {
+		m_failure = session.failure.empty() ? L"Inactive (DLSS SR preparation failed)" : session.failure;
+		return nullptr;
+	}
+	m_failure.clear();
+	return &session.input;
+}
+
+bool CDlssSR::OpenSession(Session& session, ID3D11Device1* device, bool background)
+{
+	const auto start = GetPreciseTick();
+	const bool opened = session.Open(device, background);
+	const auto now = GetPreciseTick();
+	mfg::SourceCadenceTrace().Record("sr_open", now, -1, -1, 0, 0, 0, 0, 0, false, 0,
+		opened ? S_OK : E_FAIL, now - start);
+	return opened;
+}
+
+void CDlssSR::CreateSession(Session& session, UINT width, UINT height, UINT outputWidth,
+	UINT outputHeight, bool smallerOnly)
+{
+	const auto start = GetPreciseTick();
+	session.sizeFailed = !session.CreateForOutput(width, height, outputWidth, outputHeight, smallerOnly);
+	const auto now = GetPreciseTick();
+	mfg::SourceCadenceTrace().Record("sr_create", now, -1, -1, 0, 0, 0, 0, 0, false, 0,
+		session.sizeFailed ? E_FAIL : S_OK, now - start);
+}
+
+void CDlssSR::StartPreparation(std::unique_ptr<Session> retired, ID3D11Device1* device,
+	UINT width, UINT height, UINT outputWidth, UINT outputHeight, bool smallerOnly)
+{
+	// A session from Wait for Extended owns the playback immediate context.
+	// Retire that session on the serialized renderer path.
+	if (retired && !retired->background) retired.reset();
+	if (retired) retired->flow.Release();
+	try {
+		// Any previous job was already finished before its result was taken.
+		auto job = std::make_unique<Preparation>();
+		job->device = device;
+		job->width = width;
+		job->height = height;
+		job->outputWidth = outputWidth;
+		job->outputHeight = outputHeight;
+		job->session = std::move(retired);
+		job->worker = std::jthread([pending = job.get(), smallerOnly] {
+			const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+			pending->session.reset();
+			if (pending->device && SUCCEEDED(com)) {
+				try {
+					pending->session = std::make_unique<Session>();
+					auto& session = *pending->session;
+					if (OpenSession(session, pending->device, true)) {
+						CreateSession(session, pending->width, pending->height, pending->outputWidth,
+							pending->outputHeight, smallerOnly);
+						if (!session.SignalNgx() && !session.sizeFailed) {
+							session.failure = L"Inactive (DLSS SR initialization fence failed)";
+							session.sizeFailed = true;
+						}
+					} else {
+						session.sizeFailed = true;
+					}
+					// Retain the request key even when init failed so the same
+					// input cannot repeatedly launch preparation.
+					session.device = pending->device;
+					session.background = true;
+					session.requestedInputWidth = pending->width;
+					session.requestedInputHeight = pending->height;
+					session.requestedWidth = pending->outputWidth;
+					session.requestedHeight = pending->outputHeight;
+				} catch (...) {
+					pending->session.reset();
+				}
+			}
+			if (SUCCEEDED(com)) CoUninitialize();
+			pending->finished.store(true, std::memory_order_release);
+		});
+		m_preparation = std::move(job);
+		m_failure.clear();
+	} catch (const std::exception&) {
+		m_unavailable = true;
+		m_failure = L"Inactive (DLSS SR background preparation unavailable)";
+	}
 }
 
 Tex2D_t* CDlssSR::Evaluate(int64_t pts, float frameTimeMs, CZipDepth* zipDepth, bool sourceFrame, ID3D11ShaderResourceView* cleanSource)
 {
-	if (!m_session->Evaluate(pts, frameTimeMs, zipDepth, sourceFrame, cleanSource)) {
-		if (m_session->TrySmallerOutput(m_session->input.desc.Width, m_session->input.desc.Height)) {
-			return nullptr; // Use ordinary scaling for this frame while the new history starts.
+	std::unique_lock lock(NgxD3D11Lock, std::defer_lock);
+	if (m_session->background) {
+		if (!lock.try_lock()) {
+			ResetHistory();
+			return nullptr;
 		}
-		m_failure = m_session->failure;
-		m_session->validOutput = false;
-		m_session->sizeFailed = true;
+	} else {
+		lock.lock();
+	}
+	const bool trace = !m_session->validOutput && mfg::SourceCadenceTrace().Enabled();
+	const auto start = trace ? GetPreciseTick() : 0;
+	const bool evaluated = m_session->Evaluate(pts, frameTimeMs, zipDepth, sourceFrame, cleanSource, lock);
+	if (trace) {
+		const auto now = GetPreciseTick();
+		mfg::SourceCadenceTrace().Record("sr_first_output", now, pts, -1, 0, 0, 0, 0, 0, false, 0,
+			evaluated ? S_OK : E_FAIL, now - start);
+	}
+	if (!evaluated) {
+		if (lock.owns_lock()) lock.unlock();
+		auto& session = *m_session;
+		if (session.workingWidth != session.fallbackWidth || session.workingHeight != session.fallbackHeight) {
+			if (session.background) {
+				m_retrySmaller = true;
+			} else if (session.TrySmallerOutput(session.requestedInputWidth, session.requestedInputHeight) &&
+				session.BindFlow()) {
+				m_failure.clear();
+				return nullptr;
+			}
+		}
+		m_failure = session.failure;
+		session.validOutput = false;
+		session.sizeFailed = true;
 		return nullptr;
 	}
 	return &m_session->output;
@@ -869,9 +1195,20 @@ void CDlssSR::ResetHistory()
 
 void CDlssSR::Reset()
 {
-	m_session.reset();
 	m_unavailable = false;
 	m_failure.clear();
+	m_retrySmaller = false;
+	if (m_preparation) m_preparation->discard = true;
+	if (m_session && m_session->background) {
+		StartPreparation(std::move(m_session), nullptr, 0, 0, 0, 0, false);
+	} else {
+		m_session.reset();
+	}
+}
+
+bool CDlssSR::Preparing() const
+{
+	return m_preparation && m_preparation->device && !m_preparation->discard;
 }
 
 bool CDlssSR::Active() const
@@ -909,5 +1246,6 @@ const wchar_t* CDlssSR::Status(const CZipDepth* zipDepth) const
         }
 		return m_session->activeStatus.c_str();
 	}
+	if (Preparing()) return L"Preparing DLSS SR";
 	return m_failure.empty() ? L"Inactive (waiting for an eligible SDR upscale)" : m_failure.c_str();
 }

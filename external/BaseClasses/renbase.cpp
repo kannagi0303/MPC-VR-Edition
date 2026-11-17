@@ -1036,6 +1036,11 @@ IMediaSample *CBaseRenderer::GetCurrentSample()
 // thread may get in and change our state to stopped (for example) in which
 // case it will also signal the thread event so that our wait call is stopped
 
+void CBaseRenderer::OnReceiveMediaTime(IMediaSample *pMediaSample)
+{
+    if (m_pPosition) m_pPosition->RegisterMediaTime(pMediaSample);
+}
+
 HRESULT CBaseRenderer::PrepareReceive(IMediaSample *pMediaSample)
 {
     CAutoLock cInterfaceLock(&m_InterfaceLock);
@@ -1087,7 +1092,7 @@ HRESULT CBaseRenderer::PrepareReceive(IMediaSample *pMediaSample)
     }
 
     // Store the media times from this sample
-    if (m_pPosition) m_pPosition->RegisterMediaTime(pMediaSample);
+    OnReceiveMediaTime(pMediaSample);
 
     // Schedule the next sample if we are streaming
 

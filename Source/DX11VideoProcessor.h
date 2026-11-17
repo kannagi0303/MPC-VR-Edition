@@ -58,6 +58,7 @@ class CDX11VideoProcessor
 {
 private:
 	friend class CVideoRendererInputPin;
+	friend class CMpcVideoRenderer;
 	bool m_bInterpolateAt50pct=true;
 	bool m_bPGSSubtitles=false;
 	bool SourceIsHDR10() const {return m_decExFmt.VideoTransferFunction==MFVideoTransFunc_2084 && m_decExFmt.VideoTransferMatrix!=DXVA2_VideoTransferMatrix_Unknown;}
@@ -82,9 +83,16 @@ private:
 	int64_t m_mfgAutoLastPts = -1;
 	mfg::RepeatFrameTiming m_mfgRepeatTiming;
 	mfg::Session m_mfg;
+	bool m_startupHasPicture = false;
+	bool m_extendedStartupPending = false;
 	mfg::DecodedFrameDifference m_mfgDecodedDifference;
 	std::atomic<unsigned> m_mfgPendingRepeats{0};
-	bool m_useZipDepth = false;
+	bool m_useZipDepthSr = false;
+	bool m_useZipDepthMfg = false;
+	bool m_adaptiveMfgDepth = false;
+	bool m_showMfgMotion = false;
+	bool UsesZipDepthSr() const { return m_useZipDepthSr && m_iVPSuperRes == SUPERRES_DLSS_SR; }
+	bool UsesZipDepthMfg() const { return m_useZipDepthMfg && m_mfgMultiplier; }
 	bool m_showDepthOverlay = false;
 	bool MfgDepthSourceEligible() const;
 	bool m_mfgLowMotionEnabled = false;
@@ -134,11 +142,9 @@ private:
 	// regular statistics/COM paths. Keep reads race-free.
 	std::atomic<unsigned> m_mfgSkipped{0};
 	std::atomic<uint64_t> m_mfgGeneratedPresents{0},m_mfgRealPresents{0},m_mfgFallbackPresents{0};
-	std::atomic<uint64_t> m_mfgInputs{0};
 	std::mutex m_mfgRateLock;
 	int64_t m_mfgRateTick=0;
-	uint64_t m_mfgRateInputs=0,m_mfgRateReal=0,m_mfgRateGenerated=0,m_mfgRateFallback=0;
-	double m_mfgInputFps=0.0;
+	uint64_t m_mfgRateReal=0,m_mfgRateGenerated=0,m_mfgRateFallback=0;
 	unsigned m_mfgRateSkipped=0;
 	double m_mfgActualFps=0.0,m_mfgGeneratedFps=0.0,m_mfgSkippedPerSec=0.0,m_mfgFallbackFps=0.0;
 	// Present() success counts do not mean the display actually scanned out that image.
@@ -175,23 +181,78 @@ private:
     // Settings changes run under RendererLock. Retire the old timeline and
     // present its independent ORIGINAL snapshots before moving the upscaler.
     void SwitchMfgUpscaleSlot(unsigned requestedMode);
-    // Keep the old back buffer while a windowed resize is in progress.
-    // Apply the last requested size on the source-render thread once it settles.
+    // Coalesce window size changes before resizing the swap chain.
     bool m_resizePending = false;
     CRect m_resizeTarget;
     ULONGLONG m_resizeLastChangeTick = 0;
-    HRESULT ApplyPendingWindowResize();
+    HRESULT ApplyPendingWindowResize(bool settle = true);
     void DiscardMfgPreparedFrame();
     void UpdateProcessingResolution();
     CRect ProcessingRect() const;
     CSize m_processingSize{0, 0};
     Tex2D_t m_processingTexture;
     CTex2DRing m_processingPostScale;
+    Tex2D_t m_completedResizeTexture;
 
-	HRESULT CompositeMfg(const mfg::FrameSurface& surface,REFERENCE_TIME timestamp,bool nativeInput);
+	HRESULT CompositeMfg(const mfg::FrameSurface& surface,REFERENCE_TIME timestamp,bool nativeInput, uint64_t serial);
     HRESULT RenderMfgVideo(const mfg::FrameSurface& surface, bool nativeInput, ID3D11Texture2D* target,
-                           REFERENCE_TIME timestamp, bool bypassUpscale = false);
-    HRESULT FinishMfgPresent(ID3D11Texture2D* preparedVideo, REFERENCE_TIME timestamp);
+                           REFERENCE_TIME timestamp, const CRect& targetPicture, bool videoOnlyInput,
+                           bool bypassUpscale = false);
+    HRESULT FinishMfgPresent(ID3D11Texture2D* preparedVideo, REFERENCE_TIME timestamp, uint64_t serial,
+                             bool completed = false);
+    struct CompletedFrame {
+        Tex2D_t image;
+        CRect picture;
+        REFERENCE_TIME pts = 0, end = 0, due = 0;
+        uint64_t serial = 0, fence = 0;
+        unsigned phase = mfg::MaxGenerated;
+        bool mfg = false;
+        bool videoOnly = false;
+    };
+    struct CompletedBatch {
+        CompletedFrame target;
+        std::vector<mfg::QueuedFrame> phases;
+        bool videoOnlyInput = false;
+    };
+    static constexpr REFERENCE_TIME CompletedLead = 2 * UNITS;
+    framegen::PresentationThread m_completedPresenter;
+    mfg::LiveFlowGroups m_completedGroups;
+    mfg::DisplaySubmitPacing m_completedDisplayPacing;
+    std::deque<CompletedFrame> m_completedFrames;
+    std::vector<CompletedFrame> m_completedFree;
+    std::optional<CompletedFrame> m_completedLast;
+    std::optional<CompletedFrame> m_completedTarget;
+    std::deque<CompletedBatch> m_completedBatches;
+    CComPtr<ID3D11DeviceContext4> m_completedContext;
+    CComPtr<ID3D11Fence> m_completedFence;
+    CComPtr<IDXGIAdapter3> m_completedAdapter;
+    uint64_t m_completedFenceValue = 0, m_completedByteLimit = 0;
+    ULONGLONG m_completedBudgetTick = 0;
+    bool m_completingSample = false, m_completedFailed = false;
+    bool CanBufferCompletedSample() const;
+    bool CompletedFramesPending() const;
+    bool LegacyFramesPending();
+    bool CanProduceCompletedFrame(REFERENCE_TIME due);
+    HRESULT RenderCompletedSample(IMediaSample* sample);
+    bool PrepareCompletedTarget();
+    bool AcquireCompletedTarget(const D3D11_TEXTURE2D_DESC& desc, CompletedFrame& target);
+    void RecycleCompletedFrame(CompletedFrame&& frame);
+    bool QueueCompletedFrame(CompletedFrame&& frame);
+    bool PrepareCompletedBatch(REFERENCE_TIME stream);
+    bool NextCompletedFrame(int64_t& deadline);
+    bool PresentCompletedFrame();
+    REFERENCE_TIME CompletedSubmitLead();
+    HRESULT DrawCompletedVideo(const CompletedFrame& frame, ID3D11Texture2D* target, const CRect& picture);
+    HRESULT PresentCompletedVideo(const CompletedFrame& frame, bool scheduled = false);
+    void ClearCompletedFrames(bool release);
+    struct CompletedBufferTime {
+        REFERENCE_TIME ready = 0;
+        REFERENCE_TIME queued = 0;
+        unsigned nonIncreasing = 0;
+    };
+    CompletedBufferTime GetCompletedBufferTime(REFERENCE_TIME stream) const;
+    std::wstring CompletedBufferInfo();
+    void DrawMfgMotion(ID3D11Texture2D* target, uint64_t serial, REFERENCE_TIME pts);
     HRESULT EnsureMfgPreparedTexture(ID3D11Texture2D* referenceBackBuffer);
     bool MfgPostUpscaleRequested() const;
     bool EnsureMfgPostVsr();
@@ -222,9 +283,11 @@ private:
 	CComPtr<ID3D11PixelShader>    m_pPS_BitmapToFrame;
 	CComPtr<ID3D11PixelShader>    m_pPS_DepthOverlay;
 	CComPtr<ID3D11BlendState>     m_pDepthOverlayBlendState;
-	CComPtr<ID3D11Buffer>         m_pDepthOverlayVertex;
+	CComPtr<ID3D11Buffer>         m_pDepthOverlayConstants;
 	Tex2D_t m_depthOverlayCapture;
-	SIZE m_depthOverlayModelSize{};
+	CComPtr<ID3D11PixelShader> m_pMfgMotionShader;
+	CComPtr<ID3D11BlendState> m_pMfgMotionBlend;
+	CComPtr<ID3D11Buffer> m_pMfgMotionConstants;
 	bool m_depthOverlayShaderFailed = false;
 	CComPtr<ID3D11InputLayout>    m_pVSimpleInputLayout;
 	CComPtr<ID3D11Buffer>         m_pVertexBuffer;
@@ -394,6 +457,7 @@ private:
 	bool m_dlssSRDlaa = false;
 	CDlssSR m_dlssSR;
 	CZipDepth m_zipDepth;
+	CComPtr<CMemAllocator> m_lookaheadAllocator;
 	const wchar_t* m_dlssSRInputStatus = nullptr;
 	bool m_dlssSRAfterMfg = false;
 	Tex2D_t m_dlssSRSource;
@@ -476,6 +540,9 @@ public:
 
 	int Type() override { return VP_DX11; }
 	int GetRenderAhead() override;
+	CComPtr<IMediaSample> CloneLookaheadSample(IMediaSample* sample, int64_t& pts, uint64_t& bytes);
+	bool PrefetchZipDepth(IMediaSample* sample, int64_t pts);
+	void StopZipDepthLookahead() { m_zipDepth.StopLookahead(); }
 	unsigned GetVideoProcessorUse() override { return m_D3D11VP.IsReady() ? 1u : 0u; }
 	std::wstring GetMfgStatus() override {
 		const unsigned multiplier = m_mfgMultiplier.load();
@@ -486,7 +553,7 @@ public:
 		std::wstring diagnostics = std::format(
 			L"\nMFG runtime    : cap x{}, needs x{}; fallback {:.1f}/s, skipped {:.1f}/s",
 			m_mfg.MaxAvailableMultiplier(), m_mfgTargetSlots, m_mfgFallbackFps, m_mfgSkippedPerSec);
-		if (m_useZipDepth) {
+		if (UsesZipDepthMfg()) {
 			diagnostics += std::format(L"\nMFG depth      : {}", m_mfg.UsesZipDepth() ? L"ZipDepth active" :
 				!MfgDepthSourceEligible() ? L"flat (unsupported source)" : m_zipDepth.Status());
 		}
@@ -602,13 +669,16 @@ private:
 
 	HRESULT D3D11VPPass(ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, const bool second);
 	HRESULT ConvertColorPass(ID3D11Texture2D* pRenderTarget);
-	HRESULT ResizeShaderPass(const Tex2D_t& Tex, ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, const int rotation);
+	HRESULT ResizeShaderPass(const Tex2D_t& Tex, ID3D11Texture2D* pRenderTarget, const CRect& srcRect,
+		const CRect& dstRect, const int rotation, bool applyFlip = true, Tex2D_t* intermediate = nullptr);
 	HRESULT FinalPass(const Tex2D_t& Tex, ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect);
 
 	bool DepthOverlayEnabled() const;
 	bool BlendSourceDepthOverlay(ID3D11Texture2D* image, ID3D11ShaderResourceView* source,
 		const CRect& picture, REFERENCE_TIME timestamp);
 	void DrawDepthOverlay(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME timestamp);
+	void DrawDepthView(ID3D11Texture2D* target, const CRect& picture, ID3D11ShaderResourceView* depth,
+		SIZE textureSize, const CRect& source, int rotation, bool inverted);
 	void DrawSubtitles(ID3D11Texture2D* pRenderTarget);
 	HRESULT Process(ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, bool second, bool allowDlssSR = true, REFERENCE_TIME timestamp = INVALID_TIME, CTex2DRing* processingPostScale = nullptr, bool* overlayInputHandled = nullptr);
     bool DlssSRSourceAllowed() const;
