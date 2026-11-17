@@ -58,7 +58,7 @@ public:
     void MarkSceneCut(int64_t pts);
     void ResetHistory();
     const wchar_t* ModelPrecision() const { return m_gpu.ModelPrecision(); }
-    void Stop();
+    void Stop(bool fastShutdown = false);
     uint64_t Generation() const { return m_generation; }
     const wchar_t* Status() const;
 

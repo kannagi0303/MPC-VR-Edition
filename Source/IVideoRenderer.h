@@ -56,6 +56,15 @@ enum :int {
     DLSSSR_SOURCE_1440p,
 };
 
+// Public ZipDepth routing. Internally the existing SR/MFG booleans are retained
+// for Settings_t compatibility; the property page exposes only this 4-state mode.
+enum :int {
+    ZIPDEPTH_Both = 0,
+    ZIPDEPTH_DlssSrOnly,
+    ZIPDEPTH_MfgOnly,
+    ZIPDEPTH_Disable,
+};
+
 enum :int {
 	CHROMA_Nearest = 0,
 	CHROMA_Bilinear,
@@ -393,12 +402,13 @@ struct Settings_t {
 	int reservedDlssSRDepthMode = {}; // Legacy Settings_t slot.
 	bool bWaitForExtendedStartup = false; // Reuses the retired pulldown slot.
 	bool bMfgLowMotion = false;
-	bool bUseZipDepthSr = false;
+	bool bUseZipDepthSr = true;
 	unsigned char reservedMfgOriginalProtection = {}; // Legacy Settings_t slot.
 	bool bShowDepthOverlay = false;
-	bool bUseZipDepthMfg = false; // Reuses the retired one-byte opacity slot.
-	bool bAdaptiveMfgDepth = true;
+	bool bUseZipDepthMfg = true; // Reuses the retired one-byte opacity slot.
+	bool bAdaptiveMfgDepth = false;
 	bool bShowMfgMotion = false;
+	bool bDepth3DPreview = false; // Experimental ZipDepth-driven oblique parallax preview.
 
 	Settings_t() {
 		SetDefault();
@@ -412,11 +422,12 @@ struct Settings_t {
         iDlssSRSourceLimit = DLSSSR_SOURCE_Disable;
 		bDlssSRTemporalHistory = true;
 		bMfgLowMotion = false;
-		bUseZipDepthSr = false;
-		bUseZipDepthMfg = false;
-		bAdaptiveMfgDepth = true;
+		bUseZipDepthSr = true;
+		bUseZipDepthMfg = true;
+		bAdaptiveMfgDepth = false;
 		bShowMfgMotion = false;
 		bShowDepthOverlay = false;
+		bDepth3DPreview = false;
 		if (IsWindows8OrGreater()) {
 			bUseD3D11                   = true;
 		} else {

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * (C) 2018-2026 see Authors.txt
  *
  * This file is part of MPC-BE.
@@ -66,6 +66,19 @@ void ComboBox_SelectByItemData(HWND hWnd, int nIDComboBox, LONG_PTR data)
 }
 
 
+static int ZipDepthModeFromSettings(const Settings_t& settings)
+{
+	if (settings.bUseZipDepthSr) return settings.bUseZipDepthMfg ? ZIPDEPTH_Both : ZIPDEPTH_DlssSrOnly;
+	return settings.bUseZipDepthMfg ? ZIPDEPTH_MfgOnly : ZIPDEPTH_Disable;
+}
+
+static void ApplyZipDepthMode(Settings_t& settings, const int mode)
+{
+	settings.bUseZipDepthSr = mode == ZIPDEPTH_Both || mode == ZIPDEPTH_DlssSrOnly;
+	settings.bUseZipDepthMfg = mode == ZIPDEPTH_Both || mode == ZIPDEPTH_MfgOnly;
+}
+
+
 // CVRMainPPage
 
 // https://msdn.microsoft.com/ru-ru/library/windows/desktop/dd375010(v=vs.85).aspx
@@ -88,10 +101,7 @@ void CVRMainPPage::SetControls()
 
 	ComboBox_SelectByItemData(m_hWnd, IDC_COMBO1, m_SetsPP.iTexFormat);
 	CheckDlgButton(IDC_MFG_MULTIPLIER, m_SetsPP.iMfgMultiplier >= 2 ? BST_CHECKED : BST_UNCHECKED);
-	CheckDlgButton(IDC_MFG_LOW_MOTION, m_SetsPP.bMfgLowMotion ? BST_CHECKED : BST_UNCHECKED);
-	CheckDlgButton(IDC_USE_ZIPDEPTH_SR, m_SetsPP.bUseZipDepthSr ? BST_CHECKED : BST_UNCHECKED);
-	CheckDlgButton(IDC_USE_ZIPDEPTH_MFG, m_SetsPP.bUseZipDepthMfg ? BST_CHECKED : BST_UNCHECKED);
-	CheckDlgButton(IDC_ADAPTIVE_MFG_DEPTH, m_SetsPP.bAdaptiveMfgDepth ? BST_CHECKED : BST_UNCHECKED);
+	ComboBox_SelectByItemData(m_hWnd, IDC_ZIPDEPTH_MODE, ZipDepthModeFromSettings(m_SetsPP));
 	CheckDlgButton(IDC_SHOW_MFG_MOTION, m_SetsPP.bShowMfgMotion ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_SHOW_DEPTH_OVERLAY, m_SetsPP.bShowDepthOverlay ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_MFG_FEATURE_BADGES, m_SetsPP.bShowFeatureBadges ? BST_CHECKED : BST_UNCHECKED);
@@ -197,15 +207,13 @@ void CVRMainPPage::EnableControls()
 	const BOOL bMfgEnabled = m_SetsPP.bUseD3D11 && m_SetsPP.iMfgMultiplier >= 2 && IsWindows10OrGreater();
 	GetDlgItem(IDC_MFG_MULTIPLIER).EnableWindow(m_SetsPP.bUseD3D11 && IsWindows10OrGreater());
 	GetDlgItem(IDC_MFG_PROCESSING_MODE).EnableWindow(bMfgEnabled);
-	GetDlgItem(IDC_MFG_LOW_MOTION).EnableWindow(bMfgEnabled);
 	const BOOL canUseDlssSR = m_SetsPP.bUseD3D11 && IsWindows10OrGreater();
 	const bool srEnabled = canUseDlssSR && m_SetsPP.bDlssSR;
-	GetDlgItem(IDC_USE_ZIPDEPTH_SR).EnableWindow(srEnabled);
-	GetDlgItem(IDC_USE_ZIPDEPTH_MFG).EnableWindow(bMfgEnabled);
-	GetDlgItem(IDC_ADAPTIVE_MFG_DEPTH).EnableWindow(bMfgEnabled && m_SetsPP.bUseZipDepthMfg);
+	GetDlgItem(IDC_ZIPDEPTH_MODE).EnableWindow(canUseDlssSR);
 	GetDlgItem(IDC_SHOW_MFG_MOTION).EnableWindow(bMfgEnabled);
-	GetDlgItem(IDC_SHOW_DEPTH_OVERLAY).EnableWindow(
-		(srEnabled && m_SetsPP.bUseZipDepthSr) || (bMfgEnabled && m_SetsPP.bUseZipDepthMfg));
+	const bool depthAvailable = (srEnabled && m_SetsPP.bUseZipDepthSr) ||
+		(bMfgEnabled && m_SetsPP.bUseZipDepthMfg);
+	GetDlgItem(IDC_SHOW_DEPTH_OVERLAY).EnableWindow(depthAvailable);
 	GetDlgItem(IDC_DLSS_SR_SOURCE_LIMIT).EnableWindow(canUseDlssSR);
 }
 
@@ -354,6 +362,11 @@ HRESULT CVRMainPPage::OnActivate()
 	ComboBox_AddStringData(m_hWnd, IDC_EXTENDED_STARTUP, L"Play first", 0);
 	ComboBox_AddStringData(m_hWnd, IDC_EXTENDED_STARTUP, L"Wait for Extended", 1);
 
+	ComboBox_AddStringData(m_hWnd, IDC_ZIPDEPTH_MODE, L"Both", ZIPDEPTH_Both);
+	ComboBox_AddStringData(m_hWnd, IDC_ZIPDEPTH_MODE, L"DLSS SR Only", ZIPDEPTH_DlssSrOnly);
+	ComboBox_AddStringData(m_hWnd, IDC_ZIPDEPTH_MODE, L"MFG Only", ZIPDEPTH_MfgOnly);
+	ComboBox_AddStringData(m_hWnd, IDC_ZIPDEPTH_MODE, L"Disable", ZIPDEPTH_Disable);
+
 	// The public MFG setting is now a checkbox. The internal Auto cadence
 	// algorithm remains unchanged (Off=0, Auto=7).
 	if (!::GetDlgItem(m_hWnd, IDC_MFG_MULTIPLIER)) return E_FAIL;
@@ -382,23 +395,14 @@ HRESULT CVRMainPPage::OnActivate()
 		L"Play first: Show video while Extended features load.\n"
 		L"Wait for Extended: Prepare enabled features before playback.\n"
 		L"Applies when you open a video.");
-	AddHint(IDC_USE_ZIPDEPTH_SR,
-		L"Use ZipDepth for DLSS SR and DLAA on supported video.\n"
-		L"Use flat depth while an estimate is unavailable.");
-	AddHint(IDC_USE_ZIPDEPTH_MFG,
-		L"Use ZipDepth for MFG on supported video.\n"
-		L"Flat depth is used while an estimate is unavailable.");
+	AddHint(IDC_ZIPDEPTH_MODE,
+		L"Choose which Extended path receives ZipDepth.\n"
+		L"Both (default), DLSS SR Only, MFG Only, or Disable.");
 	AddHint(IDC_SHOW_DEPTH_OVERLAY,
-		L"Show the stabilized depth used by MFG at 95% opacity.\n"
-		L"Without MFG, show the normalized ZipDepth map.");
-	AddHint(IDC_ADAPTIVE_MFG_DEPTH,
-		L"Accept new depth estimates only for the current or previous source frame.\n"
-		L"MFG can still reuse aligned depth history.");
+		L"Show the active ZipDepth map as a diagnostic overlay.");
 	AddHint(IDC_SHOW_MFG_MOTION,
 		L"Draw MFG motion arrows on the final picture.\n"
 		L"Arrows point from the current source frame to the previous source frame.");
-	AddHint(IDC_MFG_LOW_MOTION,
-		L"Skips interpolation when sustained low image difference and recent optical flow both indicate low motion. Repeat replacement takes priority. Progressive SDR NV12/P010 only.");
 	AddHint(IDC_MFG_FEATURE_BADGES,
 		L"Show DLSS SR, VSR and MFG status.\n"
 		L"Keep it visible while paused. Show it for 5 seconds after starting, resuming or resizing.");
@@ -549,19 +553,12 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 				return (LRESULT)1;
 			}
 
-			if (nID == IDC_USE_ZIPDEPTH_SR || nID == IDC_USE_ZIPDEPTH_MFG) {
-				m_SetsPP.bUseZipDepthSr = IsDlgButtonChecked(IDC_USE_ZIPDEPTH_SR) == BST_CHECKED;
-				m_SetsPP.bUseZipDepthMfg = IsDlgButtonChecked(IDC_USE_ZIPDEPTH_MFG) == BST_CHECKED;
-				EnableControls();
+			if (nID == IDC_SHOW_DEPTH_OVERLAY) {
+				m_SetsPP.bShowDepthOverlay = IsDlgButtonChecked(IDC_SHOW_DEPTH_OVERLAY) == BST_CHECKED;
 				SetDirty();
 				return (LRESULT)1;
 			}
-			if (nID == IDC_SHOW_DEPTH_OVERLAY || nID == IDC_ADAPTIVE_MFG_DEPTH || nID == IDC_SHOW_MFG_MOTION) {
-				SetDirty();
-				return (LRESULT)1;
-			}
-			if (nID == IDC_MFG_LOW_MOTION) {
-				m_SetsPP.bMfgLowMotion = IsDlgButtonChecked(IDC_MFG_LOW_MOTION) == BST_CHECKED;
+			if (nID == IDC_SHOW_MFG_MOTION) {
 				SetDirty();
 				return (LRESULT)1;
 			}
@@ -589,6 +586,15 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 		}
 
 		if (action == CBN_SELCHANGE) {
+			if (nID == IDC_ZIPDEPTH_MODE) {
+				const LRESULT mode = ComboBox_GetCurItemData(m_hWnd, nID);
+				if (mode >= ZIPDEPTH_Both && mode <= ZIPDEPTH_Disable) {
+					ApplyZipDepthMode(m_SetsPP, static_cast<int>(mode));
+					EnableControls();
+					SetDirty();
+				}
+				return (LRESULT)1;
+			}
 			if (nID == IDC_EXTENDED_STARTUP) {
 				lValue = ComboBox_GetCurItemData(m_hWnd, nID);
 				if ((lValue == 0 || lValue == 1) && m_SetsPP.bWaitForExtendedStartup != (lValue == 1)) {
@@ -813,10 +819,12 @@ HRESULT CVRMainPPage::OnApplyChanges()
 	// actual control on Apply, including when Windows did not send a selection
 	// notification.  Reject a missing selection instead of interpreting -1 as
 	// a multiplier or overwriting another saved preference.
-	m_SetsPP.bMfgLowMotion = IsDlgButtonChecked(IDC_MFG_LOW_MOTION) == BST_CHECKED;
-	m_SetsPP.bUseZipDepthSr = IsDlgButtonChecked(IDC_USE_ZIPDEPTH_SR) == BST_CHECKED;
-	m_SetsPP.bUseZipDepthMfg = IsDlgButtonChecked(IDC_USE_ZIPDEPTH_MFG) == BST_CHECKED;
-	m_SetsPP.bAdaptiveMfgDepth = IsDlgButtonChecked(IDC_ADAPTIVE_MFG_DEPTH) == BST_CHECKED;
+	m_SetsPP.bMfgLowMotion = false;
+	m_SetsPP.bAdaptiveMfgDepth = false;
+	m_SetsPP.bDepth3DPreview = false;
+	const LRESULT zipDepthMode = ComboBox_GetCurItemData(m_hWnd, IDC_ZIPDEPTH_MODE);
+	if (zipDepthMode < ZIPDEPTH_Both || zipDepthMode > ZIPDEPTH_Disable) return E_INVALIDARG;
+	ApplyZipDepthMode(m_SetsPP, static_cast<int>(zipDepthMode));
 	m_SetsPP.bShowMfgMotion = IsDlgButtonChecked(IDC_SHOW_MFG_MOTION) == BST_CHECKED;
 	m_SetsPP.bShowDepthOverlay = IsDlgButtonChecked(IDC_SHOW_DEPTH_OVERLAY) == BST_CHECKED;
 	m_SetsPP.bShowFeatureBadges = IsDlgButtonChecked(IDC_MFG_FEATURE_BADGES) == BST_CHECKED;

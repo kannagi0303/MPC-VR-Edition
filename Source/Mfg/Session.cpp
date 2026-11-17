@@ -41,6 +41,17 @@ UINT MaxGenerationHeight() {
     if(value==0) return std::numeric_limits<UINT>::max();
     return value>=360 && value<=8192 ? static_cast<UINT>(value) : std::numeric_limits<UINT>::max();
 }
+bool PinModuleForBackgroundShutdown() {
+    static std::once_flag once;
+    static bool pinned = false;
+    std::call_once(once, [] {
+        HMODULE module = nullptr;
+        pinned = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            reinterpret_cast<LPCWSTR>(&PinModuleForBackgroundShutdown), &module) != FALSE;
+    });
+    return pinned;
+}
+
 bool AsyncProducerEnabled() {
     static const bool enabled=[] {
         wchar_t value[8]{};
@@ -523,13 +534,36 @@ struct Session::WarmupJob {
     std::unique_ptr<Impl> result;
     std::wstring failure;
     std::atomic<bool> done{false};
-    // Join before destroying any data the worker can access.
+    std::atomic<bool> abandon{false};
+    // Normal paths join. Final renderer teardown may detach after pinning the module.
     std::jthread worker;
 };
+
+std::mutex Session::s_retiredWarmupMutex;
+std::vector<std::unique_ptr<Session::WarmupJob>> Session::s_retiredWarmups;
+
+void Session::ReapRetiredWarmups() {
+    std::lock_guard guard(s_retiredWarmupMutex);
+    std::erase_if(s_retiredWarmups, [](const auto& job) {
+        return job->done.load(std::memory_order_acquire);
+    });
+}
+
+void Session::RetireWarmup(std::unique_ptr<WarmupJob> job) {
+    if (!job) return;
+    job->abandon.store(true, std::memory_order_release);
+    if (job->worker.joinable()) job->worker.detach();
+    std::lock_guard guard(s_retiredWarmupMutex);
+    std::erase_if(s_retiredWarmups, [](const auto& old) {
+        return old->done.load(std::memory_order_acquire);
+    });
+    s_retiredWarmups.emplace_back(std::move(job));
+}
 
 Session::Session()=default;Session::~Session(){Reset();}
 bool Session::PollWarmup(ID3D11Device1* device, ID3D11DeviceContext1* context, ID3D11Texture2D* image)
 {
+    ReapRetiredWarmups();
     if (failed_) return true;
     D3D11_TEXTURE2D_DESC desc{};
     image->GetDesc(&desc);
@@ -574,10 +608,18 @@ bool Session::PollWarmup(ID3D11Device1* device, ID3D11DeviceContext1* context, I
             try {
                 next = std::make_unique<Impl>();
                 next->CreateResources(pending->device.Get(), pending->desc, false);
-                pending->result = std::move(next);
+                if (!pending->abandon.load(std::memory_order_acquire)) {
+                    pending->result = std::move(next);
+                } else if (next && !next->Safe()) {
+                    std::lock_guard guard(Impl::retiredMutex);
+                    Impl::retired.emplace_back(std::move(next));
+                } else {
+                    next.reset();
+                }
             } catch (const std::exception& e) {
                 const std::string what = e.what();
-                pending->failure.assign(what.begin(), what.end());
+                if (!pending->abandon.load(std::memory_order_relaxed))
+                    pending->failure.assign(what.begin(), what.end());
                 if (next && !next->Safe()) {
                     std::lock_guard guard(Impl::retiredMutex);
                     Impl::retired.emplace_back(std::move(next));
@@ -600,6 +642,7 @@ bool Session::PollWarmup(ID3D11Device1* device, ID3D11DeviceContext1* context, I
 bool Session::Warmup(ID3D11Device1* device, ID3D11DeviceContext1* context,
     ID3D11Texture2D* image, unsigned multiplier,
     bool nativeSharedOriginals) {
+    ReapRetiredWarmups();
     if(failed_ || !device || !context || !image || multiplier<2 || multiplier>MaxMultiplier) return false;
     D3D11_TEXTURE2D_DESC desc{};image->GetDesc(&desc);
     // Do not disturb an already initialized/running session during Pause.
@@ -655,6 +698,26 @@ void Session::ResetDepthHistory() {
     }
 }
 void Session::Reset() {
+    if(impl_) {
+        if(!impl_->Safe()) {
+            std::lock_guard guard(Impl::retiredMutex);
+            Impl::retired.emplace_back(std::move(impl_));
+        } else impl_.reset();
+    }
+    failed_=false;
+}
+void Session::FastShutdown() {
+    if (warmup_) {
+        if (warmup_->done.load(std::memory_order_acquire)) {
+            warmup_.reset();
+        } else if (PinModuleForBackgroundShutdown()) {
+            RetireWarmup(std::move(warmup_));
+        } else {
+            // If the DLL cannot be pinned, keep the conservative join rather than
+            // allow a detached thread to execute code from an unloaded module.
+            warmup_.reset();
+        }
+    }
     if(impl_) {
         if(!impl_->Safe()) {
             std::lock_guard guard(Impl::retiredMutex);

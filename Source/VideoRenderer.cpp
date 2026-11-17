@@ -126,6 +126,18 @@ static std::atomic_int g_nInstance = 0;
 // install wins, which is no worse than two filters fighting over one key.
 static CMpcVideoRenderer* g_pToggleKeyOwner = nullptr;
 
+static int ZipDepthModeFromSettings(const Settings_t& settings)
+{
+	if (settings.bUseZipDepthSr) return settings.bUseZipDepthMfg ? ZIPDEPTH_Both : ZIPDEPTH_DlssSrOnly;
+	return settings.bUseZipDepthMfg ? ZIPDEPTH_MfgOnly : ZIPDEPTH_Disable;
+}
+
+static void ApplyZipDepthMode(Settings_t& settings, const int mode)
+{
+	settings.bUseZipDepthSr = mode == ZIPDEPTH_Both || mode == ZIPDEPTH_DlssSrOnly;
+	settings.bUseZipDepthMfg = mode == ZIPDEPTH_Both || mode == ZIPDEPTH_MfgOnly;
+}
+
 // The settings to and from a registry key, by name. The filter's own key and each
 // preset's go through these two and nothing else, so a setting added later is in
 // the presets without anybody having to remember them.
@@ -135,9 +147,6 @@ static void ReadSettings(CRegKey& key, Settings_t& sets)
 	if (ERROR_SUCCESS == key.QueryDWORDValue(L"MfgMultiplier", dw)) {
 		// Migrate legacy fixed x2-x6 to the sole supported Auto mode.
 		sets.iMfgMultiplier = dw >= 2 && dw <= 7 ? 7u : 0u;
-	}
-	if (ERROR_SUCCESS == key.QueryDWORDValue(L"MfgLowMotion", dw)) {
-		sets.bMfgLowMotion = dw != 0;
 	}
 	if (ERROR_SUCCESS == key.QueryDWORDValue(L"MfgProcessingMode", dw)) {
 		sets.iMfgProcessingMode = dw <= 1 ? dw : 0;
@@ -366,15 +375,35 @@ static void ReadSettings(CRegKey& key, Settings_t& sets)
 		sets.szDlssSRDllPath[std::size(sets.szDlssSRDllPath) - 1] = L'\0';
 	}
 #endif
-	if (key.QueryDWORDValue(L"UseZipDepth", dw) == ERROR_SUCCESS) {
-		sets.bUseZipDepthSr = sets.bUseZipDepthMfg = dw != 0;
+	// New single ZipDepth routing mode. If absent, preserve the last checkbox-based
+	// configuration from older builds; completely new installs keep the default Both.
+	DWORD zipDepthMode = ZIPDEPTH_Both;
+	if (key.QueryDWORDValue(L"ZipDepthMode", zipDepthMode) == ERROR_SUCCESS &&
+		zipDepthMode <= ZIPDEPTH_Disable) {
+		ApplyZipDepthMode(sets, static_cast<int>(zipDepthMode));
 	} else {
-		sets.bUseZipDepthMfg = key.QueryDWORDValue(L"MfgZipDepth", dw) == ERROR_SUCCESS && dw != 0;
-		sets.bUseZipDepthSr = key.QueryDWORDValue(L"DlssSRDepthMode", dw) == ERROR_SUCCESS && dw == 2;
+		DWORD sr = 0, mfg = 0;
+		const bool haveSr = key.QueryDWORDValue(L"UseZipDepthSr", sr) == ERROR_SUCCESS;
+		const bool haveMfg = key.QueryDWORDValue(L"UseZipDepthMfg", mfg) == ERROR_SUCCESS;
+		if (haveSr || haveMfg) {
+			sets.bUseZipDepthSr = haveSr && sr != 0;
+			sets.bUseZipDepthMfg = haveMfg && mfg != 0;
+		} else if (key.QueryDWORDValue(L"UseZipDepth", dw) == ERROR_SUCCESS) {
+			sets.bUseZipDepthSr = sets.bUseZipDepthMfg = dw != 0;
+		} else {
+			DWORD legacyMfg = 0, legacySr = 0;
+			const bool haveLegacyMfg = key.QueryDWORDValue(L"MfgZipDepth", legacyMfg) == ERROR_SUCCESS;
+			const bool haveLegacySr = key.QueryDWORDValue(L"DlssSRDepthMode", legacySr) == ERROR_SUCCESS;
+			if (haveLegacyMfg || haveLegacySr) {
+				sets.bUseZipDepthMfg = haveLegacyMfg && legacyMfg != 0;
+				sets.bUseZipDepthSr = haveLegacySr && legacySr == 2;
+			}
+		}
 	}
-	if (key.QueryDWORDValue(L"UseZipDepthSr", dw) == ERROR_SUCCESS) sets.bUseZipDepthSr = dw != 0;
-	if (key.QueryDWORDValue(L"UseZipDepthMfg", dw) == ERROR_SUCCESS) sets.bUseZipDepthMfg = dw != 0;
-	if (key.QueryDWORDValue(L"AdaptiveMfgDepth", dw) == ERROR_SUCCESS) sets.bAdaptiveMfgDepth = dw != 0;
+	// Retired experiments are intentionally fixed off; do not restore stale values.
+	sets.bMfgLowMotion = false;
+	sets.bAdaptiveMfgDepth = false;
+	sets.bDepth3DPreview = false;
 	if (key.QueryDWORDValue(L"ShowMfgMotion", dw) == ERROR_SUCCESS) sets.bShowMfgMotion = dw != 0;
 	if (key.QueryDWORDValue(L"ShowDepthOverlay", dw) == ERROR_SUCCESS) {
 		sets.bShowDepthOverlay = dw != 0;
@@ -403,13 +432,16 @@ static void WriteSettings(CRegKey& key, const Settings_t& sets)
 	key.SetDWORDValue(L"MfgMultiplier", sets.iMfgMultiplier);
 	key.SetDWORDValue(L"MfgProcessingMode", sets.iMfgProcessingMode);
 	key.SetDWORDValue(L"WaitForExtendedStartup", sets.bWaitForExtendedStartup);
-	key.SetDWORDValue(L"MfgLowMotion", sets.bMfgLowMotion);
+	key.SetDWORDValue(L"MfgLowMotion", 0);
+	key.SetDWORDValue(L"ZipDepthMode", ZipDepthModeFromSettings(sets));
+	// Keep legacy fields synchronized so older builds/presets do not misread the mode.
 	key.SetDWORDValue(L"UseZipDepth", sets.bUseZipDepthSr || sets.bUseZipDepthMfg);
 	key.SetDWORDValue(L"UseZipDepthSr", sets.bUseZipDepthSr);
 	key.SetDWORDValue(L"UseZipDepthMfg", sets.bUseZipDepthMfg);
-	key.SetDWORDValue(L"AdaptiveMfgDepth", sets.bAdaptiveMfgDepth);
+	key.SetDWORDValue(L"AdaptiveMfgDepth", 0);
 	key.SetDWORDValue(L"ShowMfgMotion", sets.bShowMfgMotion);
 	key.SetDWORDValue(L"ShowDepthOverlay", sets.bShowDepthOverlay);
+	key.SetDWORDValue(L"Depth3DPreview", 0);
 	key.SetDWORDValue(L"ShowFeatureBadges", sets.bShowFeatureBadges);
 	key.SetDWORDValue(OPT_UseD3D11,            sets.bUseD3D11);
 	key.SetDWORDValue(OPT_ShowStatistics,      sets.bShowStats);
@@ -1495,6 +1527,7 @@ std::optional<HRESULT> CMpcVideoRenderer::ReceiveCompletedSample(IMediaSample* s
 		sample->GetTime(&pts, &end) == S_OK && pts >= 0 && end > pts;
 	const bool discontinuity = sample->IsDiscontinuity() == S_OK;
 	std::optional<uint64_t> epoch;
+	std::optional<uint64_t> deferredFrameFence;
 	for (;;) {
 		{
 			CAutoLock state(&m_InterfaceLock);
@@ -1506,11 +1539,12 @@ std::optional<HRESULT> CMpcVideoRenderer::ReceiveCompletedSample(IMediaSample* s
 			if (dx11->m_completedPresenter.Failed()) dx11->ClearCompletedFrames(true);
 			const bool pending = dx11->CompletedFramesPending() && !dx11->m_completedPresenter.Failed();
 			if (m_State != State_Running || !m_bStreaming) {
+				deferredFrameFence.reset();
 				if (!pending) return {};
 			} else if (!valid || m_completedSegmentRate != 1.0 || !dx11->CanBufferCompletedSample()) {
 				if (!pending) return {};
 			} else if ((!discontinuity || !pending) && !dx11->LegacyFramesPending() &&
-			           dx11->CanProduceCompletedFrame(pts)) {
+			           dx11->CanProduceCompletedFrame(pts, deferredFrameFence)) {
 				if (dx11->PrepareCompletedTarget()) {
 					m_schedulingCompletedSample = true;
 					const auto prepared = PrepareReceive(sample);
@@ -2464,6 +2498,9 @@ STDMETHODIMP_(void) CMpcVideoRenderer::SetSettings(const Settings_t& setings)
 	CAutoLock cRendererLock(&m_RendererLock);
 
 	m_Sets = setings;
+	m_Sets.bMfgLowMotion = false;
+	m_Sets.bAdaptiveMfgDepth = false;
+	m_Sets.bDepth3DPreview = false;
 	// Keep both legacy callers and saved settings compatible with the
 	// streamlined Off/Auto UI and the removal of the VSR Always option.
 	m_Sets.iMfgMultiplier = m_Sets.iMfgMultiplier >= 2 && m_Sets.iMfgMultiplier <= 7 ? 7u : 0u;
@@ -2514,16 +2551,19 @@ STDMETHODIMP CMpcVideoRenderer::SaveSettings()
 	if (key.QueryDWORDValue(L"MfgProcessingMode", savedMode) != ERROR_SUCCESS) return E_FAIL;
 	DWORD savedStartup = 0;
 	if (key.QueryDWORDValue(L"WaitForExtendedStartup", savedStartup) != ERROR_SUCCESS) return E_FAIL;
-	DWORD savedZipDepthSr = 0, savedZipDepthMfg = 0;
-	if (key.QueryDWORDValue(L"UseZipDepthSr", savedZipDepthSr) != ERROR_SUCCESS ||
-		key.QueryDWORDValue(L"UseZipDepthMfg", savedZipDepthMfg) != ERROR_SUCCESS) return E_FAIL;
+	DWORD savedZipDepthMode = 0;
+	if (key.QueryDWORDValue(L"ZipDepthMode", savedZipDepthMode) != ERROR_SUCCESS) return E_FAIL;
 	DWORD savedDepthOverlay = 0;
 	if (key.QueryDWORDValue(L"ShowDepthOverlay", savedDepthOverlay) != ERROR_SUCCESS) return E_FAIL;
+	DWORD savedLowMotion = 1, savedAdaptive = 1, savedDepth3D = 1;
+	if (key.QueryDWORDValue(L"MfgLowMotion", savedLowMotion) != ERROR_SUCCESS ||
+		key.QueryDWORDValue(L"AdaptiveMfgDepth", savedAdaptive) != ERROR_SUCCESS ||
+		key.QueryDWORDValue(L"Depth3DPreview", savedDepth3D) != ERROR_SUCCESS) return E_FAIL;
 	return saved == snapshot.iMfgMultiplier && savedMode == snapshot.iMfgProcessingMode &&
 		savedStartup == static_cast<DWORD>(snapshot.bWaitForExtendedStartup) &&
-		savedZipDepthSr == static_cast<DWORD>(snapshot.bUseZipDepthSr) &&
-		savedZipDepthMfg == static_cast<DWORD>(snapshot.bUseZipDepthMfg) &&
-		savedDepthOverlay == static_cast<DWORD>(snapshot.bShowDepthOverlay) ? S_OK : E_FAIL;
+		savedZipDepthMode == static_cast<DWORD>(ZipDepthModeFromSettings(snapshot)) &&
+		savedDepthOverlay == static_cast<DWORD>(snapshot.bShowDepthOverlay) &&
+		savedLowMotion == 0 && savedAdaptive == 0 && savedDepth3D == 0 ? S_OK : E_FAIL;
 }
 
 // ISubRender (DX9)

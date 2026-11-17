@@ -1,4 +1,4 @@
-/*
+﻿/*
 * (C) 2018-2026 see Authors.txt
 *
 * This file is part of MPC-BE.
@@ -118,6 +118,12 @@ const UINT dither_size = 32;
 struct VERTEX {
 	DirectX::XMFLOAT3 Pos;
 	DirectX::XMFLOAT2 TexCoord;
+};
+
+struct DEPTH3D_VERTEX {
+	DirectX::XMFLOAT2 Pos;
+	DirectX::XMFLOAT2 TexCoord;
+	DirectX::XMFLOAT2 DepthCoord;
 };
 
 struct PS_EXTSHADER_CONSTANTS {
@@ -395,6 +401,7 @@ CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Setti
 	m_adaptiveMfgDepth = config.bAdaptiveMfgDepth;
 	m_showMfgMotion = config.bShowMfgMotion;
 	m_showDepthOverlay = config.bShowDepthOverlay;
+	m_depth3DPreview = config.bDepth3DPreview;
 	m_mfgLowMotionEnabled = config.bMfgLowMotion;
 	m_bShowStats           = config.bShowStats;
 	m_showFeatureStatus.store(config.bShowFeatureBadges, std::memory_order_relaxed);
@@ -477,6 +484,7 @@ CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Setti
 
 CDX11VideoProcessor::~CDX11VideoProcessor()
 {
+	m_fastShutdown = true;
 	m_completedPresenter.Stop();
 	for (const auto& [displayName, state] : m_hdrModeSavedState) {
 		DisplayConfig_t displayConfig = {};
@@ -729,8 +737,8 @@ void CDX11VideoProcessor::ReleaseVP()
 void CDX11VideoProcessor::ReleaseDevice()
 {
 	ClearCompletedFrames(true);
-	StopMfg();
-	m_zipDepth.Stop();
+	StopMfg(true, m_fastShutdown);
+	m_zipDepth.Stop(m_fastShutdown);
 	DLog(L"CDX11VideoProcessor::ReleaseDevice()");
 
 	ReleaseVP();
@@ -780,10 +788,20 @@ void CDX11VideoProcessor::ReleaseDevice()
 	m_pPS_DepthOverlay.Release();
 	m_pDepthOverlayBlendState.Release();
 	m_pDepthOverlayConstants.Release();
+	m_pVS_Depth3DPreview.Release();
+	m_pPS_Depth3DPreview.Release();
+	m_pVDepth3DPreviewInputLayout.Release();
+	m_pDepth3DPreviewConstants.Release();
+	m_pDepth3DPreviewVertexBuffer.Release();
+	m_pDepth3DPreviewIndexBuffer.Release();
+	m_pDepth3DPreviewRasterizer.Release();
+	m_depth3DPreviewIndexCount = 0;
+	m_depth3DPreviewTexture.Release();
 	m_pMfgMotionShader.Release();
 	m_pMfgMotionBlend.Release();
 	m_pMfgMotionConstants.Release();
 	m_depthOverlayShaderFailed = false;
+	m_depth3DPreviewShaderFailed = false;
 	m_pSamplerPoint.Release();
 	m_pSamplerLinear.Release();
 	m_pSamplerDither.Release();
@@ -828,7 +846,7 @@ void CDX11VideoProcessor::ReleaseSwapChain()
         m_resizePending = false;
         UpdateRenderRect();
     }
-	StopMfg();
+	StopMfg(true, m_fastShutdown);
 	if (m_pDXGISwapChain1) {
 		m_pDXGISwapChain1->SetFullscreenState(FALSE, nullptr);
 	}
@@ -4131,6 +4149,235 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
 	m_mfg.MarkConsumed(serial);
 }
 
+bool CDX11VideoProcessor::EnsureDepth3DMeshResources()
+{
+	if (m_depth3DPreviewShaderFailed) return false;
+	if (m_pVS_Depth3DPreview && m_pPS_Depth3DPreview && m_pVDepth3DPreviewInputLayout &&
+		m_pDepth3DPreviewConstants && m_pDepth3DPreviewVertexBuffer && m_pDepth3DPreviewIndexBuffer &&
+		m_pDepth3DPreviewRasterizer && m_depth3DPreviewIndexCount) return true;
+
+	if (!m_pVS_Depth3DPreview || !m_pPS_Depth3DPreview || !m_pVDepth3DPreviewInputLayout || !m_pDepth3DPreviewConstants) {
+		static constexpr char vertexShaderSource[] = R"(
+Texture2D<float> Depth : register(t0);
+SamplerState Linear : register(s0);
+cbuffer Settings : register(b0) {
+    float4 SourceUV; // xy origin, zw extent in the completed video texture
+    float4 Params;   // rotated, Z depth strength, normalized depth span, camera distance
+};
+struct VS_INPUT {
+    float2 Pos : POSITION;
+    float2 Tex : TEXCOORD0;
+    float2 DepthCoord : TEXCOORD1;
+};
+struct VS_OUTPUT {
+    float4 Pos : SV_POSITION;
+    float2 Tex : TEXCOORD0;
+};
+VS_OUTPUT main(VS_INPUT input) {
+    VS_OUTPUT output;
+    float2 local = input.Pos;
+    float2 depthCoord = input.DepthCoord;
+    float2 depthUV = Params.x > 0.5 ? float2(1.0 - depthCoord.y, depthCoord.x) : depthCoord;
+    float depth = Depth.SampleLevel(Linear, saturate(depthUV), 0);
+    float height = clamp((0.5 - depth) / max(Params.z, 1e-4), -0.5, 0.5);
+
+    // Each tile is independent. All four vertices in the tile share one sampled
+    // depth value, so depth discontinuities create step changes rather than the
+    // rubber-sheet tearing seen with a shared continuous mesh.
+    float x = (local.x - 0.5) * 2.0;
+    float y = (0.5 - local.y) * 2.0;
+    float z = height * Params.y;
+    const float c = 0.8660254; // cos(30 deg)
+    const float s = 0.5;       // sin(30 deg)
+    float xr = x * c + z * s;
+    float zr = -x * s + z * c;
+
+    // Small perspective projection. Fit keeps intentional black borders so
+    // the whole tilted relief remains visible for this diagnostic preview.
+    float cameraDistance = max(Params.w, 1.5);
+    float perspective = cameraDistance / max(cameraDistance - zr, 0.5);
+    const float fit = 0.80;
+    output.Pos = float4(xr * perspective * fit, y * perspective * fit, 0.0, 1.0);
+    output.Tex = local;
+    return output;
+}
+)";
+		static constexpr char pixelShaderSource[] = R"(
+Texture2D<float4> Image : register(t1);
+SamplerState Linear : register(s0);
+cbuffer Settings : register(b0) {
+    float4 SourceUV; // xy origin, zw extent in the completed video texture
+    float4 Params;   // rotated, depth strength, normalized depth span, projected width scale
+};
+struct VS_OUTPUT {
+    float4 Pos : SV_POSITION;
+    float2 Tex : TEXCOORD0;
+};
+float4 main(VS_OUTPUT input) : SV_TARGET {
+    float2 sampleLocal = saturate(input.Tex);
+    return Image.SampleLevel(Linear, SourceUV.xy + sampleLocal * SourceUV.zw, 0);
+}
+)";
+		CComPtr<ID3DBlob> vsCode, psCode;
+		D3D11_BUFFER_DESC constants{32, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
+		if (FAILED(CompileShader(vertexShaderSource, nullptr, "vs_4_0", &vsCode)) ||
+			FAILED(CompileShader(pixelShaderSource, nullptr, "ps_4_0", &psCode)) ||
+			FAILED(m_pDevice->CreateVertexShader(vsCode->GetBufferPointer(), vsCode->GetBufferSize(), nullptr, &m_pVS_Depth3DPreview)) ||
+			FAILED(m_pDevice->CreatePixelShader(psCode->GetBufferPointer(), psCode->GetBufferSize(), nullptr, &m_pPS_Depth3DPreview)) ||
+			FAILED(m_pDevice->CreateBuffer(&constants, nullptr, &m_pDepth3DPreviewConstants))) {
+			m_depth3DPreviewShaderFailed = true;
+			return false;
+		}
+		D3D11_INPUT_ELEMENT_DESC layout[] = {
+			{"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+			{"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0},
+			{"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
+		};
+		if (FAILED(m_pDevice->CreateInputLayout(layout, std::size(layout), vsCode->GetBufferPointer(), vsCode->GetBufferSize(), &m_pVDepth3DPreviewInputLayout))) {
+			m_depth3DPreviewShaderFailed = true;
+			return false;
+		}
+	}
+
+	if (!m_pDepth3DPreviewVertexBuffer || !m_pDepth3DPreviewIndexBuffer || !m_depth3DPreviewIndexCount) {
+		// Independent depth tiles instead of one continuous cloth-like mesh.
+		// Each tile uses one representative depth for all four of its corners,
+		// so hard depth changes become height steps rather than stretched slopes.
+		constexpr UINT gridX = 192;
+		constexpr UINT gridY = 108;
+		constexpr float overlap = 1.03f; // small XY overlap to hide cracks between tiles
+		std::vector<DEPTH3D_VERTEX> vertices;
+		vertices.reserve(gridX * gridY * 4);
+		std::vector<uint32_t> indices;
+		indices.reserve(gridX * gridY * 6);
+		for (UINT y = 0; y < gridY; y++) {
+			const float v0 = float(y) / gridY;
+			const float v1 = float(y + 1) / gridY;
+			const float vc = (v0 + v1) * 0.5f;
+			for (UINT x = 0; x < gridX; x++) {
+				const float u0 = float(x) / gridX;
+				const float u1 = float(x + 1) / gridX;
+				const float uc = (u0 + u1) * 0.5f;
+				const float halfW = (u1 - u0) * 0.5f * overlap;
+				const float halfH = (v1 - v0) * 0.5f * overlap;
+				const float px0 = uc - halfW;
+				const float px1 = uc + halfW;
+				const float py0 = vc - halfH;
+				const float py1 = vc + halfH;
+				const uint32_t base = uint32_t(vertices.size());
+				const DirectX::XMFLOAT2 dc{uc, vc};
+				vertices.push_back({{px0, py0}, {u0, v0}, dc});
+				vertices.push_back({{px1, py0}, {u1, v0}, dc});
+				vertices.push_back({{px0, py1}, {u0, v1}, dc});
+				vertices.push_back({{px1, py1}, {u1, v1}, dc});
+				indices.push_back(base + 0);
+				indices.push_back(base + 2);
+				indices.push_back(base + 1);
+				indices.push_back(base + 1);
+				indices.push_back(base + 2);
+				indices.push_back(base + 3);
+			}
+		}
+		D3D11_BUFFER_DESC vb{};
+		vb.ByteWidth = UINT(vertices.size() * sizeof(DEPTH3D_VERTEX));
+		vb.Usage = D3D11_USAGE_IMMUTABLE;
+		vb.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+		D3D11_SUBRESOURCE_DATA vd{vertices.data()};
+		D3D11_BUFFER_DESC ib{};
+		ib.ByteWidth = UINT(indices.size() * sizeof(uint32_t));
+		ib.Usage = D3D11_USAGE_IMMUTABLE;
+		ib.BindFlags = D3D11_BIND_INDEX_BUFFER;
+		D3D11_SUBRESOURCE_DATA id{indices.data()};
+		if (FAILED(m_pDevice->CreateBuffer(&vb, &vd, &m_pDepth3DPreviewVertexBuffer)) ||
+			FAILED(m_pDevice->CreateBuffer(&ib, &id, &m_pDepth3DPreviewIndexBuffer))) {
+			m_depth3DPreviewShaderFailed = true;
+			return false;
+		}
+		m_depth3DPreviewIndexCount = UINT(indices.size());
+	}
+
+	if (!m_pDepth3DPreviewRasterizer) {
+		D3D11_RASTERIZER_DESC desc{};
+		desc.FillMode = D3D11_FILL_SOLID;
+		desc.CullMode = D3D11_CULL_NONE;
+		desc.FrontCounterClockwise = FALSE;
+		desc.DepthClipEnable = TRUE;
+		desc.ScissorEnable = FALSE;
+		desc.MultisampleEnable = FALSE;
+		desc.AntialiasedLineEnable = FALSE;
+		if (FAILED(m_pDevice->CreateRasterizerState(&desc, &m_pDepth3DPreviewRasterizer))) {
+			m_depth3DPreviewShaderFailed = true;
+			return false;
+		}
+	}
+
+	return true;
+}
+
+const Tex2D_t* CDX11VideoProcessor::PrepareDepth3DPreview(const CompletedFrame& frame, const CRect& sourceRect)
+{
+	if (!m_depth3DPreview || m_depth3DPreviewShaderFailed || sourceRect.IsRectEmpty() ||
+		(!UsesZipDepthSr() && !UsesZipDepthMfg())) return &frame.image;
+
+	m_zipDepth.PollCompleted();
+	const auto estimate = m_zipDepth.ForFrame(frame.pts);
+	if (!estimate.view) return &frame.image;
+	if (!EnsureDepth3DMeshResources()) return &frame.image;
+
+	if (FAILED(m_depth3DPreviewTexture.CheckCreate(m_pDevice, frame.image.desc.Format,
+		frame.image.desc.Width, frame.image.desc.Height, Tex2D_DefaultShaderRTarget))) return &frame.image;
+
+	CComPtr<ID3D11RenderTargetView> targetView;
+	if (FAILED(m_pDevice->CreateRenderTargetView(m_depth3DPreviewTexture.pTexture, nullptr, &targetView))) return &frame.image;
+
+	const float sourceUV[4]{float(sourceRect.left) / frame.image.desc.Width,
+		float(sourceRect.top) / frame.image.desc.Height,
+		float(sourceRect.Width()) / frame.image.desc.Width,
+		float(sourceRect.Height()) / frame.image.desc.Height};
+	// Independent tile settings. Each tile keeps one depth height across the whole
+	// quad, then the vertex shader rotates the stepped surface 30 degrees around Y
+	// and applies a small perspective projection.
+	constexpr float kDepth3DZStrength = 0.45f;
+	constexpr float kDepth3DCameraDistance = 3.0f;
+	const float constants[8]{sourceUV[0], sourceUV[1], sourceUV[2], sourceUV[3],
+		estimate.rotated ? 1.0f : 0.0f, kDepth3DZStrength, CZipDepth::NormalizedDepthSpan, kDepth3DCameraDistance};
+	m_pDeviceContext->UpdateSubresource(m_pDepth3DPreviewConstants, 0, nullptr, constants, 0, 0);
+
+	const float black[4]{0, 0, 0, 1};
+	m_pDeviceContext->ClearRenderTargetView(targetView, black);
+	D3D11_VIEWPORT viewport{FLOAT(sourceRect.left), FLOAT(sourceRect.top), FLOAT(sourceRect.Width()),
+		FLOAT(sourceRect.Height()), 0.0f, 1.0f};
+
+	const UINT stride = sizeof(DEPTH3D_VERTEX), offset = 0;
+	ID3D11ShaderResourceView* vsDepth = estimate.view;
+	ID3D11ShaderResourceView* psImage = frame.image.pShaderResource;
+	CComPtr<ID3D11RasterizerState> previousRasterizer;
+	m_pDeviceContext->RSGetState(&previousRasterizer);
+	m_pDeviceContext->RSSetState(m_pDepth3DPreviewRasterizer);
+	m_pDeviceContext->IASetInputLayout(m_pVDepth3DPreviewInputLayout);
+	m_pDeviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	m_pDeviceContext->IASetVertexBuffers(0, 1, &m_pDepth3DPreviewVertexBuffer.p, &stride, &offset);
+	m_pDeviceContext->IASetIndexBuffer(m_pDepth3DPreviewIndexBuffer, DXGI_FORMAT_R32_UINT, 0);
+	m_pDeviceContext->OMSetRenderTargets(1, &targetView.p, nullptr);
+	m_pDeviceContext->RSSetViewports(1, &viewport);
+	m_pDeviceContext->VSSetShader(m_pVS_Depth3DPreview, nullptr, 0);
+	m_pDeviceContext->PSSetShader(m_pPS_Depth3DPreview, nullptr, 0);
+	m_pDeviceContext->VSSetShaderResources(0, 1, &vsDepth);
+	m_pDeviceContext->PSSetShaderResources(1, 1, &psImage);
+	m_pDeviceContext->VSSetSamplers(0, 1, &m_pSamplerPoint.p);
+	m_pDeviceContext->PSSetSamplers(0, 1, &m_pSamplerLinear.p);
+	m_pDeviceContext->VSSetConstantBuffers(0, 1, &m_pDepth3DPreviewConstants.p);
+	m_pDeviceContext->PSSetConstantBuffers(0, 1, &m_pDepth3DPreviewConstants.p);
+	m_pDeviceContext->DrawIndexed(m_depth3DPreviewIndexCount, 0, 0);
+	m_pDeviceContext->RSSetState(previousRasterizer);
+
+	ID3D11ShaderResourceView* emptyViews[2]{};
+	m_pDeviceContext->VSSetShaderResources(0, 1, emptyViews);
+	m_pDeviceContext->PSSetShaderResources(1, 1, emptyViews);
+	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+	return &m_depth3DPreviewTexture;
+}
+
 void CDX11VideoProcessor::DrawDepthOverlay(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME timestamp)
 {
 	m_zipDepth.PollCompleted();
@@ -5144,6 +5391,7 @@ void CDX11VideoProcessor::Configure(const Settings_t& requested)
 	m_adaptiveMfgDepth = config.bAdaptiveMfgDepth;
 	m_showMfgMotion = config.bShowMfgMotion;
 	m_showDepthOverlay = config.bShowDepthOverlay;
+	m_depth3DPreview = config.bDepth3DPreview;
 	if (!m_showDepthOverlay || !useZipDepth) m_depthOverlayCapture.Release();
 	if (wasUsingZipDepth && !useZipDepth) m_zipDepth.Stop();
 	bool changeWindow            = false;

@@ -4,6 +4,8 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 #include <memory>
+#include <mutex>
+#include <vector>
 #include <string>
 #include <cstdint>
 #include <atomic>
@@ -64,6 +66,10 @@ class Session {
     std::unique_ptr<WarmupJob> warmup_;
     std::wstring status_;
     std::atomic<bool> failed_{false};
+    static std::mutex s_retiredWarmupMutex;
+    static std::vector<std::unique_ptr<WarmupJob>> s_retiredWarmups;
+    static void ReapRetiredWarmups();
+    static void RetireWarmup(std::unique_ptr<WarmupJob> job);
 public:
     Session();~Session();
     // Preroll-only initialization: allocate NGX/flow/GPU resources without
@@ -100,6 +106,7 @@ public:
     bool UsesZipDepth() const;
     std::wstring WorkDescription() const;
     void Reset();
+    void FastShutdown();
     void ResetHistory();
     void ResetDepthHistory();
     bool Failed() const {return failed_;}

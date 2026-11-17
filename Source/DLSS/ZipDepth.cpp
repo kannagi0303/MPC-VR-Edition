@@ -369,9 +369,9 @@ void CZipDepth::ResetHistory()
     m_gpu.SetSceneStart(-1);
 }
 
-void CZipDepth::Stop()
+void CZipDepth::Stop(bool fastShutdown)
 {
-    m_gpu.Stop();
+    m_gpu.Stop(fastShutdown);
     ResetHistory();
     m_device.Reset();
     m_state.Reset();

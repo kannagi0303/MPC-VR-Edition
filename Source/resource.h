@@ -39,6 +39,8 @@
 #define IDC_ADAPTIVE_MFG_DEPTH            5025
 #define IDC_SHOW_MFG_MOTION               5026
 #define IDC_EXTENDED_STARTUP              5027
+#define IDC_DEPTH_3D_PREVIEW              5028
+#define IDC_ZIPDEPTH_MODE                 5029
 #define IDC_SHOW_DEPTH_OVERLAY            5023
 #define IDD_SECTION_SOURCE              4002
 #define IDD_SECTION_CHROMA              4003

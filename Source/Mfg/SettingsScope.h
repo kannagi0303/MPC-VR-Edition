@@ -33,6 +33,12 @@ inline void EnforceScope(Settings_t& s) {
     // Feature backends removed from this fork are not independently selectable.
     s.bDlssNR = false;
     s.iDlssNRToggleKey = 0;
+    // Retired experimental MFG/depth strategies are no longer user-selectable.
+    // Force them off even when an old preset or registry value still contains true.
+    s.bMfgLowMotion = false;
+    s.bAdaptiveMfgDepth = false;
+    // Depth 3D remains research code only; it is not a public playback option.
+    s.bDepth3DPreview = false;
     s.bVPReplaceChroma = false;
     s.iSharpen = SHARPEN_Disabled;
     s.iDeblock = DEBLOCK_Off;

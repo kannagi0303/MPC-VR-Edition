@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
 #include "stdafx.h"
 #include "Helper.h"
 #include "DX11VideoProcessor.h"
@@ -269,7 +269,7 @@ std::wstring CDX11VideoProcessor::MfgFrameAnalysisStatus() const {
     return status;
 }
 
-void CDX11VideoProcessor::StopMfg(bool release) {
+void CDX11VideoProcessor::StopMfg(bool release, bool fastShutdown) {
     ResetMfgFrameAnalysis();
     m_mfgRepeatTiming.Reset();
     if (release) m_mfgDecodedDifference = {};
@@ -310,7 +310,9 @@ void CDX11VideoProcessor::StopMfg(bool release) {
     m_mfgBudgetStreak=0;
     if(release) {
         m_mfgOriginalsReplaced=0;
-        m_mfg.Reset();m_mfgPresentFailed=false;m_mfgInputModeKnown=false;
+        if (fastShutdown) m_mfg.FastShutdown();
+        else m_mfg.Reset();
+        m_mfgPresentFailed=false;m_mfgInputModeKnown=false;
         m_mfgLastPostVsrInput=false;
         m_mfgLastVideoOnlyInput = false;
         m_mfgAutoEpoch=m_mfgAutoLastPts=-1;

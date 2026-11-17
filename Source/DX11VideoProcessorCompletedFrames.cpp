@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
 #include "stdafx.h"
 #include "Helper.h"
 #include "DX11VideoProcessor.h"
@@ -202,6 +202,22 @@ void CDX11VideoProcessor::RecycleCompletedFrame(CompletedFrame&& frame)
 
 bool CDX11VideoProcessor::QueueCompletedFrame(CompletedFrame&& frame)
 {
+    // Depth 3D must be baked while the frame is produced, not when it is
+    // presented. The completed queue intentionally runs about two seconds
+    // ahead, while CZipDepth::ForFrame() only accepts a recent estimate and
+    // its result slots are reused. Looking the depth up again at Present time
+    // therefore makes the effect appear only intermittently.
+    //
+    // Render the mesh into the reusable preview texture now, while the matching
+    // depth estimate still exists, then copy the result back into this frame's
+    // private completed texture. The queued frame is self-contained after this.
+    if (m_depth3DPreview && frame.videoOnly && !frame.picture.IsRectEmpty()) {
+        const auto* depth3D = PrepareDepth3DPreview(frame, frame.picture);
+        if (depth3D && depth3D != &frame.image && depth3D->pTexture) {
+            m_pDeviceContext->CopyResource(frame.image.pTexture, depth3D->pTexture);
+        }
+    }
+
     frame.fence = ++m_completedFenceValue;
     if (FAILED(m_completedContext->Signal(m_completedFence, frame.fence))) return false;
     if (mfg::SourceCadenceTrace().Enabled()) {
@@ -434,14 +450,15 @@ HRESULT CDX11VideoProcessor::DrawCompletedVideo(const CompletedFrame& frame, ID3
 {
     D3D11_TEXTURE2D_DESC desc{};
     target->GetDesc(&desc);
+    CRect from;
+    if (!from.IntersectRect(frame.picture, CRect(0, 0, frame.image.desc.Width, frame.image.desc.Height)) || picture.IsRectEmpty())
+        return E_INVALIDARG;
     const auto& source = frame.image.desc;
     if (frame.picture == picture && source.Width == desc.Width && source.Height == desc.Height && source.Format == desc.Format) {
         m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
         m_pDeviceContext->CopyResource(target, frame.image.pTexture);
         return S_OK;
     }
-    CRect from;
-    if (!from.IntersectRect(frame.picture, CRect(0, 0, source.Width, source.Height)) || picture.IsRectEmpty()) return E_INVALIDARG;
     const CRect to(
         picture.left + MulDiv(from.left - frame.picture.left, picture.Width(), frame.picture.Width()),
         picture.top + MulDiv(from.top - frame.picture.top, picture.Height(), frame.picture.Height()),

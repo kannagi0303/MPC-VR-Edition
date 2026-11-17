@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
 #include "stdafx.h"
 #include "ZipDepthGpu.h"
 #include "ZipDepthGpuShaders.h"
@@ -30,6 +30,18 @@ constexpr unsigned TimestampCount = 4;
 constexpr size_t TimestampOffset = sizeof(uint64_t);
 constexpr size_t ReadbackBytes = TimestampOffset + TimestampCount * sizeof(uint64_t);
 constexpr auto QueueType = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+
+bool PinModuleForBackgroundShutdown()
+{
+    static std::once_flag once;
+    static bool pinned = false;
+    std::call_once(once, [] {
+        HMODULE module = nullptr;
+        pinned = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            reinterpret_cast<LPCWSTR>(&PinModuleForBackgroundShutdown), &module) != FALSE;
+    });
+    return pinned;
+}
 
 void Check(HRESULT hr)
 {
@@ -117,6 +129,7 @@ struct CZipDepthGpu::Impl {
     std::atomic<int64_t> sceneStart = -1;
     const wchar_t* failure = L"DirectML initialization failed";
     std::thread worker;
+    std::atomic<bool> workerFinished = false;
     Job job;
     Result result;
     uint64_t serial = 0;
@@ -127,13 +140,19 @@ struct CZipDepthGpu::Impl {
     int64_t anchorPts = -1;
     int64_t anchorCut = -1;
 
-    ~Impl()
+    void RequestStop()
     {
         {
             std::lock_guard guard(lock);
             state = State::Stopping;
+            pending = false;
         }
         wake.notify_one();
+    }
+
+    ~Impl()
+    {
+        RequestStop();
         if (worker.joinable()) worker.join();
         if (completeEvent) CloseHandle(completeEvent);
     }
@@ -443,14 +462,38 @@ struct CZipDepthGpu::Impl {
                 state = State::Failed;
             }
         }
+        workerFinished.store(true, std::memory_order_release);
     }
 };
+
+std::mutex CZipDepthGpu::s_retiredMutex;
+std::vector<std::unique_ptr<CZipDepthGpu::Impl>> CZipDepthGpu::s_retired;
+
+void CZipDepthGpu::ReapRetired()
+{
+    std::lock_guard guard(s_retiredMutex);
+    std::erase_if(s_retired, [](const auto& impl) {
+        return impl->workerFinished.load(std::memory_order_acquire);
+    });
+}
+
+void CZipDepthGpu::Retire(std::unique_ptr<Impl> impl)
+{
+    if (!impl) return;
+    impl->RequestStop();
+    std::lock_guard guard(s_retiredMutex);
+    std::erase_if(s_retired, [](const auto& old) {
+        return old->workerFinished.load(std::memory_order_acquire);
+    });
+    s_retired.emplace_back(std::move(impl));
+}
 
 CZipDepthGpu::CZipDepthGpu() = default;
 CZipDepthGpu::~CZipDepthGpu() = default;
 
 bool CZipDepthGpu::Start(ID3D11Device1* device, const std::filesystem::path& directory)
 {
+    ReapRetired();
     std::error_code ec;
     if (!std::filesystem::is_regular_file(directory / ZipDepthPack::ModelFile, ec)) return false;
     try {
@@ -464,7 +507,16 @@ bool CZipDepthGpu::Start(ID3D11Device1* device, const std::filesystem::path& dir
     }
 }
 
-void CZipDepthGpu::Stop() { m_impl.reset(); }
+void CZipDepthGpu::Stop(bool fastShutdown)
+{
+    if (!m_impl) return;
+    if (fastShutdown && !m_impl->workerFinished.load(std::memory_order_acquire) &&
+        PinModuleForBackgroundShutdown()) {
+        Retire(std::move(m_impl));
+        return;
+    }
+    m_impl.reset();
+}
 
 const wchar_t* CZipDepthGpu::Status(bool hasEstimate) const
 {

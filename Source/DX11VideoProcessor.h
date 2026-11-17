@@ -1,4 +1,4 @@
-/*
+﻿/*
 * (C) 2018-2026 see Authors.txt
 *
 * This file is part of MPC-BE.
@@ -94,6 +94,7 @@ private:
 	bool UsesZipDepthSr() const { return m_useZipDepthSr && m_iVPSuperRes == SUPERRES_DLSS_SR; }
 	bool UsesZipDepthMfg() const { return m_useZipDepthMfg && m_mfgMultiplier; }
 	bool m_showDepthOverlay = false;
+	bool m_depth3DPreview = false;
 	bool MfgDepthSourceEligible() const;
 	bool m_mfgLowMotionEnabled = false;
 	bool m_mfgLowMotionActive = false;
@@ -177,7 +178,7 @@ private:
 		bool nativeInput, bool postVsrInput, bool videoOnlyInput = false);
 	bool PresentMfg();
 	bool NextMfg(int64_t& deadline);
-	void StopMfg(bool release=true);
+	void StopMfg(bool release=true, bool fastShutdown=false);
     // Settings changes run under RendererLock. Retire the old timeline and
     // present its independent ORIGINAL snapshots before moving the upscaler.
     void SwitchMfgUpscaleSlot(unsigned requestedMode);
@@ -216,6 +217,7 @@ private:
     };
     static constexpr REFERENCE_TIME CompletedLead = 2 * UNITS;
     framegen::PresentationThread m_completedPresenter;
+    bool m_fastShutdown = false;
     mfg::LiveFlowGroups m_completedGroups;
     mfg::DisplaySubmitPacing m_completedDisplayPacing;
     std::deque<CompletedFrame> m_completedFrames;
@@ -232,7 +234,7 @@ private:
     bool CanBufferCompletedSample() const;
     bool CompletedFramesPending() const;
     bool LegacyFramesPending();
-    bool CanProduceCompletedFrame(REFERENCE_TIME due);
+    bool CanProduceCompletedFrame(REFERENCE_TIME due, std::optional<uint64_t>& deferredFrameFence);
     HRESULT RenderCompletedSample(IMediaSample* sample);
     bool PrepareCompletedTarget();
     bool AcquireCompletedTarget(const D3D11_TEXTURE2D_DESC& desc, CompletedFrame& target);
@@ -243,6 +245,8 @@ private:
     bool PresentCompletedFrame();
     REFERENCE_TIME CompletedSubmitLead();
     HRESULT DrawCompletedVideo(const CompletedFrame& frame, ID3D11Texture2D* target, const CRect& picture);
+	const Tex2D_t* PrepareDepth3DPreview(const CompletedFrame& frame, const CRect& sourceRect);
+	bool EnsureDepth3DMeshResources();
     HRESULT PresentCompletedVideo(const CompletedFrame& frame, bool scheduled = false);
     void ClearCompletedFrames(bool release);
     struct CompletedBufferTime {
@@ -285,6 +289,16 @@ private:
 	CComPtr<ID3D11BlendState>     m_pDepthOverlayBlendState;
 	CComPtr<ID3D11Buffer>         m_pDepthOverlayConstants;
 	Tex2D_t m_depthOverlayCapture;
+	CComPtr<ID3D11VertexShader>   m_pVS_Depth3DPreview;
+	CComPtr<ID3D11PixelShader>    m_pPS_Depth3DPreview;
+	CComPtr<ID3D11InputLayout>    m_pVDepth3DPreviewInputLayout;
+	CComPtr<ID3D11Buffer>         m_pDepth3DPreviewConstants;
+	CComPtr<ID3D11Buffer>         m_pDepth3DPreviewVertexBuffer;
+	CComPtr<ID3D11Buffer>         m_pDepth3DPreviewIndexBuffer;
+	CComPtr<ID3D11RasterizerState> m_pDepth3DPreviewRasterizer;
+	UINT                         m_depth3DPreviewIndexCount = 0;
+	Tex2D_t m_depth3DPreviewTexture;
+	bool m_depth3DPreviewShaderFailed = false;
 	CComPtr<ID3D11PixelShader> m_pMfgMotionShader;
 	CComPtr<ID3D11BlendState> m_pMfgMotionBlend;
 	CComPtr<ID3D11Buffer> m_pMfgMotionConstants;

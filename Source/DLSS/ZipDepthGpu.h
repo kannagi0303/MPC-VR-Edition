@@ -5,6 +5,8 @@
 #include <d3d11_4.h>
 #include <filesystem>
 #include <memory>
+#include <mutex>
+#include <vector>
 
 // A single asynchronous D3D12 inference job, shared by the D3D11 consumers.
 class CZipDepthGpu final
@@ -32,7 +34,7 @@ public:
     CZipDepthGpu();
     ~CZipDepthGpu();
     bool Start(ID3D11Device1* device, const std::filesystem::path& directory);
-    void Stop();
+    void Stop(bool fastShutdown = false);
     const wchar_t* Status(bool hasEstimate) const;
     const wchar_t* ModelPrecision() const;
     bool Loading() const;
@@ -48,5 +50,9 @@ public:
 
 private:
     struct Impl;
+    static std::mutex s_retiredMutex;
+    static std::vector<std::unique_ptr<Impl>> s_retired;
+    static void ReapRetired();
+    static void Retire(std::unique_ptr<Impl> impl);
     std::unique_ptr<Impl> m_impl;
 };

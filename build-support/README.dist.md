@@ -46,16 +46,16 @@ Use **Edition Extended** to turn on the features you want.
   Supports 8-bit SDR video.
 - **Enable DLSS Multi Frame Generation**<br>
   Adds frames based on video timing and the display refresh rate.
-- **Processing order**<br>
+- **Order**<br>
   Choose whether to upscale or add frames first.
-- **ZipDepth for SR / DLAA**<br>
-  Uses the included depth model for DLSS SR and DLAA.
-- **ZipDepth for MFG**<br>
-  Uses the same depth model for frame generation.<br>
-  Each feature uses flat depth while an estimate is unavailable.
-- **Stabilize MFG depth**<br>
-  Compares nearby pixels across two source frames before reusing depth.<br>
-  Turn it off to compare with the original filter.
+- **Startup**<br>
+  **Play first** starts video while Extended features load. This is the default.<br>
+  **Wait for Extended** prepares the selected features before playback.
+- **ZipDepth**<br>
+  Choose **Both**, **DLSS SR Only**, **MFG Only**, or **Disable**.<br>
+  **Both** is the default. Features use flat depth while an estimate is unavailable.
+- **Show feature status**<br>
+  Shows which DLSS or RTX VSR features are active.
 - **Show depth overlay**<br>
   Blends the grayscale depth map into the video before DLSS processing.
 - **Show optical flow**<br>

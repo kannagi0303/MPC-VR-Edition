@@ -24,7 +24,8 @@
 
 ### Install
 
-1. Download and extract the [release](https://github.com/kannagi0303/MPC-VR-Edition/releases).
+1. Download `MPC-VR-Edition.zip` from [Releases](https://github.com/kannagi0303/MPC-VR-Edition/releases).
+   Extract the whole ZIP.
 2. Run `Install_MPCVR_64.cmd` as administrator.
 3. Keep the extracted files in place.
 
@@ -49,8 +50,7 @@ MFG uses video timestamps and the display refresh rate<br>
 to decide how many frames to add.<br>
 It gives priority to original frames and can skip late generated frames.
 
-The renderer can skip repeated frames when MFG can fill the gap.<br>
-The low-motion option reduces GPU work when there is little movement.
+The renderer can skip repeated frames when MFG can fill the gap.
 
 ### Upscaling and processing order
 
@@ -61,22 +61,30 @@ it uses DLAA to smooth edges.
 On supported videos, DLSS SR or RTX Video Super Resolution<br>
 can run before or after MFG.<br>
 Upscaling first gives MFG a larger image to work with.<br>
-Running MFG first can let it work at the original video size.
+MFG can use the original video size when the video and output support it.<br>
+Some playback paths resize the video before MFG, even with DLSS SR and RTX VSR off.
 
 ### Startup
 
 - **Play first** (default)<br>
-  Play video while MFG and the ZipDepth model load.<br>
-  Extended features turn on when their setup finishes.
+  Start playback while the selected Extended features load.<br>
+  They turn on when ready.
 - **Wait for Extended**<br>
   Prepare MFG and DLSS SR before playback.<br>
   MFG starts adding frames once it has a pair of source frames.
 
 ### Depth estimation
 
-When enabled, ZipDepth uses DirectML to estimate depth on the GPU.<br>
-DLSS SR, DLAA, and MFG can share the estimate.<br>
-They use flat depth while an estimate is unavailable.
+ZipDepth uses DirectML to estimate depth on the GPU.
+
+- **Both** (default)<br>
+  Share depth between DLSS SR / DLAA and MFG when enabled.
+- **DLSS SR Only** or **MFG Only**<br>
+  Use ZipDepth for one feature.
+- **Disable**<br>
+  Turn off depth estimation.
+
+DLSS SR, DLAA, and MFG use flat depth while an estimate is unavailable.
 
 ### Change the ZipDepth Model
 
@@ -102,6 +110,7 @@ To restore the default, use the 384×384 pack.
 - [ZipDepth converter guide](../tools/zipdepth-convert.md)
 - [Windows x64 build script](../build-x64.cmd)
 - [Project license](LICENSE.md)
+- [Third-party licenses](../licenses/)
 
 ## About the Author
 
