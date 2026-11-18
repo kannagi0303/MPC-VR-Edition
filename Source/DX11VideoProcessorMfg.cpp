@@ -244,8 +244,7 @@ bool CDX11VideoProcessor::MfgDepthSourceEligible() const {
 }
 
 bool CDX11VideoProcessor::MfgSourceMeetsDisplayRate() const {
-    return mfg::SourceMeetsDisplayRate(m_pFilter->m_FrameStats.GetAverageFrameDuration(),
-        m_dRefreshPeriodMs, m_bDoubleFrames);
+    return m_mfgDisplayRate.Bypassed(m_rtAvgTimePerFrame, m_dRefreshPeriodMs, m_bDoubleFrames);
 }
 
 bool CDX11VideoProcessor::MfgFrameAnalysisEligible() const {

@@ -2171,6 +2171,7 @@ BOOL CDX11VideoProcessor::InitMediaType(const CMediaType* pmt)
 	}
 
 	m_pFilter->m_FrameStats.SetStartFrameDuration(m_rtAvgTimePerFrame);
+	m_mfgDisplayRate = {};
 	m_pFilter->m_bValidBuffer = false;
 
 	UINT biWidth  = pBIH->biWidth;
@@ -5944,6 +5945,9 @@ void CDX11VideoProcessor::Flush()
 	if (m_pFilter->m_filterState == State_Stopped) {
 		m_startupHasPicture = false;
 		m_extendedStartupPending = false;
+		m_mfgDisplayRate = {};
+	} else {
+		m_mfgDisplayRate.BreakContinuity();
 	}
 	ClearCompletedFrames(false);
 	ResetSvdLutHistory();

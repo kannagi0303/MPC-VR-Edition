@@ -46,6 +46,7 @@
 #include "Mfg/LiveFlowGroups.h"
 #include "Mfg/LiveFlowGroupPacing.h"
 #include "Mfg/AdaptiveLookahead.h"
+#include "Mfg/DisplayCadence.h"
 #include "Mfg/DisplaySubmitPacing.h"
 #include "Mfg/DisplayPreparation.h"
 #include "Mfg/AutoCadence.h"
@@ -66,6 +67,7 @@ private:
 	bool m_bPGSSubtitles=false;
 	bool SourceIsHDR10() const {return m_decExFmt.VideoTransferFunction==MFVideoTransFunc_2084 && m_decExFmt.VideoTransferMatrix!=DXVA2_VideoTransferMatrix_Unknown;}
 	std::atomic<unsigned> m_mfgMultiplier{0};
+	mfg::DisplayRateGate m_mfgDisplayRate; // RendererLock
     // One logical AI upscaler, routed to exactly one side of MFG. This
     // selector is read under RendererLock by both the source and presenter.
     enum class UpscaleSlot : unsigned { BeforeMfg = 0, AfterMfg = 1 };

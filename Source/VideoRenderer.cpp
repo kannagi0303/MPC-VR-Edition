@@ -1015,7 +1015,10 @@ void CMpcVideoRenderer::NewSegment(REFERENCE_TIME startTime, double rate)
 	++m_completedEpoch;
 	ResetSourceTime();
 	m_completedEndOfStream = false;
-	if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) dx11->ClearCompletedFrames(false);
+	if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) {
+		dx11->m_mfgDisplayRate.BreakContinuity();
+		dx11->ClearCompletedFrames(false);
+	}
 }
 
 HRESULT CMpcVideoRenderer::BeginFlush()
@@ -1567,9 +1570,18 @@ HRESULT CMpcVideoRenderer::ReceiveWithSourceTime(IMediaSample* sample)
 
 BOOL CMpcVideoRenderer::ScheduleSample(IMediaSample* sample)
 {
-	if (!m_schedulingCompletedSample) return CBaseVideoRenderer2::ScheduleSample(sample);
+	// Both scheduling paths hold RendererLock. Observe input PTS before the
+	// scheduling decision, even when the renderer will skip drawing this sample.
 	REFERENCE_TIME start, stop;
-	if (sample->GetTime(&start, &stop) == S_OK) m_FrameStats.Add(start);
+	const auto timing = sample ? sample->GetTime(&start, &stop) : E_POINTER;
+	if (SUCCEEDED(timing) && sample->IsPreroll() != S_OK) {
+		if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) {
+			dx11->m_mfgDisplayRate.Observe(start, dx11->m_rtAvgTimePerFrame, dx11->m_dRefreshPeriodMs,
+				dx11->m_bDoubleFrames, sample->IsDiscontinuity() == S_OK);
+		}
+	}
+	if (!m_schedulingCompletedSample) return CBaseVideoRenderer2::ScheduleSample(sample);
+	if (timing == S_OK) m_FrameStats.Add(start);
 	return TRUE;
 }
 
