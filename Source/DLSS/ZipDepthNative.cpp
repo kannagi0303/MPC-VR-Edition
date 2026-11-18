@@ -11,14 +11,13 @@
 #include <DirectML.h>
 #endif
 #include <wrl/client.h>
+#include <array>
 #include <cstdio>
+#include <filesystem>
 #include <cstring>
 #include <memory>
 #include <limits>
 #include <stdexcept>
-
-#include "ZipDepthNative.h"
-#include "ZipDepthPack.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -32,23 +31,23 @@ __CRT_UUID_DECL(IDMLCommandRecorder, 0xe6857a76, 0x2e3e, 0x4fdd, 0xbf, 0xf4, 0x5
 #endif
 
 namespace {
-[[noreturn]] void Fail(HRESULT hr)
+[[noreturn]] void Fail(HRESULT hr, const char* operation = nullptr)
 {
-    char text[32]{};
-    std::snprintf(text, sizeof(text), "HRESULT 0x%08X", static_cast<unsigned>(hr));
+    char text[96]{};
+    std::snprintf(text, sizeof(text), "%s%sHRESULT 0x%08X",
+        operation ? operation : "", operation ? " " : "", static_cast<unsigned>(hr));
     throw std::runtime_error(text);
 }
 
-void Check(HRESULT hr)
+void Check(HRESULT hr, const char* operation = nullptr)
 {
-    if (FAILED(hr)) Fail(hr);
+    if (FAILED(hr)) Fail(hr, operation);
 }
 }
 
 #include "DirectMLGraph/GraphHelpers.h"
 
 namespace {
-constexpr unsigned TensorBytes = ZipDepthPack::Pixels * sizeof(float);
 constexpr auto Uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 constexpr auto CopyDest = D3D12_RESOURCE_STATE_COPY_DEST;
 
@@ -68,7 +67,7 @@ ComPtr<ID3D12Resource> Buffer(ID3D12Device* device, UINT64 bytes, D3D12_HEAP_TYP
 {
     if (!bytes) return {};
     if (bytes > std::numeric_limits<UINT>::max())
-        throw std::runtime_error("ZipDepth DirectML resource exceeds the supported buffer size");
+        throw std::runtime_error("DirectML resource exceeds the supported buffer size");
     D3D12_HEAP_PROPERTIES props{};
     props.Type = type;
     props.CreationNodeMask = props.VisibleNodeMask = 1;
@@ -127,11 +126,12 @@ void CheckTensor(const DmlBufferTensorDesc* tensor, UINT64 bytes)
 {
     if (!tensor || tensor->dataType != DML_TENSOR_DATA_TYPE_FLOAT32 ||
         tensor->totalTensorSizeInBytes != bytes)
-        throw std::runtime_error("Incompatible ZipDepth DirectML input or output tensor");
+        throw std::runtime_error("Incompatible DirectML input or output tensor");
 }
 }
 
-struct ZipDepthNative::Impl {
+namespace {
+struct NativeGraphExecution {
     Library library;
     ComPtr<IDMLDevice1> dml;
     ComPtr<IDMLCommandRecorder> recorder;
@@ -139,10 +139,8 @@ struct ZipDepthNative::Impl {
     ComPtr<ID3D12Resource> persistent;
     ComPtr<ID3D12Resource> temporary;
     Bindings bindings;
-    bool fp16 = false;
 
-    Impl(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Resource* image,
-        ID3D12Resource* depth, std::span<const std::uint8_t> model, const std::filesystem::path& directml)
+    NativeGraphExecution(ID3D12Device* device, const std::filesystem::path& directml)
         : library(directml)
     {
         const auto create = reinterpret_cast<decltype(&DMLCreateDevice)>(
@@ -150,80 +148,22 @@ struct ZipDepthNative::Impl {
         if (!create) throw std::runtime_error("DMLCreateDevice export missing");
         Check(create(device, DML_CREATE_DEVICE_FLAG_NONE, IID_PPV_ARGS(dml.GetAddressOf())));
         Check(dml->CreateCommandRecorder(IID_PPV_ARGS(recorder.GetAddressOf())));
+    }
 
-        const auto entries = ZipDepthPack::Read(model);
-        const auto serialized = entries.at(ZipDepthPack::GraphFile);
-        flatbuffers::Verifier verifier(serialized.data(), serialized.size());
-        if (!dml::ir::VerifyDmlGraphDescBuffer(verifier))
-            throw std::runtime_error("Invalid DirectML graph");
-        const auto* root = dml::ir::GetDmlGraphDesc(serialized.data());
-        if (!root->nodes() || !root->graphInputNames() || !root->graphOutputNames() ||
-            root->graphOutputNames()->size() != 1 || root->graphOutputNames()->Get(0)->str() != "depth")
-            throw std::runtime_error("Expected ZipDepth depth output");
-        std::unordered_map<std::uint32_t, std::uint32_t> imageSlots;
-        for (std::uint32_t i = 0; i < root->graphInputNames()->size(); ++i) {
-            const auto name = root->graphInputNames()->Get(i)->string_view();
-            if (name.empty()) continue; // ORT may pad this vector when one input has several edges.
-            if (name != "image" || !imageSlots.empty()) throw std::runtime_error("Expected one ZipDepth image input");
-            imageSlots.emplace(i, 0);
-        }
-        std::vector<std::unique_ptr<std::byte[]>> constantData;
-        const auto decoded = DeserializeDmlGraph(serialized.data(), constantData);
-        if (imageSlots.empty() || decoded.InputEdges.empty() || decoded.OutputEdges.size() != 1)
-            throw std::runtime_error("Invalid ZipDepth graph edges");
-
-        for (const auto& edge : decoded.InputEdges) {
-            if (!imageSlots.contains(edge.GraphInputIndex)) throw std::runtime_error("Invalid ZipDepth input slot");
-            const auto& op = std::get<AbstractOperatorDesc>(decoded.Nodes.at(edge.ToNodeIndex).Desc);
-            CheckTensor(op.GetInputTensors().at(edge.ToNodeInputIndex), 3 * TensorBytes);
-        }
-        const auto& out = decoded.OutputEdges.front();
-        const auto& outputOp = std::get<AbstractOperatorDesc>(decoded.Nodes.at(out.FromNodeIndex).Desc);
-        CheckTensor(outputOp.GetOutputTensors().at(out.FromNodeOutputIndex), TensorBytes);
-
-        for (const auto& node : decoded.Nodes) {
-            if (const auto* op = std::get_if<AbstractOperatorDesc>(&node.Desc)) {
-                for (const auto* tensor : op->GetOutputTensors())
-                    fp16 |= tensor && tensor->dataType == DML_TENSOR_DATA_TYPE_FLOAT16;
-            }
-        }
-
-        std::unordered_map<std::string_view, std::uint32_t> slots;
-        std::vector<std::span<const std::uint8_t>> weights;
-        for (const auto& edge : decoded.IntermediateEdges) {
-            const auto& node = decoded.Nodes.at(edge.FromNodeIndex);
-            const auto* constant = std::get_if<DmlSerializedGraphNodeConstantVariant>(&node.Desc);
-            if (!constant) continue;
-            const auto* external = std::get_if<ConstantName>(constant);
-            if (!external) continue;
-            const auto name = external->name + ".bin";
-            const auto weight = entries.find(name);
-            if (name == ZipDepthPack::GraphFile || weight == entries.end() || weight->second.size() % 4)
-                throw std::runtime_error("Missing or unaligned ZipDepth graph weight");
-            const auto& op = std::get<AbstractOperatorDesc>(decoded.Nodes.at(edge.ToNodeIndex).Desc);
-            const auto* tensor = op.GetInputTensors().at(edge.ToNodeInputIndex);
-            if (!tensor || tensor->totalTensorSizeInBytes > weight->second.size())
-                throw std::runtime_error("ZipDepth graph weight is shorter than its tensor");
-            const auto [slot, inserted] = slots.emplace(node.Name, static_cast<UINT>(weights.size() + 1));
-            if (inserted) {
-                weights.push_back(weight->second);
-            } else if (weights.at(slot->second - 1).data() != weight->second.data()) {
-                throw std::runtime_error("Conflicting ZipDepth graph weight binding");
-            }
-        }
-
+    void Compile(const DmlSerializedGraphDesc& decoded, UINT inputCount, UINT outputCount,
+        const std::unordered_map<std::uint32_t, std::uint32_t>* imageSlots,
+        const std::unordered_map<std::string_view, std::uint32_t>* slots)
+    {
         BucketAllocator allocator;
         DML_GRAPH_DESC desc{};
         std::vector<ComPtr<IDMLOperator>> operators;
         std::vector<DML_GRAPH_NODE_DESC> nodes;
         std::vector<DML_GRAPH_EDGE_DESC> inputs, outputs, intermediate;
-        ConvertGraphDesc(decoded, 1, 1, dml.Get(), allocator, &imageSlots, &slots,
+        ConvertGraphDesc(decoded, 1, outputCount, dml.Get(), allocator, imageSlots, slots,
             desc, operators, nodes, inputs, outputs, intermediate);
-        if (desc.InputCount != weights.size() + 1)
-            throw std::runtime_error("Invalid ZipDepth weight bindings");
-        Check(dml->CompileGraph(&desc, DML_EXECUTION_FLAG_NONE, IID_PPV_ARGS(graph.GetAddressOf())));
-        Initialize(device, queue, weights);
-        Bind(device, image, depth, desc.InputCount);
+        if (desc.InputCount != inputCount || desc.OutputCount != outputCount)
+            throw std::runtime_error("Invalid DirectML graph bindings");
+        Check(dml->CompileGraph(&desc, DML_EXECUTION_FLAG_NONE, IID_PPV_ARGS(graph.GetAddressOf())), "CompileGraph");
     }
 
     void Initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
@@ -289,22 +229,115 @@ struct ZipDepthNative::Impl {
         Check(device->GetDeviceRemovedReason());
     }
 
-    void Bind(ID3D12Device* device, ID3D12Resource* image, ID3D12Resource* depth, UINT slots)
+    template<std::size_t Count>
+    void Bind(ID3D12Device* device, const DML_BUFFER_BINDING& image,
+        const std::array<DML_BUFFER_BINDING, Count>& outputs, UINT slots)
     {
         const auto props = graph->GetBindingProperties();
         temporary = Buffer(device, props.TemporaryResourceSize, D3D12_HEAP_TYPE_DEFAULT, Uav);
         bindings.Create(device, dml.Get(), graph.Get());
-        const DML_BUFFER_BINDING imageBuffer{image, 0, 3 * TensorBytes}, depthBuffer{depth, 0, TensorBytes};
         const DML_BUFFER_BINDING scratchBuffer{temporary.Get(), 0, props.TemporaryResourceSize};
         const DML_BUFFER_BINDING persistentBuffer{persistent.Get(), 0, props.PersistentResourceSize};
         std::vector<DML_BINDING_DESC> inputs(slots, {DML_BINDING_TYPE_NONE, nullptr});
-        inputs.front() = Binding(imageBuffer);
-        const auto output = Binding(depthBuffer), scratch = Binding(scratchBuffer), state = Binding(persistentBuffer);
+        inputs.front() = Binding(image);
+        std::array<DML_BINDING_DESC, Count> outputBindings{};
+        std::transform(outputs.begin(), outputs.end(), outputBindings.begin(), Binding);
+        const auto scratch = Binding(scratchBuffer), state = Binding(persistentBuffer);
         bindings.table->BindInputs(slots, inputs.data());
-        bindings.table->BindOutputs(1, &output);
+        bindings.table->BindOutputs(static_cast<UINT>(Count), outputBindings.data());
         if (temporary) bindings.table->BindTemporaryResource(&scratch);
         if (persistent) bindings.table->BindPersistentResource(&state);
         Check(device->GetDeviceRemovedReason());
+    }
+
+    void Record(ID3D12GraphicsCommandList* list) const
+    {
+        bindings.Record(list, recorder.Get(), graph.Get());
+        if (temporary) Barrier(list, temporary.Get());
+    }
+};
+} // namespace
+
+#include "ZipDepthNative.h"
+#include "ZipDepthPack.h"
+
+namespace {
+constexpr unsigned TensorBytes = ZipDepthPack::Pixels * sizeof(float);
+}
+
+struct ZipDepthNative::Impl : NativeGraphExecution {
+    bool fp16 = false;
+
+    Impl(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Resource* image,
+        ID3D12Resource* depth, std::span<const std::uint8_t> model, const std::filesystem::path& directml)
+        : NativeGraphExecution(device, directml)
+    {
+        const auto entries = ZipDepthPack::Read(model);
+        const auto serialized = entries.at(ZipDepthPack::GraphFile);
+        flatbuffers::Verifier verifier(serialized.data(), serialized.size());
+        if (!dml::ir::VerifyDmlGraphDescBuffer(verifier))
+            throw std::runtime_error("Invalid DirectML graph");
+        const auto* root = dml::ir::GetDmlGraphDesc(serialized.data());
+        if (!root->nodes() || !root->graphInputNames() || !root->graphOutputNames() ||
+            root->graphOutputNames()->size() != 1 || root->graphOutputNames()->Get(0)->str() != "depth")
+            throw std::runtime_error("Expected ZipDepth depth output");
+        std::unordered_map<std::uint32_t, std::uint32_t> imageSlots;
+        for (std::uint32_t i = 0; i < root->graphInputNames()->size(); ++i) {
+            const auto name = root->graphInputNames()->Get(i)->string_view();
+            if (name.empty()) continue; // ORT may pad this vector when one input has several edges.
+            if (name != "image" || !imageSlots.empty()) throw std::runtime_error("Expected one ZipDepth image input");
+            imageSlots.emplace(i, 0);
+        }
+        std::vector<std::unique_ptr<std::byte[]>> constantData;
+        const auto decoded = DeserializeDmlGraph(serialized.data(), constantData);
+        if (imageSlots.empty() || decoded.InputEdges.empty() || decoded.OutputEdges.size() != 1)
+            throw std::runtime_error("Invalid ZipDepth graph edges");
+
+        for (const auto& edge : decoded.InputEdges) {
+            if (!imageSlots.contains(edge.GraphInputIndex)) throw std::runtime_error("Invalid ZipDepth input slot");
+            const auto& op = std::get<AbstractOperatorDesc>(decoded.Nodes.at(edge.ToNodeIndex).Desc);
+            CheckTensor(op.GetInputTensors().at(edge.ToNodeInputIndex), 3 * TensorBytes);
+        }
+        const auto& out = decoded.OutputEdges.front();
+        const auto& outputOp = std::get<AbstractOperatorDesc>(decoded.Nodes.at(out.FromNodeIndex).Desc);
+        CheckTensor(outputOp.GetOutputTensors().at(out.FromNodeOutputIndex), TensorBytes);
+
+        for (const auto& node : decoded.Nodes) {
+            if (const auto* op = std::get_if<AbstractOperatorDesc>(&node.Desc)) {
+                for (const auto* tensor : op->GetOutputTensors())
+                    fp16 |= tensor && tensor->dataType == DML_TENSOR_DATA_TYPE_FLOAT16;
+            }
+        }
+
+        std::unordered_map<std::string_view, std::uint32_t> slots;
+        std::vector<std::span<const std::uint8_t>> weights;
+        for (const auto& edge : decoded.IntermediateEdges) {
+            const auto& node = decoded.Nodes.at(edge.FromNodeIndex);
+            const auto* constant = std::get_if<DmlSerializedGraphNodeConstantVariant>(&node.Desc);
+            if (!constant) continue;
+            const auto* external = std::get_if<ConstantName>(constant);
+            if (!external) continue;
+            const auto name = external->name + ".bin";
+            const auto weight = entries.find(name);
+            if (name == ZipDepthPack::GraphFile || weight == entries.end() || weight->second.size() % 4)
+                throw std::runtime_error("Missing or unaligned ZipDepth graph weight");
+            const auto& op = std::get<AbstractOperatorDesc>(decoded.Nodes.at(edge.ToNodeIndex).Desc);
+            const auto* tensor = op.GetInputTensors().at(edge.ToNodeInputIndex);
+            if (!tensor || tensor->totalTensorSizeInBytes > weight->second.size())
+                throw std::runtime_error("ZipDepth graph weight is shorter than its tensor");
+            const auto [slot, inserted] = slots.emplace(node.Name, static_cast<UINT>(weights.size() + 1));
+            if (inserted) {
+                weights.push_back(weight->second);
+            } else if (weights.at(slot->second - 1).data() != weight->second.data()) {
+                throw std::runtime_error("Conflicting ZipDepth graph weight binding");
+            }
+        }
+
+        const auto inputCount = static_cast<UINT>(weights.size() + 1);
+        Compile(decoded, inputCount, 1, &imageSlots, &slots);
+        Initialize(device, queue, weights);
+        const std::array outputs{DML_BUFFER_BINDING{depth, 0, TensorBytes}};
+        Bind(device, {image, 0, 3 * TensorBytes}, outputs, inputCount);
     }
 };
 
@@ -319,8 +352,12 @@ ZipDepthNative::~ZipDepthNative() = default;
 
 void ZipDepthNative::Record(ID3D12GraphicsCommandList* list) const
 {
-    m_impl->bindings.Record(list, m_impl->recorder.Get(), m_impl->graph.Get());
-    if (m_impl->temporary) Barrier(list, m_impl->temporary.Get());
+    m_impl->Record(list);
 }
 
 bool ZipDepthNative::UsesFp16() const { return m_impl->fp16; }
+
+// The standalone ZipDepth converter shares this file without the renderer.
+#ifdef MPCVR_ENABLE_SVDLUT
+#include "SvdLutModel.inc"
+#endif

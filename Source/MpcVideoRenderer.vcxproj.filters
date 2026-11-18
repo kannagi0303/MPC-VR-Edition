@@ -36,6 +36,9 @@
     <ClCompile Include="DX11VideoProcessorCompletedFrames.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DX11VideoProcessorSvdLut.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="Helper.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -189,6 +192,15 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="DLSS\ZipDepthNative.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\SvdLutModel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\SvdLutModel.inc">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\SvdLutShader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="DLSS\ZipDepthPack.h">

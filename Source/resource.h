@@ -41,6 +41,8 @@
 #define IDC_EXTENDED_STARTUP              5027
 #define IDC_DEPTH_3D_PREVIEW              5028
 #define IDC_ZIPDEPTH_MODE                 5029
+#define IDC_SVDLUT_STRENGTH               5030
+#define IDC_SVDLUT_VALUE                  5031
 #define IDC_SHOW_DEPTH_OVERLAY            5023
 #define IDD_SECTION_SOURCE              4002
 #define IDD_SECTION_CHROMA              4003
@@ -411,6 +413,13 @@
 #define IDC_LOGO_MARGIN_TEXT               1368
 #define IDC_STATIC_LOGO_LIST               1369
 #define IDC_LOGO_LIST                      1370
+#define IDC_JVR_FLAT_VIEW                  1372
+#define IDC_JVR_VERTICAL                   1373
+#define IDC_JVR_VERTICAL_VALUE             1374
+#define IDC_JVR_PROFILE_NAME               1375
+#define IDC_JVR_EYE                        1376
+#define IDC_JVR_REPROJECTION              1377
+#define IDC_JVR_REPROJECTION_VALUE        1378
 #define IDC_STATIC_SDRTM                1066
 #define IDC_COMBO_SDRTM                 1067
 #define IDC_STATIC_DVTM                 1068
@@ -422,7 +431,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        4010
 #define _APS_NEXT_COMMAND_VALUE         40001
-#define _APS_NEXT_CONTROL_VALUE         1372
+#define _APS_NEXT_CONTROL_VALUE         1379
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

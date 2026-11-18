@@ -75,6 +75,7 @@
     </ClCompile>
     <ClCompile Include="DX11VideoProcessorMfg.cpp" />
     <ClCompile Include="DX11VideoProcessorCompletedFrames.cpp" />
+    <ClCompile Include="DX11VideoProcessorSvdLut.cpp" />
     <ClCompile Include="CustomAllocator.cpp" />
     <ClCompile Include="D3D11VP.cpp" />
     <ClCompile Include="D3DUtil\D3D11Font.cpp" />
@@ -88,6 +89,7 @@
     <ClCompile Include="DLSS\ZipDepthGpu.cpp" />
     <ClCompile Include="DLSS\DecodedFrameLookahead.cpp" />
     <ClCompile Include="DLSS\ZipDepthNative.cpp">
+      <PreprocessorDefinitions>MPCVR_ENABLE_SVDLUT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <AdditionalIncludeDirectories>$(SolutionDir)vendor\zipdepth\include;$(SolutionDir)vendor\zipdepth\flatbuffers\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
@@ -137,6 +139,9 @@
     <ClInclude Include="DLSS\DlssSR.h" />
     <ClInclude Include="DLSS\ZipDepthGpu.h" />
     <ClInclude Include="DLSS\ZipDepthNative.h" />
+    <ClInclude Include="DLSS\SvdLutModel.h" />
+    <ClInclude Include="DLSS\SvdLutModel.inc" />
+    <ClInclude Include="DLSS\SvdLutShader.h" />
     <ClInclude Include="DLSS\ZipDepthPack.h" />
     <ClInclude Include="DLSS\ZipDepthGpuShaders.h" />
     <ClInclude Include="DLSS\ZipDepthTemporalShaders.h" />

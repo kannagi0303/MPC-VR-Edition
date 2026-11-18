@@ -140,7 +140,6 @@ foreach ($runtime in $runtimes) {
 $dist = Join-Path $root 'dist'
 
 $stage = Join-Path $root ('dist.stage-' + [Guid]::NewGuid().ToString('N'))
-$archive = "$stage.zip"
 
 $old = Join-Path $root ('dist.previous-' + [Guid]::NewGuid().ToString('N'))
 
@@ -196,12 +195,26 @@ try {
         'DirectShow BaseClasses (Windows Classic Samples)' = (Join-Path $root 'external\BaseClasses\LICENSE.txt')
         'MinHook' = (Join-Path $root 'external\minhook\LICENSE.txt')
     }
+    $svdlutSource = Join-Path $root 'models\svdlut_fivek_srgb'
+    $svdlutGraph = Join-Path $svdlutSource 'svdlut-fivek-srgb.dmlgraph'
+    if (Test-Path -LiteralPath $svdlutGraph -PathType Leaf) {
+        Copy-Item -LiteralPath $svdlutGraph -Destination $edition -ErrorAction Stop
+        $playbackNotices['SVDLUT FiveK sRGB'] = (Join-Path $svdlutSource 'LICENSE-SVDLUT.txt')
+        Write-Host '[INFO] Staged the SVDLUT FiveK sRGB DirectML graph.'
+    }
     Write-LicenseDocument -Destination (Join-Path $stage 'LICENSE.md') -ProjectLicense $gplLicense -Notices $playbackNotices
 
-    # Archive only the staged playback files, then publish the ZIP beside them.
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [IO.Compression.ZipFile]::CreateFromDirectory($stage, $archive, [IO.Compression.CompressionLevel]::Optimal, $false)
-    Move-Item -LiteralPath $archive -Destination (Join-Path $stage 'MPC-VR-Edition.zip')
+    $profileSource = Join-Path $PSScriptRoot 'VRProfiles'
+    if (Test-Path -LiteralPath $profileSource -PathType Container) {
+        $profiles = @(Get-ChildItem -LiteralPath $profileSource -Filter '*.ini' -File)
+        if ($profiles.Count -gt 0) {
+            $profileTarget = Join-Path $stage 'VRProfiles'
+            $null = New-Item -ItemType Directory -Path $profileTarget
+            foreach ($profile in $profiles) {
+                Copy-Item -LiteralPath $profile.FullName -Destination $profileTarget -ErrorAction Stop
+            }
+        }
+    }
 
     $tools = Join-Path $root 'tools'
     $null = New-Item -ItemType Directory -Force -Path $tools
@@ -231,7 +244,6 @@ try {
 
     Write-Host ('[OK] Clean distribution ready: ' + $dist)
 
-    Write-Host ('[OK] Playback ZIP: ' + (Join-Path $dist 'MPC-VR-Edition.zip'))
     Write-Host ('[OK] Optional model converter: ' + $tool)
 
     # One-time cleanup of an obsolete build-support template from earlier ZIPs.
@@ -257,8 +269,6 @@ try {
     }
 
 } finally {
-
-    if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue }
 
     if (-not $published -and $previousMoved -and -not (Test-Path -LiteralPath $dist)) {
 

@@ -24,6 +24,7 @@
 #include <uuids.h>
 #include <Mferror.h>
 #include <Mfidl.h>
+#include <cmath>
 #include <optional>
 #include <limits>
 #include "Helper.h"
@@ -390,12 +391,27 @@ HRESULT CDX11VideoProcessor::TextureResizeShader(
 
 // CDX11VideoProcessor
 
+static void ApplyJvrPlaybackMode(Settings_t& config, bool projectJvr)
+{
+	if (!projectJvr) return;
+
+	// The decoder VP must deliver source colour for projection. Its RTX
+	// enhancements would operate on both eyes before the RGB source exists.
+	config.iVPSuperRes = SUPERRES_Disable;
+	config.bVPRTXVideoHDR = false;
+}
+
 CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Settings_t& requested, HRESULT& hr)
 	: CVideoProcessor(pFilter)
 {
-	Settings_t config=requested;mfg::EnforceScope(config);
+	Settings_t config = requested;
+	mfg::EnforceScope(config);
+	m_jvrFlatView = m_pFilter->JvrProjectionRequested(config);
+	ApplyJvrPlaybackMode(config, m_jvrFlatView);
+	ConfigureJvrProjection(config);
 	m_mfgMultiplier=(config.bUseD3D11 ? config.iMfgMultiplier : 0);m_rtVideoDelay=config.iVideoDelay*10000LL;
     m_mfgProcessingMode = config.iMfgProcessingMode <= 1 ? config.iMfgProcessingMode : 0;
+	m_svdLut.strength = config.GetSvdLutStrength();
 	m_useZipDepthSr = config.bUseZipDepthSr;
 	m_useZipDepthMfg = config.bUseZipDepthMfg;
 	m_adaptiveMfgDepth = config.bAdaptiveMfgDepth;
@@ -714,6 +730,8 @@ void CDX11VideoProcessor::ReleaseVP()
 
 	m_TexSrcVideo.Release();
 	m_mfgNativeInput.Release();
+	m_jvrSource.Release();
+	m_jvrFrame.Release();
 	m_TexConvertOutput.Release();
 	m_TexResize.Release();
 	m_TexsPostScale.Release();
@@ -739,6 +757,7 @@ void CDX11VideoProcessor::ReleaseDevice()
 	ClearCompletedFrames(true);
 	StopMfg(true, m_fastShutdown);
 	m_zipDepth.Stop(m_fastShutdown);
+	ReleaseSvdLut();
 	DLog(L"CDX11VideoProcessor::ReleaseDevice()");
 
 	ReleaseVP();
@@ -784,6 +803,9 @@ void CDX11VideoProcessor::ReleaseDevice()
 	m_pVSimpleInputLayout.Release();
 	m_pVS_Simple.Release();
 	m_pPS_Simple.Release();
+	m_jvrShader.Release();
+	m_jvrConstants.Release();
+	m_jvrShaderFailed = false;
 	m_pPS_BitmapToFrame.Release();
 	m_pPS_DepthOverlay.Release();
 	m_pDepthOverlayBlendState.Release();
@@ -2114,6 +2136,7 @@ BOOL CDX11VideoProcessor::InitMediaType(const CMediaType* pmt)
 	}
 
     ResetFeatureStatus();
+	ResetSvdLutHistory();
 	ReleaseVP();
 
 	auto FmtParams = GetFmtConvParams(pmt);
@@ -2568,7 +2591,7 @@ public:
 
 CComPtr<IMediaSample> CDX11VideoProcessor::CloneLookaheadSample(IMediaSample* sample, int64_t& pts, uint64_t& bytes)
 {
-    if (!m_pDeviceContext || !m_pDevice || (!UsesZipDepthMfg() && !UsesZipDepthSr()) ||
+    if (CanProjectJvr() || !m_pDeviceContext || !m_pDevice || (!UsesZipDepthMfg() && !UsesZipDepthSr()) ||
         !MfgDepthSourceEligible() || m_bInterlaced || m_srcDXGIFormat != DXGI_FORMAT_NV12 ||
         m_srcExFmt.VideoTransferMatrix != DXVA2_VideoTransferMatrix_BT709 ||
         sample->IsDiscontinuity() == S_OK || sample->IsPreroll() == S_OK)
@@ -2629,7 +2652,7 @@ CComPtr<IMediaSample> CDX11VideoProcessor::CloneLookaheadSample(IMediaSample* sa
 
 bool CDX11VideoProcessor::PrefetchZipDepth(IMediaSample* sample, int64_t pts)
 {
-    if ((!UsesZipDepthMfg() && !UsesZipDepthSr()) || !m_pDevice || !m_pDeviceContext || !MfgDepthSourceEligible())
+    if (CanProjectJvr() || (!UsesZipDepthMfg() && !UsesZipDepthSr()) || !m_pDevice || !m_pDeviceContext || !MfgDepthSourceEligible())
         return true;
     CComQIPtr<IMediaSampleD3D11> decoded(sample);
     CComPtr<ID3D11Texture2D> texture;
@@ -3123,7 +3146,7 @@ HRESULT CDX11VideoProcessor::CopySample(IMediaSample* pSample)
 			// do not use UpdateSubresource for D3D11 VP here
 			// because it can cause green screens and freezes on some configurations
 			hr = MemCopyToTexSrcVideo(data, m_srcPitch);
-			if (SUCCEEDED(hr) && MfgFrameAnalysisEligible() && m_srcDXGIFormat == DXGI_FORMAT_NV12 &&
+			if (SUCCEEDED(hr) && !CanProjectJvr() && MfgFrameAnalysisEligible() && m_srcDXGIFormat == DXGI_FORMAT_NV12 &&
 			    m_srcPitch > 0 && m_srcLines >= m_srcHeight + m_srcHeight / 2) {
 				m_mfgDecodedDifference.SubmitCpuNv12(data, m_srcPitch, m_srcHeight, m_srcRect, m_rtStart, m_mfgLowMotionEnabled);
 				comparedCpuNv12 = true;
@@ -3135,7 +3158,7 @@ HRESULT CDX11VideoProcessor::CopySample(IMediaSample* pSample)
 		}
 	}
 
-	if (!comparedCpuNv12 && MfgFrameAnalysisEligible() && SUCCEEDED(hr)) {
+	if (!comparedCpuNv12 && !CanProjectJvr() && MfgFrameAnalysisEligible() && SUCCEEDED(hr)) {
 		if (m_D3D11VP.IsReady()) {
 			const auto held = m_D3D11VP.HoldFrame();
 			m_mfgDecodedDifference.Submit(m_pDevice, m_pDeviceContext, held.pTexture,
@@ -3160,6 +3183,18 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 	CheckPointer(m_TexSrcVideo.pTexture, E_FAIL);
 	CheckPointer(m_pDXGISwapChain1, E_FAIL);
 
+	const bool mfgConfigured = m_mfgMultiplier.load(std::memory_order_relaxed) >= 2;
+	const bool mfgBypassed = mfgConfigured && MfgSourceMeetsDisplayRate();
+	const bool mfgEnabledForRate = mfgConfigured && !mfgBypassed;
+	if (field && mfgBypassed && m_mfgInputModeKnown) {
+		// Scheduled input has drained legacy originals. Completed originals
+		// already own their surfaces and retain their existing deadlines.
+		StopMfg(false);
+		if (!m_mfg.Failed()) m_mfg.ResetHistory();
+		m_mfgAutoEpoch = m_mfgAutoLastPts = -1;
+		m_mfgInputModeKnown = false;
+	}
+
 	// Buffered video-only frames apply the window size at presentation.
 	if (!m_completingSample) {
 		if (field || !m_completedLast) {
@@ -3168,23 +3203,34 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 		}
 		UpdateProcessingResolution();
 	}
-	if (!field && m_completedLast) {
+	if (!field && m_completedLast && (!CanProjectJvr() || m_pFilter->m_filterState == State_Running ||
+	    m_completedLast->pts != m_rtStart)) {
 		return PresentCompletedVideo(*m_completedLast);
 	}
 	if (field && !m_completingSample && !CompletedFramesPending()) m_completedLast.reset();
 	const bool detached = m_processingSize.cx > 0;
-	if (!field && detached && m_mfgMultiplier && m_mfgInputModeKnown &&
+	if (!field && detached && mfgEnabledForRate && m_mfgInputModeKnown &&
 	    !m_mfg.Failed() && !m_mfgPresentFailed && m_pFilter->m_filterState == State_Running) {
 		// The presenter owns the current picture and will draw with the new window geometry.
 		return S_OK;
 	}
 	const bool completedVideoOnly = m_completedTarget && m_completedTarget->videoOnly;
-	const auto& outputPicture = m_completedTarget ? m_completedTarget->picture : m_videoRect;
-	const CRect processingRect = detached ? ProcessingRect() : outputPicture;
-
 	if (field) {
 		m_FieldDrawn = field;
 	}
+	const bool second = m_FieldDrawn == 2;
+	const bool wantsProjection = CanProjectJvr() && !m_windowRect.IsRectEmpty() && !m_videoRect.IsRectEmpty();
+	const CRect sourceRect = ProcessingSourceRect(wantsProjection);
+	const uint64_t tick1 = GetPreciseTick();
+	const auto projectionHr = wantsProjection ? PrepareJvrFrame(sourceRect, second) : S_FALSE;
+	const bool projected = wantsProjection && SUCCEEDED(projectionHr);
+	const auto projectionTicks = wantsProjection ? GetPreciseTick() - tick1 : 0;
+	DLogIf(FAILED(projectionHr), L"JVR source preparation failed ({}); showing decoded source", HR2Str(projectionHr));
+	const bool sourceReady = !wantsProjection || projected;
+	const CRect frameSource = projected ? sourceRect : m_srcRect;
+	const CRect outputPicture = m_completedTarget ? m_completedTarget->picture : PictureForPlayback(projected);
+	const CRect processingRect = detached ? ProcessingRect() : outputPicture;
+	if (m_completedTarget) m_completedTarget->projected = projected;
 
 	CComPtr<ID3D11Texture2D> pBackBuffer;
 	HRESULT hr = S_OK;
@@ -3200,8 +3246,6 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 			return hr;
 		}
 	}
-
-	uint64_t tick1 = GetPreciseTick();
 
 	if (!m_windowRect.IsRectEmpty()) {
 		// fill the BackBuffer with black
@@ -3316,18 +3360,30 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 	}
 
 	const bool playFirst = !m_pFilter->m_Sets.bWaitForExtendedStartup;
-	const bool wantSr = CanDlssSRUpscale(m_srcRect, processingRect);
+	const bool wantSr = sourceReady && CanDlssSRUpscale(frameSource, processingRect, projected);
+	if (projected && field && frameStartTime >= 0) {
+		if (MfgFrameAnalysisEligible()) {
+			m_mfgDecodedDifference.Submit(m_pDevice, m_pDeviceContext, m_jvrFrame.pTexture, 0, frameSource, frameStartTime);
+		}
+		if ((UsesZipDepthSr() && wantSr) || UsesZipDepthMfg()) {
+			m_zipDepth.Update(m_pDevice, m_pDeviceContext, m_jvrFrame.pShaderResource,
+				frameSource, frameSource.Size(), frameStartTime);
+		}
+	}
+	if (m_svdLut.strength && sourceReady && field == 1) {
+		CaptureSvdLut(frameStartTime, projected, second);
+	}
 	const bool warmZipDepth = (UsesZipDepthMfg() && MfgDepthSourceEligible()) ||
 		(UsesZipDepthSr() && wantSr);
-	if (field && frameStartTime != INVALID_TIME && warmZipDepth && (playFirst || m_mfgMultiplier)) {
+	if (field && frameStartTime != INVALID_TIME && warmZipDepth && (playFirst || mfgEnabledForRate)) {
 		m_zipDepth.Prepare(m_pDevice);
 	}
 	const bool canEnhance = !playFirst || (m_startupHasPicture && (!warmZipDepth || !m_zipDepth.Loading()));
-	const bool pausedMfg = m_mfgMultiplier && field && frameStartTime != INVALID_TIME &&
+	const bool pausedMfg = sourceReady && mfgEnabledForRate && field && frameStartTime != INVALID_TIME &&
 		m_pFilter->m_filterState == State_Paused && !m_pPSHalfOUtoInterlace &&
 		!m_mfg.Failed();
 	const bool prerollMfg = pausedMfg && !playFirst;
-	const bool canQueueMfg = m_mfgMultiplier && field && frameStartTime != INVALID_TIME &&
+	const bool canQueueMfg = sourceReady && mfgEnabledForRate && field && frameStartTime != INVALID_TIME &&
 		m_pFilter->m_filterState == State_Running && !m_pFilter->m_bClockStalled && !m_pPSHalfOUtoInterlace;
 	const bool prepareMfg = canQueueMfg || pausedMfg;
 	auto mfgReady = [&](ID3D11Texture2D* input) {
@@ -3347,21 +3403,21 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 	// pending real frames and invert the source timeline.
     const bool postUpscaleRequested = prepareMfg && m_iVPSuperRes != SUPERRES_Disable && MfgPostUpscaleRequested();
     const bool postVsrCandidate = postUpscaleRequested && m_bVPUseSuperRes;
-    const bool postDlssSRCandidate = postUpscaleRequested && CanDlssSRUpscale(m_srcRect, processingRect);
+    const bool postDlssSRCandidate = postUpscaleRequested && CanDlssSRUpscale(frameSource, processingRect, projected);
     // Native-size DLAA can be evaluated after MFG without an enlargement.
     const bool postNativeDlaa = postDlssSRCandidate &&
-        processingRect.Width() == m_srcRectWidth && processingRect.Height() == m_srcRectHeight;
+        processingRect.Size() == frameSource.Size();
 	const bool nativeMfg = prepareMfg && (!m_resizePending || detached) && !m_mfg.Failed() &&
-		!m_mfgPresentFailed.load(std::memory_order_relaxed) && (completedVideoOnly || !m_renderRect.IsRectEmpty()) &&
-		m_srcRectWidth > 0 && m_srcRectHeight > 0 && (m_srcRectHeight <= 1440 || postNativeDlaa) &&
-		((processingRect.Width() > m_srcRectWidth && processingRect.Height() > m_srcRectHeight) || postNativeDlaa) &&
+		!m_mfgPresentFailed.load(std::memory_order_relaxed) && (completedVideoOnly || projected || !m_renderRect.IsRectEmpty()) &&
+		!frameSource.IsRectEmpty() && (frameSource.Height() <= 1440 || postNativeDlaa) &&
+		((processingRect.Width() > frameSource.Width() && processingRect.Height() > frameSource.Height()) || postNativeDlaa) &&
 		((!m_bInterlaced && !m_bDoubleFrames && m_SampleFormat == D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE) || postDlssSRCandidate) &&
 		m_iRotation == 0 && !m_bFlip &&
 		!SourceIsHDR() && !m_bVPRTXVideoHDR && !m_bVPUseRTXVideoHDR &&
         ((m_iVPSuperRes == SUPERRES_Disable && !m_bVPUseSuperRes) || postVsrCandidate || postDlssSRCandidate) &&
 		GetPostScaleSteps() == 0 &&
 		m_SwapChainFmt == DXGI_FORMAT_B8G8R8A8_UNORM &&
-		(m_D3D11VP.IsReady() ? m_D3D11OutputFmt : m_InternalTexFmt) == DXGI_FORMAT_B8G8R8A8_UNORM;
+		(projected || (m_D3D11VP.IsReady() ? m_D3D11OutputFmt : m_InternalTexFmt) == DXGI_FORMAT_B8G8R8A8_UNORM);
 	if (nativeMfg) {
 		// No global preference changes: MPC-VR's normal VP/VSR settings remain
 		// authoritative.  Set MPCVR_MFG_NATIVE_INPUT=0 to A/B the legacy path.
@@ -3371,23 +3427,26 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 		}();
         // Post-MFG VSR is opt-in. A failed initialization MUST keep the
         // original VSR-before-MFG path, not silently use Shader scaling.
+        auto& nativeInput = projected ? m_jvrFrame : m_mfgNativeInput;
         nativeWarmupSelected = nativeEnabled && (!postVsrCandidate || EnsureMfgPostVsr()) &&
-            SUCCEEDED(m_mfgNativeInput.CheckCreate(m_pDevice,
-                DXGI_FORMAT_B8G8R8A8_UNORM,m_srcRectWidth,m_srcRectHeight,Tex2D_DefaultShaderRTarget));
+            (projected || SUCCEEDED(nativeInput.CheckCreate(m_pDevice, DXGI_FORMAT_B8G8R8A8_UNORM,
+                frameSource.Width(), frameSource.Height(), Tex2D_DefaultShaderRTarget)));
         if (nativeWarmupSelected) {
-            nativeWarmupPending = !mfgReady(m_mfgNativeInput.pTexture);
+            nativeWarmupPending = !mfgReady(nativeInput.pTexture);
             m_extendedStartupPending |= nativeWarmupPending;
             if (postDlssSRCandidate && prerollMfg) {
-                const CRect nativeRect(0, 0, m_srcRectWidth, m_srcRectHeight);
+                const CRect nativeRect(0, 0, frameSource.Width(), frameSource.Height());
                 PrepareDlssSR(nativeRect, processingRect, true);
             }
         }
         if (nativeWarmupSelected &&
             !nativeWarmupPending && (prerollMfg || (useMfg && !m_mfg.Failed()))) {
-            const CRect nativeRect(0,0,m_srcRectWidth,m_srcRectHeight);
+            const CRect nativeRect(0, 0, frameSource.Width(), frameSource.Height());
             const auto nativeStart=int64_t(GetPreciseTick());
             HRESULT nativeHr=E_FAIL;
-            if(postVsrCandidate) {
+            if (projected) {
+                nativeHr = S_OK;
+            } else if (postVsrCandidate) {
                 // Copy/CSC through a separate VP that has no RTX VSR enabled.
                 // The regular decoder VP is never reconfigured.
                 const auto held=m_D3D11VP.HoldFrame();
@@ -3403,17 +3462,17 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
                     : Process(m_mfgNativeInput.pTexture,m_srcRect,nativeRect,m_FieldDrawn==2);
             }
             const auto nativeEnd=int64_t(GetPreciseTick());
-            if(nativeEnd>nativeStart) m_mfgVideoTicks.fetch_add(uint64_t(nativeEnd-nativeStart),std::memory_order_relaxed);
+            if (nativeEnd > nativeStart)
+                m_mfgVideoTicks.fetch_add(uint64_t(nativeEnd-nativeStart) + projectionTicks, std::memory_order_relaxed);
             m_mfgVideoCount.fetch_add(1,std::memory_order_relaxed);
             if (SUCCEEDED(nativeHr)) {
                 if (prerollMfg) {
                     // Create the NGX feature/flow/banks while the DirectShow
                     // clock is still stopped. Never enqueue a preroll frame.
-                    m_mfg.Warmup(m_pDevice, m_pDeviceContext, m_mfgNativeInput.pTexture,
-                        2);
+                    m_mfg.Warmup(m_pDevice, m_pDeviceContext, nativeInput.pTexture, 2);
                 }
                 bool nativeOverlayHandled = false;
-                if (useMfg && QueueMfg(m_mfgNativeInput.pTexture, frameStartTime, nativeOverlayHandled, true, postVsrCandidate)) {
+                if (useMfg && QueueMfg(nativeInput.pTexture, frameStartTime, nativeOverlayHandled, true, postVsrCandidate, false, projected)) {
                     m_bVPScalingUseShaders=m_D3D11VP.IsReady() && !postVsrCandidate;
                     return S_OK;
                 }
@@ -3425,9 +3484,8 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 
 	bool videoOnly = false;
 	bool overlayInputHandled = false;
-	const bool second = m_FieldDrawn == 2;
-	// A redraw has no new PTS. Keep the same field timestamp so SR can
-	// reuse its output instead of advancing temporal history.
+	// Redraws keep the current PTS. The projected preview uses the newly
+	// sampled surface directly instead of SR's cached result for that PTS.
 	const auto timestamp = frameStartTime == INVALID_TIME
 		? m_rtStart + (second ? m_sampleDuration / 2 : 0)
 		: frameStartTime;
@@ -3438,12 +3496,13 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 		useMfg = !nativeWarmupSelected && canQueueMfg && canEnhance && ready;
 		const bool srAfterNativeMfg = nativeWarmupSelected && postDlssSRCandidate &&
 			(prerollMfg || (playFirst && !m_mfg.Failed()));
-		const bool allowSr = canEnhance && ready && !srAfterNativeMfg;
-		const auto result = Process(target, m_srcRect, rect, second, allowSr, timestamp, postScale, &overlayInputHandled);
+		const bool allowSr = sourceReady && canEnhance && ready && !srAfterNativeMfg && (field || !projected);
+		const auto result = Process(target, frameSource, rect, second, allowSr, timestamp, postScale,
+			&overlayInputHandled, projected ? &m_jvrFrame : nullptr);
 		m_extendedStartupPending |= playFirst && m_dlssSR.Preparing();
 		return result;
 	};
-	if (completedVideoOnly || !m_renderRect.IsRectEmpty()) {
+	if (completedVideoOnly || projected || !m_renderRect.IsRectEmpty()) {
 		const auto videoStart=int64_t(GetPreciseTick());
 		if (completedVideoOnly) {
 			hr = processPicture(pBackBuffer, outputPicture, &m_processingPostScale);
@@ -3461,9 +3520,10 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 			hr = processPicture(pBackBuffer, outputPicture, nullptr);
 			if (FAILED(hr)) return hr;
 		}
-		if (m_mfgMultiplier.load(std::memory_order_relaxed)>=2) {
+		if (mfgEnabledForRate) {
 			const auto videoEnd=int64_t(GetPreciseTick());
-			if(videoEnd>videoStart) m_mfgVideoTicks.fetch_add(uint64_t(videoEnd-videoStart),std::memory_order_relaxed);
+			if (videoEnd > videoStart)
+				m_mfgVideoTicks.fetch_add(uint64_t(videoEnd-videoStart) + projectionTicks, std::memory_order_relaxed);
 			m_mfgVideoCount.fetch_add(1,std::memory_order_relaxed);
 		}
 	}
@@ -3481,9 +3541,14 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 	// A back-buffer-sized input may need to fall back while its resize is pending.
 	auto* pictureTexture = videoOnly ? m_processingTexture.pTexture.p : pBackBuffer.p;
 	if (useMfg && (!m_resizePending || videoOnlyInput)) {
-		if (QueueMfg(pictureTexture, frameStartTime, overlayInputHandled, false, false, videoOnlyInput)) return S_OK;
-	} else if (m_mfgMultiplier && !m_resizePending && m_pFilter->m_filterState == State_Running) StopMfg(false);
-	if (!overlayInputHandled && (videoOnly || m_renderRect == m_videoRect)) {
+		if (QueueMfg(pictureTexture, frameStartTime, overlayInputHandled, false, false, videoOnlyInput, projected)) return S_OK;
+	} else if (sourceReady && mfgEnabledForRate && !m_resizePending && m_pFilter->m_filterState == State_Running) StopMfg(false);
+	if (!m_completedTarget && (videoOnly || projected || !m_renderRect.IsRectEmpty())) {
+		DrawSvdLut(pictureTexture, videoOnly ? processingRect : outputPicture, timestamp);
+	}
+	if (projected && DepthOverlayEnabled() && !overlayInputHandled) {
+		DrawDepthOverlay(pictureTexture, videoOnlyInput ? processingRect : outputPicture, timestamp);
+	} else if (!wantsProjection && !overlayInputHandled && (videoOnly || m_renderRect == m_videoRect)) {
 		BlendSourceDepthOverlay(pictureTexture, videoOnly ? m_processingTexture.pShaderResource.p : nullptr,
 			videoOnly ? processingRect : outputPicture, timestamp);
 	}
@@ -3504,7 +3569,7 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 		return S_OK;
 	}
 	if (!m_pPSHalfOUtoInterlace) {
-		DrawSubtitles(pBackBuffer);
+		DrawSubtitles(pBackBuffer, projected ? &outputPicture : nullptr);
 	}
 
 	if (m_bAlphaBitmapEnable) {
@@ -3578,7 +3643,7 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 	}
 	// If a frame bypassed MFG (warmup/fallback), it was absent from MFG's
 	// presenter counters even though the normal renderer submitted it.
-	if (hr==S_OK && m_mfgMultiplier.load(std::memory_order_relaxed)>=2)
+	if (hr==S_OK && mfgEnabledForRate)
 		m_mfgFallbackPresents.fetch_add(1,std::memory_order_relaxed);
 	DLogIf(FAILED(hr), L"CDX11VideoProcessor::Render() : Present() failed with error {}", HR2Str(hr));
 
@@ -4066,10 +4131,10 @@ bool CDX11VideoProcessor::BlendSourceDepthOverlay(ID3D11Texture2D* image, ID3D11
 	return true;
 }
 
-void CDX11VideoProcessor::DrawMfgMotion(ID3D11Texture2D* target, uint64_t serial, REFERENCE_TIME pts)
+void CDX11VideoProcessor::DrawMfgMotion(ID3D11Texture2D* target, uint64_t serial, REFERENCE_TIME pts, const CRect& picture)
 {
 	const auto motion = m_mfg.OverlayMotion(serial, pts);
-	if (!motion.view || m_videoRect.IsRectEmpty()) return;
+	if (!motion.view || picture.IsRectEmpty()) return;
 	if (!m_pMfgMotionConstants) {
 		static constexpr char source[] = R"(
 Texture2D<float2> Motion : register(t0);
@@ -4132,13 +4197,13 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
 
 	const CRect work(motion.picture);
 	const float constants[8]{float(work.left), float(work.top), float(work.Width()), float(work.Height()),
-		float(m_videoRect.Width()), float(m_videoRect.Height())};
+		float(picture.Width()), float(picture.Height())};
 	CComPtr<ID3D11RenderTargetView> view;
 	if (FAILED(m_pDevice->CreateRenderTargetView(target, nullptr, &view)) ||
 		FAILED(FillVertexBuffer(m_pDeviceContext, m_pVertexBuffer, 1, 1, CRect(0, 0, 1, 1), 0, false))) return;
 	m_pDeviceContext->UpdateSubresource(m_pMfgMotionConstants, 0, nullptr, constants, 0, 0);
 	m_pDeviceContext->RSSetState(nullptr);
-	D3D11_VIEWPORT viewport{float(m_videoRect.left), float(m_videoRect.top), constants[4], constants[5], 0, 1};
+	D3D11_VIEWPORT viewport{float(picture.left), float(picture.top), constants[4], constants[5], 0, 1};
 	m_pDeviceContext->PSSetShaderResources(1, 1, &motion.active);
 	TextureBlt11(m_pDeviceContext, view, viewport, m_pVSimpleInputLayout, m_pVS_Simple,
 		m_pMfgMotionShader, motion.view, nullptr, m_pMfgMotionConstants, m_pVertexBuffer, m_pMfgMotionBlend);
@@ -4449,14 +4514,15 @@ float4 main(PS_INPUT input) : SV_TARGET {
 	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
 }
 
-void CDX11VideoProcessor::DrawSubtitles(ID3D11Texture2D* pRenderTarget)
+void CDX11VideoProcessor::DrawSubtitles(ID3D11Texture2D* pRenderTarget, const CRect* picture)
 {
 	HRESULT hr = S_OK;
+	const CRect& subtitleRect = picture ? *picture : m_videoRect;
 
 	CComPtr<ISubPic> pSubPic = m_pFilter->GetSubPic(m_rtStart);
 	if (pSubPic) {
 		RECT rcSource, rcDest;
-		hr = pSubPic->GetSourceAndDest(m_windowRect, m_videoRect, &rcSource, &rcDest, FALSE, {}, 0, FALSE);
+		hr = pSubPic->GetSourceAndDest(m_windowRect, subtitleRect, &rcSource, &rcDest, FALSE, {}, 0, FALSE);
 		if (SUCCEEDED(hr)) {
 			ID3D11RenderTargetView* pRenderTargetView;
 			hr = m_pDevice->CreateRenderTargetView(pRenderTarget, nullptr, &pRenderTargetView);
@@ -4484,7 +4550,7 @@ void CDX11VideoProcessor::DrawSubtitles(ID3D11Texture2D* pRenderTarget)
 		hr = m_pDevice->CreateRenderTargetView(pRenderTarget, nullptr, &pRenderTargetView);
 		if (SUCCEEDED(hr)) {
 			const CRect rSrcPri(POINT(0, 0), m_windowRect.Size());
-			const CRect rDstVid(m_videoRect);
+			const CRect rDstVid(subtitleRect);
 			const auto rtStart = m_pFilter->m_rtStartTime + m_rtStart;
 
 			// Set render target and shaders
@@ -4505,11 +4571,11 @@ void CDX11VideoProcessor::DrawSubtitles(ID3D11Texture2D* pRenderTarget)
 	}
 }
 
-bool CDX11VideoProcessor::DlssSRSourceAllowed() const
+bool CDX11VideoProcessor::DlssSRSourceAllowed(const CRect* preparedRect) const
 {
     // Use exactly the same decoded-source size thresholds as RTX VSR.
-    const UINT width = m_srcWidth;
-    const UINT height = m_srcHeight;
+    const UINT width = preparedRect ? preparedRect->Width() : m_srcWidth;
+    const UINT height = preparedRect ? preparedRect->Height() : m_srcHeight;
     if (!width || !height) return false;
     const UINT longSide = std::max(width, height);
     const UINT shortSide = std::min(width, height);
@@ -4522,10 +4588,10 @@ bool CDX11VideoProcessor::DlssSRSourceAllowed() const
     }
 }
 
-bool CDX11VideoProcessor::CanDlssSRUpscale(const CRect& srcRect, const CRect& dstRect)
+bool CDX11VideoProcessor::CanDlssSRUpscale(const CRect& srcRect, const CRect& dstRect, bool preparedRgb)
 {
-	return m_iVPSuperRes == SUPERRES_DLSS_SR && DlssSRSourceAllowed() && m_VendorId == PCIV_NVIDIA &&
-		m_D3D11VP.IsReady() && m_srcParams.CDepth == 8 &&
+	return m_iVPSuperRes == SUPERRES_DLSS_SR && DlssSRSourceAllowed(preparedRgb ? &srcRect : nullptr)
+		&& m_VendorId == PCIV_NVIDIA && (preparedRgb || (m_D3D11VP.IsReady() && m_srcParams.CDepth == 8)) &&
 		(m_SampleFormat == D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE || m_iVPDeinterlacing != DEINT_Disable) &&
 		!SourceIsHDR() && !m_bVPUseRTXVideoHDR && !m_iRotation && !m_bFlip && (!m_resizePending || m_processingSize.cx > 0) &&
 		!srcRect.IsRectEmpty() &&
@@ -4546,7 +4612,7 @@ Tex2D_t* CDX11VideoProcessor::PrepareDlssSR(const CRect& srcRect, const CRect& d
 }
 
 Tex2D_t* CDX11VideoProcessor::EvaluateDlssSR(const Tex2D_t& source, Tex2D_t& input, const CRect& sourceRect,
-                                             REFERENCE_TIME timestamp, float frameTimeMs, bool* overlayInputHandled)
+                                             REFERENCE_TIME timestamp, float frameTimeMs, bool* overlayInputHandled, bool depthPrepared)
 {
 	if (FAILED(TextureCopyRect(source, input.pTexture, sourceRect, sourceRect, m_pPS_Simple, nullptr, 0, false))) {
 		m_dlssSRInputStatus = L"source conversion failed";
@@ -4557,26 +4623,26 @@ Tex2D_t* CDX11VideoProcessor::EvaluateDlssSR(const Tex2D_t& source, Tex2D_t& inp
 	ID3D11ShaderResourceView* empty = nullptr;
 	m_pDeviceContext->PSSetShaderResources(0, 1, &empty);
 	const bool sourceFrame = !m_dlssSRAfterMfg;
-	ID3D11ShaderResourceView* cleanSource = nullptr;
-	if (sourceFrame && overlayInputHandled && !m_mfgMultiplier &&
-		BlendSourceDepthOverlay(input.pTexture, source.pShaderResource, sourceRect, timestamp)) {
-		cleanSource = source.pShaderResource;
-	}
+	const bool overlay = sourceFrame && overlayInputHandled && !m_mfgMultiplier &&
+		!depthPrepared && BlendSourceDepthOverlay(input.pTexture, source.pShaderResource, sourceRect, timestamp);
+	ID3D11ShaderResourceView* cleanSource = depthPrepared || overlay ? source.pShaderResource.p : nullptr;
 	auto* output = m_dlssSR.Evaluate(timestamp, frameTimeMs, UsesZipDepthSr() ? &m_zipDepth : nullptr,
 		sourceFrame, cleanSource);
-	if (overlayInputHandled) *overlayInputHandled = output && cleanSource;
+	if (overlayInputHandled) *overlayInputHandled = output && overlay;
 	return output;
 }
 
-Tex2D_t* CDX11VideoProcessor::TryDlssSR(const CRect& srcRect, const CRect& dstRect, const bool second, const REFERENCE_TIME timestamp, bool* overlayInputHandled)
+Tex2D_t* CDX11VideoProcessor::TryDlssSR(const CRect& srcRect, const CRect& dstRect, const bool second, const REFERENCE_TIME timestamp, bool* overlayInputHandled, const Tex2D_t* preparedSource)
 {
 	if (m_iVPSuperRes != SUPERRES_DLSS_SR) {
 		return nullptr;
 	}
-	if (!CanDlssSRUpscale(srcRect, dstRect)) {
-        m_dlssSRInputStatus = !DlssSRSourceAllowed() ? L"source exceeds DLSS size threshold" :
+	if (!CanDlssSRUpscale(srcRect, dstRect, preparedSource != nullptr)) {
+        m_dlssSRInputStatus = !DlssSRSourceAllowed(preparedSource ? &srcRect : nullptr) ? L"source exceeds DLSS size threshold" :
             m_SampleFormat != D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE && m_iVPDeinterlacing == DEINT_Disable
-            ? L"enable D3D11 deinterlacing for this source" : L"requires NVIDIA D3D11 VP and an 8-bit SDR upscale (or native DLAA)";
+            ? L"enable D3D11 deinterlacing for this source"
+            : preparedSource ? L"requires NVIDIA and an SDR upscale (or native DLAA)"
+            : L"requires NVIDIA D3D11 VP and an 8-bit SDR upscale (or native DLAA)";
 		return nullptr;
 	}
 	const CRect nativeRect(0, 0, srcRect.Width(), srcRect.Height());
@@ -4584,16 +4650,160 @@ Tex2D_t* CDX11VideoProcessor::TryDlssSR(const CRect& srcRect, const CRect& dstRe
 	if (!input) {
 		return nullptr;
 	}
+	const float frameTimeMs = m_rtAvgTimePerFrame > 0 ? float(m_rtAvgTimePerFrame / 10000.0) : 41.7f;
+	if (preparedSource) {
+		return EvaluateDlssSR(*preparedSource, *input, nativeRect, timestamp, frameTimeMs, overlayInputHandled, true);
+	}
 	if (FAILED(m_dlssSRSource.CheckCreate(m_pDevice, m_D3D11OutputFmt, srcRect.Width(), srcRect.Height(), Tex2D_DefaultShaderRTarget)) ||
 	    FAILED(D3D11VPPass(m_dlssSRSource.pTexture, srcRect, nativeRect, second))) {
 		m_dlssSRInputStatus = L"source conversion failed";
 		return nullptr;
 	}
-	const float frameTimeMs = m_rtAvgTimePerFrame > 0 ? float(m_rtAvgTimePerFrame / 10000.0) : 41.7f;
 	return EvaluateDlssSR(m_dlssSRSource, *input, nativeRect, timestamp, m_bDoubleFrames ? frameTimeMs / 2 : frameTimeMs, overlayInputHandled);
 }
 
-HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, const bool second, const bool allowDlssSR, const REFERENCE_TIME timestamp, CTex2DRing* processingPostScale, bool* overlayInputHandled)
+bool CDX11VideoProcessor::CanProjectJvr() const
+{
+	// The manual JVR preset describes progressive SDR full-SBS, two square eyes.
+	return m_jvrFlatView && !m_jvrShaderFailed && !m_srcRect.IsRectEmpty() && m_srcRect.Height() >= 2 &&
+		int64_t(m_srcRect.Width()) == 2LL * m_srcRect.Height() &&
+		!m_bInterlaced && m_SampleFormat == D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE &&
+		!SourceIsHDR() && !m_bVPUseRTXVideoHDR && !m_iRotation && !m_bFlip &&
+		!m_pPSHalfOUtoInterlace;
+}
+
+void CDX11VideoProcessor::ConfigureJvrProjection(const Settings_t& config)
+{
+	m_jvrEye = config.iJvrEye == 1 ? 1 : 0;
+	const int vertical = std::clamp(config.iJvrVertical, JVR_VERTICAL_MIN, JVR_VERTICAL_MAX);
+	const int reprojection = std::clamp(config.iJvrReprojection, JVR_REPROJECTION_MIN, JVR_REPROJECTION_MAX);
+	m_jvrView = jvr::MakeView(vertical, reprojection);
+}
+
+CRect CDX11VideoProcessor::ProcessingSourceRect(bool projected) const
+{
+	if (!projected) return m_srcRect;
+	const auto size = jvr::SourceFrameSize(m_srcRect.Height());
+	return CRect(0, 0, size.width, size.height);
+}
+
+CRect CDX11VideoProcessor::PictureForPlayback(bool projected) const
+{
+	if (!projected) return m_videoRect;
+	const auto size = jvr::FitFrame(m_windowRect.Width(), m_windowRect.Height());
+	const LONG left = m_windowRect.left + (m_windowRect.Width() - size.width) / 2;
+	const LONG top = m_windowRect.top + (m_windowRect.Height() - size.height) / 2;
+	return CRect(left, top, left + size.width, top + size.height);
+}
+
+HRESULT CDX11VideoProcessor::PrepareJvrFrame(const CRect& picture, bool second)
+{
+	if (m_jvrShaderFailed) return E_FAIL;
+	const Tex2D_t* source = &m_TexSrcVideo;
+	CRect sourceRect = m_srcRect;
+	if (m_D3D11VP.IsReady()) {
+		auto hr = m_jvrSource.CheckCreate(m_pDevice, m_D3D11OutputFmt, sourceRect.Width(), sourceRect.Height(),
+			Tex2D_DefaultShaderRTarget);
+		if (FAILED(hr)) return hr;
+		const CRect native(0, 0, sourceRect.Width(), sourceRect.Height());
+		hr = D3D11VPPass(m_jvrSource.pTexture, sourceRect, native, second);
+		if (FAILED(hr)) return hr;
+		source = &m_jvrSource;
+		sourceRect = native;
+	} else if (m_PSConvColorData.bEnable) {
+		const auto hr = ConvertColorPass(m_TexConvertOutput.pTexture);
+		if (FAILED(hr)) return hr;
+		source = &m_TexConvertOutput;
+		sourceRect.SetRect(0, 0, source->desc.Width, source->desc.Height);
+	}
+	const auto hr = m_jvrFrame.CheckCreate(m_pDevice, DXGI_FORMAT_B8G8R8A8_UNORM,
+		picture.Width(), picture.Height(), Tex2D_DefaultShaderRTarget);
+	if (FAILED(hr)) return hr;
+	const auto result = ProjectJvr(*source, m_jvrFrame.pTexture, sourceRect, picture);
+	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+	return result;
+}
+
+HRESULT CDX11VideoProcessor::ProjectJvr(const Tex2D_t& source, ID3D11Texture2D* target,
+	const CRect& sourceRect, const CRect& picture)
+{
+	if (m_jvrShaderFailed || !source.pShaderResource || sourceRect.IsRectEmpty() || picture.IsRectEmpty()) {
+		return E_FAIL;
+	}
+	using Constants = std::array<float, 16>;
+	static_assert(sizeof(Constants) == 4 * 16);
+	if (!m_jvrShader) {
+		static constexpr char shader[] = R"(
+Texture2D<float4> Video : register(t0);
+SamplerState Linear : register(s0);
+cbuffer Projection : register(b0) {
+    float4 Viewport; // centre in output pixels and plane units per pixel
+    float4 Eye;      // selected eye's texture UV origin and extent
+    float4 Lens;     // half a source texel and the eye's local optical centre
+    float4 View;     // focal length, cosine and sine of pitch, vertical plane offset
+};
+
+float4 main(float4 position : SV_POSITION) : SV_TARGET {
+    float2 plane = (position.xy - Viewport.xy) * Viewport.zw;
+    plane.y += View.w;
+
+    // Inverse stereographic projection. The common normalization factor
+    // can be omitted because the source lens uses the ray's angle.
+    float3 ray = float3(plane, 1.0 - 0.25 * dot(plane, plane));
+    const float y = View.y * ray.y + View.z * ray.z;
+    const float z = View.y * ray.z - View.z * ray.y;
+    const float2 radial = float2(ray.x, y);
+    const float radius = length(radial);
+    // Extreme pitch can include the rear optical axis. Its lens azimuth is undefined.
+    if (z < 0.0 && radius < 1e-7) return float4(0, 0, 0, 1);
+    const float angle = atan2(radius, z);
+    const float2 eyeUV = Lens.zw + radial * (View.x * angle / max(radius, 1e-7));
+    if (any(eyeUV < 0.0) || any(eyeUV > 1.0)) return float4(0, 0, 0, 1);
+
+    // Keep bilinear filtering inside the selected eye even at the SBS seam.
+    const float2 uv = clamp(Eye.xy + Eye.zw * eyeUV, Eye.xy + Lens.xy,
+        Eye.xy + Eye.zw - Lens.xy);
+    return Video.SampleLevel(Linear, uv, 0);
+}
+)";
+		CComPtr<ID3DBlob> bytecode;
+		HRESULT hr = CompileShader(shader, nullptr, "ps_4_0", &bytecode);
+		if (SUCCEEDED(hr)) {
+			hr = m_pDevice->CreatePixelShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &m_jvrShader);
+		}
+		if (SUCCEEDED(hr)) {
+			const D3D11_BUFFER_DESC desc{sizeof(Constants), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
+			hr = m_pDevice->CreateBuffer(&desc, nullptr, &m_jvrConstants);
+		}
+		if (FAILED(hr)) {
+			m_jvrShader.Release();
+			m_jvrShaderFailed = true;
+			DLog(L"JVR flat view: shader initialization failed ({})", HR2Str(hr));
+			return hr;
+		}
+		m_jvrUploadedConstants = {};
+	}
+
+	constexpr jvr::Profile lens{};
+	const auto& eye = lens.eyes[m_jvrEye];
+	const float invW = 1.0f / source.desc.Width;
+	const float invH = 1.0f / source.desc.Height;
+	const float eyeWidth = 0.5f * sourceRect.Width();
+	const Constants constants{
+		picture.left + picture.Width() * 0.5f, picture.top + picture.Height() * 0.5f,
+		float(2 * jvr::PlaneHalfWidth / picture.Width()), float(2 * jvr::PlaneHalfHeight / picture.Height()),
+		(sourceRect.left + m_jvrEye * eyeWidth) * invW, sourceRect.top * invH, eyeWidth * invW, sourceRect.Height() * invH,
+		0.5f * invW, 0.5f * invH, eye.x, eye.y,
+		eye.focal, m_jvrView.cosPitch, m_jvrView.sinPitch, m_jvrView.verticalShift
+	};
+	if (constants != m_jvrUploadedConstants) {
+		m_pDeviceContext->UpdateSubresource(m_jvrConstants, 0, nullptr, constants.data(), 0, 0);
+		m_jvrUploadedConstants = constants;
+	}
+	return TextureCopyRect(source, target, sourceRect, picture, m_jvrShader, m_jvrConstants, 0, false, true);
+}
+
+HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, const bool second, const bool allowDlssSR, const REFERENCE_TIME timestamp, CTex2DRing* processingPostScale, bool* overlayInputHandled, const Tex2D_t* preparedSource)
 {
 	if (overlayInputHandled) *overlayInputHandled = false;
 	HRESULT hr = S_OK;
@@ -4601,17 +4811,17 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 	int rotation = m_iRotation;
 
 	CRect rSrc = srcRect;
-	Tex2D_t* pInputTexture = nullptr;
+	const Tex2D_t* pInputTexture = nullptr;
 
 	const UINT numSteps = GetPostScaleSteps();
 	auto& postScale = processingPostScale ? *processingPostScale : m_TexsPostScale;
 
 	const bool srWasActive = m_dlssSR.Active();
-	auto* srOutput = allowDlssSR ? TryDlssSR(srcRect, dstRect, second, timestamp, overlayInputHandled) : nullptr;
+	auto* srOutput = allowDlssSR ? TryDlssSR(srcRect, dstRect, second, timestamp, overlayInputHandled, preparedSource) : nullptr;
 	if (allowDlssSR && !srOutput && srWasActive) {
 		m_dlssSR.ResetHistory();
 	}
-	if (allowDlssSR && srWasActive != bool(srOutput) && m_mfgMultiplier) {
+	if (allowDlssSR && srWasActive != bool(srOutput) && m_mfgMultiplier && !MfgSourceMeetsDisplayRate()) {
 		if (m_pFilter->m_Sets.bWaitForExtendedStartup) {
 			StopMfg(false);
 		} else {
@@ -4625,6 +4835,10 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 	if (srOutput) {
 		pInputTexture = srOutput;
 		rSrc.SetRect(0, 0, srOutput->desc.Width, srOutput->desc.Height);
+	}
+	else if (preparedSource) {
+		pInputTexture = preparedSource;
+		m_bVPScalingUseShaders = m_D3D11VP.IsReady();
 	}
 	else if (m_D3D11VP.IsReady()) {
 		if (!(m_iSwapEffect == SWAPEFFECT_Discard && (m_VendorId == PCIV_AMDATI || m_VendorId == PCIV_INTEL))) {
@@ -4659,7 +4873,7 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 
 	if (numSteps) {
 		UINT step = 0;
-		Tex2D_t* pTex = postScale.GetFirstTex();
+		const Tex2D_t* pTex = postScale.GetFirstTex();
 		ID3D11Texture2D* pRT = pTex->pTexture;
 
 		auto StepSetting = [&]() {
@@ -4677,11 +4891,12 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 		rect.IntersectRect(dstRect, CRect(0, 0, pTex->desc.Width, pTex->desc.Height));
 
 		if (m_D3D11VP.IsReady()) {
-			m_bVPScalingUseShaders = rSrc.Width() != dstRect.Width() || rSrc.Height() != dstRect.Height();
+			m_bVPScalingUseShaders = preparedSource || rSrc.Width() != dstRect.Width() || rSrc.Height() != dstRect.Height();
 		}
 
-		if (srOutput || rSrc != dstRect || rotation != 0) {
+		if (preparedSource || srOutput || rSrc != dstRect || rotation != 0) {
 			hr = ResizeShaderPass(*pInputTexture, pRT, rSrc, dstRect, rotation);
+			if (preparedSource && FAILED(hr)) return hr;
 		} else {
 			pTex = pInputTexture; // Hmm
 		}
@@ -4778,6 +4993,7 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 
 void CDX11VideoProcessor::SetVideoRect(const CRect& videoRect)
 {
+	if (m_videoRect != videoRect) m_completedGeometryTick = GetTickCount64();
 	m_videoRect = videoRect;
 	UpdateRenderRect();
 	// Compute the display-sized offscreen target before allocating the VP
@@ -4789,13 +5005,13 @@ void CDX11VideoProcessor::SetVideoRect(const CRect& videoRect)
 // Work on a video-sized texture independently from the swap chain.
 CRect CDX11VideoProcessor::ProcessingRect() const
 {
-	return m_processingSize.cx > 0 ? CRect(CPoint(0, 0), m_processingSize) : m_videoRect;
+	return m_processingSize.cx > 0 ? CRect(CPoint(0, 0), m_processingSize) : PictureForPlayback(CanProjectJvr());
 }
 
 void CDX11VideoProcessor::UpdateProcessingResolution()
 {
 	const auto previous = m_processingSize;
-	if ((!m_mfgMultiplier && m_iVPSuperRes == SUPERRES_Disable) || m_pPSHalfOUtoInterlace) {
+	if ((m_iVPSuperRes == SUPERRES_Disable && (!m_mfgMultiplier || MfgSourceMeetsDisplayRate())) || m_pPSHalfOUtoInterlace) {
 		m_processingSize = CSize(0, 0);
 		if (previous.cx > 0) {
 			m_processingTexture.Release();
@@ -4809,7 +5025,8 @@ void CDX11VideoProcessor::UpdateProcessingResolution()
 	}
 
 	const auto& display = m_pFilter->m_DisplayConfig;
-	const double ratio = m_srcAspectRatioX && m_srcAspectRatioY
+	const bool projected = CanProjectJvr();
+	const double ratio = projected ? double(jvr::AspectWidth) / jvr::AspectHeight : m_srcAspectRatioX && m_srcAspectRatioY
 		? double(m_srcAspectRatioX) / m_srcAspectRatioY : double(m_srcRectWidth) / m_srcRectHeight;
 	const bool rotated = m_iRotation % 180 != 0;
 	const double aspect = rotated ? 1.0 / ratio : ratio;
@@ -4820,7 +5037,7 @@ void CDX11VideoProcessor::UpdateProcessingResolution()
 			std::max(1L, LONG(std::lround(width / aspect))));
 	} else {
 		// Keep a window-independent canvas even without display mode information.
-		const LONG height = rotated ? m_srcRectWidth : m_srcRectHeight;
+		const LONG height = projected ? ProcessingSourceRect(true).Height() : rotated ? m_srcRectWidth : m_srcRectHeight;
 		m_processingSize = CSize(std::max(1L, LONG(std::lround(height * aspect))), height);
 	}
 	if (previous.cx > 0 && previous != m_processingSize && m_mfgMultiplier) {
@@ -4838,6 +5055,7 @@ void CDX11VideoProcessor::UpdateProcessingResolution()
 
 HRESULT CDX11VideoProcessor::SetWindowRect(const CRect& windowRect)
 {
+    if (m_windowRect != windowRect || m_resizePending) m_completedGeometryTick = GetTickCount64();
     const bool sizeChanged = windowRect.Width() != m_windowRect.Width() ||
                              windowRect.Height() != m_windowRect.Height();
     if (!sizeChanged) {
@@ -4910,6 +5128,7 @@ HRESULT CDX11VideoProcessor::ApplyPendingWindowResize(bool settle)
 
     const CRect previous = m_windowRect;
     const CRect finalRect = m_resizeTarget;
+    m_completedGeometryTick = GetTickCount64();
     m_resizePending = false;
     m_windowRect = finalRect;
     if (m_pDXGISwapChain1 && !m_bExclusiveScreen &&
@@ -4982,9 +5201,12 @@ HRESULT CDX11VideoProcessor::Reset(bool bDisplayModeChange)
 
 HRESULT CDX11VideoProcessor::GetCurentImage(long *pDIBImage)
 {
+	const bool projectJvr = CanProjectJvr();
 	UINT w = m_srcRectWidth;
 	UINT h = m_srcRectHeight;
-	if (m_srcAnamorphic) {
+	if (projectJvr) {
+		w = jvr::FrameWidth(h);
+	} else if (m_srcAnamorphic) {
 		w = MulDiv(h, m_srcAspectRatioX, m_srcAspectRatioY);
 	}
 	if (m_iRotation == 90 || m_iRotation == 270) {
@@ -5044,10 +5266,14 @@ HRESULT CDX11VideoProcessor::GetCurentImage(long *pDIBImage)
 	auto pSub11CallBack = m_pFilter->m_pSub11CallBack;
 	m_pFilter->m_pSub11CallBack = nullptr;
 
-	if (m_completedLast) {
+	if (m_completedLast && (!projectJvr || m_completedLast->pts != m_rtStart)) {
 		hr = DrawCompletedVideo(*m_completedLast, pRGB32Texture2D, imageRect);
 	} else {
-		hr = Process(pRGB32Texture2D, m_srcRect, imageRect, false, false);
+		const auto sourceRect = ProcessingSourceRect(projectJvr);
+		hr = projectJvr ? PrepareJvrFrame(sourceRect, false) : S_OK;
+		if (SUCCEEDED(hr))
+			hr = Process(pRGB32Texture2D, sourceRect, imageRect, false, false,
+				INVALID_TIME, nullptr, nullptr, projectJvr ? &m_jvrFrame : nullptr);
 	}
 
 	m_pFilter->m_pSub11CallBack = pSub11CallBack;
@@ -5331,7 +5557,10 @@ HRESULT CDX11VideoProcessor::GetVPInfo(std::wstring& str)
 
 void CDX11VideoProcessor::Configure(const Settings_t& requested)
 {
-	Settings_t config=requested;mfg::EnforceScope(config);
+	Settings_t config = requested;
+	mfg::EnforceScope(config);
+	const bool jvrFlatView = m_pFilter->JvrProjectionRequested(config);
+	ApplyJvrPlaybackMode(config, jvrFlatView);
 	const int superRes = config.bDlssSR ? SUPERRES_DLSS_SR : config.iVPSuperRes;
 	const unsigned mfgMultiplier = config.bUseD3D11 ? config.iMfgMultiplier : 0;
 	const bool srWasEnabled = m_iVPSuperRes == SUPERRES_DLSS_SR;
@@ -5343,8 +5572,9 @@ void CDX11VideoProcessor::Configure(const Settings_t& requested)
 	const bool overlayChanged = (wasUsingZipDepth && m_showDepthOverlay) !=
 		(useZipDepth && config.bShowDepthOverlay);
 	const unsigned processingMode = config.iMfgProcessingMode <= 1 ? config.iMfgProcessingMode : 0;
+	const bool jvrModeChanged = jvrFlatView != m_jvrFlatView;
 	if (processingMode != m_mfgProcessingMode ||
-		(m_mfgMultiplier && (srChanged || overlayChanged) && m_pFilter->GetActive())) {
+		(m_mfgMultiplier && (srChanged || overlayChanged || jvrModeChanged) && m_pFilter->GetActive())) {
 		SwitchMfgUpscaleSlot(processingMode);
 	} else if (overlayChanged) {
 		m_dlssSR.ResetHistory();
@@ -5354,6 +5584,16 @@ void CDX11VideoProcessor::Configure(const Settings_t& requested)
 		 m_mfgMultiplier.load(std::memory_order_relaxed) != mfgMultiplier ||
 		 m_iVPSuperRes != superRes || srChanged)) {
 		ResetFeatureStatus();
+	}
+	m_jvrFlatView = jvrFlatView;
+	ConfigureJvrProjection(config);
+	if (jvrModeChanged) {
+		m_zipDepth.StopLookahead();
+		m_zipDepth.ResetHistory();
+		if (!jvrFlatView) {
+			m_jvrSource.Release();
+			m_jvrFrame.Release();
+		}
 	}
 	m_rtVideoDelay=config.iVideoDelay*10000LL;
 	// MFG cannot remain active on an existing D3D11 instance after the
@@ -5383,6 +5623,8 @@ void CDX11VideoProcessor::Configure(const Settings_t& requested)
 		m_mfgMultiplier = mfgMultiplier;
 		m_mfgAutoEpoch = m_mfgAutoLastPts = -1;
 	}
+	SetSvdLutStrength(config.GetSvdLutStrength());
+	if (jvrModeChanged) ResetSvdLutHistory();
 	if (m_useZipDepthSr != config.bUseZipDepthSr) m_dlssSR.ResetHistory();
 	if (m_useZipDepthMfg != config.bUseZipDepthMfg || m_adaptiveMfgDepth != config.bAdaptiveMfgDepth)
 		m_mfg.ResetDepthHistory();
@@ -5558,7 +5800,11 @@ void CDX11VideoProcessor::Configure(const Settings_t& requested)
 	m_dlssSRDlaa = config.bDlssSRDlaa;
 	if (superRes != m_iVPSuperRes) {
 		m_iVPSuperRes = superRes;
-		if(m_VendorId==PCIV_NVIDIA)changeVP=true;
+		// A live JVR toggle can keep the decoded frame when the existing
+		// VP output is suitable for the selected mode.
+		const bool need8BitVp = superRes != SUPERRES_Disable && m_srcParams.CDepth == 8 &&
+			!SourceIsHDR() && m_D3D11OutputFmt != DXGI_FORMAT_B8G8R8A8_UNORM;
+		if (m_VendorId == PCIV_NVIDIA && (!jvrModeChanged || need8BitVp)) changeVP = true;
 		changeSuperRes = true;
 	}
 
@@ -5700,6 +5946,7 @@ void CDX11VideoProcessor::Flush()
 		m_extendedStartupPending = false;
 	}
 	ClearCompletedFrames(false);
+	ResetSvdLutHistory();
 	m_zipDepth.StopLookahead();
 	m_zipDepth.ResetHistory();
 	m_dlssSR.ResetHistory();
@@ -6052,7 +6299,7 @@ LONG CDX11VideoProcessor::DrawFeatureStatus(ID3D11Texture2D* target)
 		// generated frames are presented. Preroll may already have warmed it up.
 		mfgActive = (m_featureStatusMfgActive || (paused && m_mfg.InputSize().cx > 0)) &&
 			m_mfgMultiplier.load(std::memory_order_relaxed) >= 2 &&
-			!m_mfgPresentFailed.load(std::memory_order_relaxed) && !m_mfg.Failed();
+			!m_mfgPresentFailed.load(std::memory_order_relaxed) && !m_mfg.Failed() && !MfgSourceMeetsDisplayRate();
 		if (paused) m_featureStatusMfgActive = mfgActive;
 		if (m_featureStatusUntil && now >= m_featureStatusUntil) return 0;
 	}
@@ -6136,14 +6383,19 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 	}
 	str.append(m_strStatsVProc);
 
-	const UINT dstW = m_videoRect.Width();
-	const UINT dstH = m_videoRect.Height();
-	if (m_iRotation) {
+	const bool projected = CanProjectJvr();
+	const auto picture = PictureForPlayback(projected);
+	const auto source = ProcessingSourceRect(projected);
+	const UINT dstW = picture.Width();
+	const UINT dstH = picture.Height();
+	if (projected) {
+		str += std::format(L"\nScaling       : {}x{} -> {}x{} (JVR 16:9)", source.Width(), source.Height(), dstW, dstH);
+	} else if (m_iRotation) {
 		str += std::format(L"\nScaling       : {}x{} r{}\u00B0> {}x{}", m_srcRectWidth, m_srcRectHeight, m_iRotation, dstW, dstH);
 	} else {
 		str += std::format(L"\nScaling       : {}x{} -> {}x{}", m_srcRectWidth, m_srcRectHeight, dstW, dstH);
 	}
-	if (m_srcRectWidth != dstW || m_srcRectHeight != dstH) {
+	if (UINT(source.Width()) != dstW || UINT(source.Height()) != dstH) {
 		if (m_D3D11VP.IsReady() && m_bVPScaling && !m_bVPScalingUseShaders) {
 			str.append(L" D3D11");
 			if (m_bVPUseSuperRes && m_srcRectWidth < dstW && m_srcRectHeight < dstH) {
@@ -6219,7 +6471,9 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 
 	std::wstring mfgStats;
 	if (m_mfgMultiplier) {
-		if (m_mfgPresentFailed) {
+		if (MfgSourceMeetsDisplayRate()) {
+			mfgStats = L"\nMFG      : Bypassed (source meets display refresh)";
+		} else if (m_mfgPresentFailed) {
 			mfgStats = L"\nMFG      : Presenter failed";
 		} else if (m_mfg.Failed()) {
 			mfgStats = L"\nMFG      : Unavailable";
@@ -6380,7 +6634,8 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 		bufferStats = std::format(L"\nVideo buffer : {} ms ready / {} ms queued", time.ready / 10000, time.queued / 10000);
 		if (time.nonIncreasing) bufferStats += std::format(L" | {} due out of order", time.nonIncreasing);
 	}
-	const bool hasEditionStats = !srStats.empty() || !mfgStats.empty() || !depthStats.empty() || !bufferStats.empty();
+	const bool hasEditionStats = m_svdLut.strength || !srStats.empty() || !mfgStats.empty() ||
+		!depthStats.empty() || !bufferStats.empty();
 	const auto separator = str.size() + 1;
 	if (hasEditionStats) {
 		str += L'\n'; // Reserve a row before the layout computes the text width.
@@ -6390,6 +6645,7 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 			str.append(srStats).append(mfgStats);
 		}
 		str.append(depthStats);
+		if (m_svdLut.strength) str += std::format(L"\nSVDLUT   : {} ({}%)", SvdLutStatus(), m_svdLut.strength);
 		str.append(bufferStats);
 	}
 	if (UpdateStatsLayout(str)) {

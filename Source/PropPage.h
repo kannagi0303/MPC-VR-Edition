@@ -32,6 +32,13 @@ class __declspec(uuid("DA46D181-07D6-441D-B314-019AEB10148A"))
 	Settings_t m_SetsPP;
 
 	int m_oldSDRDisplayNits = SDR_NITS_DEF;
+	int m_oldSvdLutStrength = 0;
+	bool m_svdLutPreviewed = false;
+	bool m_oldJvrFlatView = false;
+	int m_oldJvrVertical = JVR_VERTICAL_DEFAULT;
+	int m_oldJvrReprojection = JVR_REPROJECTION_DEFAULT;
+	int m_oldJvrEye = 0;
+	bool m_showJvrOptions = false;
 
 	bool m_bActivated = false;
 	HWND m_hHint = nullptr;
@@ -43,6 +50,10 @@ public:
 private:
 	void SetControls();
 	void EnableControls();
+	void UpdateJvrViewLabels();
+	void ApplyJvrPreview();
+	void UpdateSvdLutLabel();
+	void PreviewSvdLutStrength(int strength);
 
 	HRESULT OnConnect(IUnknown* pUnknown) override;
 	HRESULT OnDisconnect() override;

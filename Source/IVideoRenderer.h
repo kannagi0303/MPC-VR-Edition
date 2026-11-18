@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <dxva2api.h>
 
 enum :int {
@@ -253,6 +254,14 @@ constexpr inline auto VIDEO_DELAY_MIN  = -200;
 constexpr inline auto VIDEO_DELAY_MAX  = 500;
 constexpr inline auto VIDEO_DELAY_STEP = 5;
 
+inline constexpr int JVR_VERTICAL_MIN = -60;
+inline constexpr int JVR_VERTICAL_MAX = 60;
+inline constexpr int JVR_VERTICAL_DEFAULT = 0;
+inline constexpr int JVR_REPROJECTION_MIN = 0;
+inline constexpr int JVR_REPROJECTION_MAX = 200;
+inline constexpr int JVR_REPROJECTION_DEFAULT = 50;
+inline constexpr int SVDLUT_STRENGTH_MAX = 100;
+
 struct Settings_t {
 	bool bUseD3D11;
 	bool bShowStats;
@@ -391,14 +400,14 @@ struct Settings_t {
 	// Hybrid MFG processing order, independent of the final D3D11 Present.
 	unsigned iMfgProcessingMode = 0; // 0 Quality: VSR -> MFG; 1 Performance: MFG -> VSR
 	bool bShowFeatureBadges = true; // show DLSS SR, VSR and MFG status on the video
-	BYTE reservedProcessingResolution = {}; // Legacy Settings_t slot.
+	BYTE svdLutStrength = 0; // Reuses the retired processing-resolution slot.
 	bool reservedDlssSRValidateMotion = {}; // Legacy Settings_t slot.
     int iDlssSRSourceLimit = DLSSSR_SOURCE_Disable; // Appended: preserve the existing settings layout.
 	// Reserved legacy A/B slot, kept for Settings_t layout/preset compatibility.
 	// No GUI or runtime toggle; normalization always forces true.
 	bool bDlssSRTemporalHistory = true;
 	int reservedDlssSRMotionQuality = {}; // Legacy Settings_t slot.
-	bool reservedDlssSRDepthCues = {}; // Legacy Settings_t slot.
+	bool bSvdLut = false; // Legacy enable flag, also read by older callers.
 	int reservedDlssSRDepthMode = {}; // Legacy Settings_t slot.
 	bool bWaitForExtendedStartup = false; // Reuses the retired pulldown slot.
 	bool bMfgLowMotion = false;
@@ -409,9 +418,25 @@ struct Settings_t {
 	bool bAdaptiveMfgDepth = false;
 	bool bShowMfgMotion = false;
 	bool bDepth3DPreview = false; // Experimental ZipDepth-driven oblique parallax preview.
+	bool bJvrFlatView = false;
+	int iJvrVertical = JVR_VERTICAL_DEFAULT;
+	int iJvrReprojection = JVR_REPROJECTION_DEFAULT;
+	int iJvrProfile = 0; // Reserved, keeps the Settings_t interface layout stable.
+	int iJvrEye = 0;
 
 	Settings_t() {
 		SetDefault();
+	}
+
+	int GetSvdLutStrength() const {
+		if (!bSvdLut) return 0;
+		return svdLutStrength > 0 && svdLutStrength <= SVDLUT_STRENGTH_MAX
+			? svdLutStrength : SVDLUT_STRENGTH_MAX;
+	}
+
+	void SetSvdLutStrength(int strength) {
+		svdLutStrength = static_cast<BYTE>(std::clamp(strength, 0, SVDLUT_STRENGTH_MAX));
+		bSvdLut = svdLutStrength != 0;
 	}
 
 	void SetDefault() {
@@ -421,6 +446,7 @@ struct Settings_t {
 		bShowFeatureBadges = true;
         iDlssSRSourceLimit = DLSSSR_SOURCE_Disable;
 		bDlssSRTemporalHistory = true;
+		SetSvdLutStrength(0);
 		bMfgLowMotion = false;
 		bUseZipDepthSr = true;
 		bUseZipDepthMfg = true;
@@ -428,6 +454,11 @@ struct Settings_t {
 		bShowMfgMotion = false;
 		bShowDepthOverlay = false;
 		bDepth3DPreview = false;
+		bJvrFlatView = false;
+		iJvrVertical = JVR_VERTICAL_DEFAULT;
+		iJvrReprojection = JVR_REPROJECTION_DEFAULT;
+		iJvrProfile = 0;
+		iJvrEye = 0;
 		if (IsWindows8OrGreater()) {
 			bUseD3D11                   = true;
 		} else {
@@ -555,6 +586,11 @@ inline void CopyDlssSettings(Settings_t& dst, const Settings_t& src)
 // recalling one turned the scheduled presentation off for every SDR picture.
 inline void KeepOutOfPreset(Settings_t& sets, const Settings_t& current)
 {
+	sets.bJvrFlatView          = current.bJvrFlatView;
+	sets.iJvrVertical         = current.iJvrVertical;
+	sets.iJvrReprojection     = current.iJvrReprojection;
+	sets.iJvrProfile          = current.iJvrProfile;
+	sets.iJvrEye              = current.iJvrEye;
 	sets.iDlssNRToggleKey     = current.iDlssNRToggleKey;
 	sets.iSdrPeakWindowMs     = current.iSdrPeakWindowMs;
 	sets.iSdrPeakFloorNits    = current.iSdrPeakFloorNits;

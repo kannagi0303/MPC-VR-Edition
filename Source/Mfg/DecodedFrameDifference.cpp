@@ -12,11 +12,21 @@
 namespace mfg {
 namespace {
 
+bool IsRgb(DXGI_FORMAT format)
+{
+    return format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM;
+}
+
 constexpr char CompareShader[] = R"(
+#ifdef RGB_INPUT
+Texture2D<float4> previousRGB : register(t0);
+Texture2D<float4> currentRGB : register(t2);
+#else
 Texture2D<float> previousY : register(t0);
 Texture2D<float2> previousUV : register(t1);
 Texture2D<float> currentY : register(t2);
 Texture2D<float2> currentUV : register(t3);
+#endif
 RWStructuredBuffer<uint2> tilesWrite : register(u0);
 RWStructuredBuffer<uint> result : register(u1);
 StructuredBuffer<uint2> tilesRead : register(t4);
@@ -34,14 +44,20 @@ void Compare(uint3 group : SV_GroupID, uint index : SV_GroupIndex)
     uint4 metrics = 0;
     if (all(local < extent)) {
         uint2 p = local + origin;
+#ifndef RGB_INPUT
         uint2 chroma = p / 2;
         float2 uv = abs(currentUV.Load(int3(chroma, 0)) - previousUV.Load(int3(chroma, 0)));
         float uvDelta = max(uv.x, uv.y);
+#endif
         [unroll] for (uint y = 0; y < 2; ++y) {
             [unroll] for (uint x = 0; x < 2; ++x) {
                 uint2 offset = uint2(x, y);
                 if (all(local + offset < extent)) {
                     uint2 pixel = p + offset;
+#ifdef RGB_INPUT
+                    float3 diff = abs(currentRGB.Load(int3(pixel, 0)).rgb - previousRGB.Load(int3(pixel, 0)).rgb);
+                    uint delta = (uint)round(255.0 * max(max(diff.r, diff.g), diff.b));
+#else
                     // For an odd crop origin some pixels straddle a chroma block.
                     uint2 pixelChroma = pixel / 2;
                     float color = uvDelta;
@@ -52,6 +68,7 @@ void Compare(uint3 group : SV_GroupID, uint index : SV_GroupIndex)
                     }
                     float luma = abs(currentY.Load(int3(pixel, 0)) - previousY.Load(int3(pixel, 0)));
                     uint delta = (uint)round(255.0 * max(luma, color));
+#endif
                     metrics += uint4(delta, delta > 8, delta > 16, delta > 32);
                 }
             }
@@ -274,9 +291,11 @@ bool DecodedFrameDifference::Initialize(ID3D11Device1* device, const D3D11_TEXTU
             __uuidof(ID3D11Device1), &chosen, &state_))) {
         return false;
     }
+    const bool rgb = IsRgb(source.Format);
+    const D3D_SHADER_MACRO macros[] = {{"RGB_INPUT", "1"}, {nullptr, nullptr}};
     const auto compile = [&](const char* entry, ID3D11ComputeShader** shader) {
         ComPtr<ID3DBlob> code;
-        return SUCCEEDED(D3DCompile(CompareShader, sizeof(CompareShader) - 1, nullptr, nullptr, nullptr,
+        return SUCCEEDED(D3DCompile(CompareShader, sizeof(CompareShader) - 1, nullptr, rgb ? macros : nullptr, nullptr,
             entry, "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, nullptr)) &&
             SUCCEEDED(device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, shader));
     };
@@ -296,10 +315,12 @@ bool DecodedFrameDifference::Initialize(ID3D11Device1* device, const D3D11_TEXTU
     view.Texture2D.MipLevels = 1;
     for (auto* slot : {&previous_, &current_}) {
         if (FAILED(device->CreateTexture2D(&picture, nullptr, &slot->texture))) return false;
-        view.Format = format_ == DXGI_FORMAT_NV12 ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R16_UNORM;
+        view.Format = rgb ? source.Format : format_ == DXGI_FORMAT_NV12 ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R16_UNORM;
         if (FAILED(device->CreateShaderResourceView(slot->texture.Get(), &view, &slot->luma))) return false;
-        view.Format = format_ == DXGI_FORMAT_NV12 ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R16G16_UNORM;
-        if (FAILED(device->CreateShaderResourceView(slot->texture.Get(), &view, &slot->chroma))) return false;
+        if (!rgb) {
+            view.Format = format_ == DXGI_FORMAT_NV12 ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R16G16_UNORM;
+            if (FAILED(device->CreateShaderResourceView(slot->texture.Get(), &view, &slot->chroma))) return false;
+        }
     }
 
     D3D11_BUFFER_DESC buffer{};
@@ -350,7 +371,7 @@ void DecodedFrameDifference::Submit(ID3D11Device1* device, ID3D11DeviceContext1*
     }
     D3D11_TEXTURE2D_DESC desc{};
     source->GetDesc(&desc);
-    if ((desc.Format != DXGI_FORMAT_NV12 && desc.Format != DXGI_FORMAT_P010) ||
+    if ((!IsRgb(desc.Format) && desc.Format != DXGI_FORMAT_NV12 && desc.Format != DXGI_FORMAT_P010) ||
         desc.SampleDesc.Count != 1 || slice >= desc.ArraySize || desc.MipLevels != 1 ||
         visible.left < 0 || visible.top < 0 || visible.right <= visible.left ||
         visible.bottom <= visible.top || UINT(visible.right) > desc.Width || UINT(visible.bottom) > desc.Height) {
@@ -409,7 +430,7 @@ void DecodedFrameDifference::Submit(ID3D11Device1* device, ID3D11DeviceContext1*
         if (fence_ && FAILED(fenceContext_->Signal(fence_.Get(), ++fenceValue_))) fence_.Reset();
         context->SwapDeviceContextState(saved.Get(), nullptr);
         pending_ = true;
-        // Submit before the video processing pass so readback has a head start.
+        // Let the readback overlap the rest of frame processing.
         context->Flush();
     }
     previousPts_ = pts;

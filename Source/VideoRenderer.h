@@ -188,6 +188,8 @@ private:
 	// The film the source reads, for the logo library: read when the input pin connects,
 	// and never asked of the graph again (CompleteConnect).
 	std::wstring m_strFilm;
+	std::optional<jvr::MediaProfile> m_jvrMediaProfile;
+	bool JvrProjectionRequested(const Settings_t& settings) const;
 	std::unique_ptr<class DecodedFrameLookahead> m_depthLookahead;
 	bool m_localFile = false;
 	std::unique_ptr<mfg::AvcPresentationClock> m_avcSourceClock;
@@ -248,6 +250,7 @@ public:
 	HRESULT CheckMediaType(const CMediaType *pmt) override;
 	HRESULT SetMediaType(const CMediaType *pmt) override;
 	HRESULT CompleteConnect(IPin* pReceivePin) override;
+	HRESULT BreakConnect() override;
 	HRESULT DoRenderSample(IMediaSample* pSample) override;
 	HRESULT Receive(IMediaSample* pMediaSample) override;
 	HRESULT WaitForRenderTime() override;

@@ -19,6 +19,7 @@
  */
 
 #include "stdafx.h"
+#include <algorithm>
 #include "DLSS/DecodedFrameLookahead.h"
 #include "DLSS/ZipDepthLookahead.h"
 #include <atomic>
@@ -26,6 +27,7 @@
 #include <evr.h> // for MR_VIDEO_ACCELERATION_SERVICE, because the <mfapi.h> does not contain it
 #include <Mferror.h>
 #include "Helper.h"
+#include "JvrProjection.h"
 #include "PropPage.h"
 #include "SettingsPage/SettingsPage.h"
 #include "Mfg/SettingsScope.h"
@@ -400,6 +402,25 @@ static void ReadSettings(CRegKey& key, Settings_t& sets)
 			}
 		}
 	}
+	if (key.QueryDWORDValue(L"SvdLutStrength", dw) == ERROR_SUCCESS && dw <= SVDLUT_STRENGTH_MAX) {
+		sets.SetSvdLutStrength(static_cast<int>(dw));
+	} else if (key.QueryDWORDValue(L"SvdLut", dw) == ERROR_SUCCESS) {
+		sets.SetSvdLutStrength(dw ? SVDLUT_STRENGTH_MAX : 0);
+	}
+	if (key.QueryDWORDValue(L"JvrFlatView", dw) == ERROR_SUCCESS) sets.bJvrFlatView = dw != 0;
+	if (key.QueryDWORDValue(L"JvrVerticalFraming", dw) == ERROR_SUCCESS &&
+		dw <= JVR_VERTICAL_MAX - JVR_VERTICAL_MIN) {
+		sets.iJvrVertical = static_cast<int>(dw) + JVR_VERTICAL_MIN;
+	} else if (key.QueryDWORDValue(L"JvrVerticalPosition", dw) == ERROR_SUCCESS && dw <= 60) {
+		// The first JVR build encoded [-30, 30] with a bias of 30.
+		sets.iJvrVertical = static_cast<int>(dw) - 30;
+	}
+	if (key.QueryDWORDValue(L"JvrReprojection", dw) == ERROR_SUCCESS && dw <= JVR_REPROJECTION_MAX) {
+		sets.iJvrReprojection = static_cast<int>(dw);
+	}
+	if (key.QueryDWORDValue(L"JvrEye", dw) == ERROR_SUCCESS && dw <= 1) {
+		sets.iJvrEye = static_cast<int>(dw);
+	}
 	// Retired experiments are intentionally fixed off; do not restore stale values.
 	sets.bMfgLowMotion = false;
 	sets.bAdaptiveMfgDepth = false;
@@ -442,6 +463,13 @@ static void WriteSettings(CRegKey& key, const Settings_t& sets)
 	key.SetDWORDValue(L"ShowMfgMotion", sets.bShowMfgMotion);
 	key.SetDWORDValue(L"ShowDepthOverlay", sets.bShowDepthOverlay);
 	key.SetDWORDValue(L"Depth3DPreview", 0);
+	const int svdLutStrength = sets.GetSvdLutStrength();
+	key.SetDWORDValue(L"SvdLutStrength", svdLutStrength);
+	key.SetDWORDValue(L"SvdLut", svdLutStrength != 0);
+	key.SetDWORDValue(L"JvrFlatView", sets.bJvrFlatView);
+	key.SetDWORDValue(L"JvrVerticalFraming", sets.iJvrVertical - JVR_VERTICAL_MIN);
+	key.SetDWORDValue(L"JvrReprojection", sets.iJvrReprojection);
+	key.SetDWORDValue(L"JvrEye", sets.iJvrEye);
 	key.SetDWORDValue(L"ShowFeatureBadges", sets.bShowFeatureBadges);
 	key.SetDWORDValue(OPT_UseD3D11,            sets.bUseD3D11);
 	key.SetDWORDValue(OPT_ShowStatistics,      sets.bShowStats);
@@ -1194,7 +1222,33 @@ HRESULT CMpcVideoRenderer::CompleteConnect(IPin* pReceivePin)
 			DLog(L"ZipDepth lookahead worker unavailable");
 		}
 	}
-	return __super::CompleteConnect(pReceivePin);
+	const HRESULT hr = __super::CompleteConnect(pReceivePin);
+	if (SUCCEEDED(hr)) {
+		auto profile = jvr::FindMediaProfile(g_hInst, m_strFilm);
+		CAutoLock render(&m_RendererLock);
+		m_jvrMediaProfile = std::move(profile);
+		if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get());
+			dx11 && dx11->m_jvrFlatView != JvrProjectionRequested(m_Sets)) {
+			dx11->Configure(m_Sets);
+		}
+	}
+	return hr;
+}
+
+HRESULT CMpcVideoRenderer::BreakConnect()
+{
+	const HRESULT hr = __super::BreakConnect();
+	if (SUCCEEDED(hr)) {
+		CAutoLock render(&m_RendererLock);
+		m_jvrMediaProfile.reset();
+	}
+	return hr;
+}
+
+bool CMpcVideoRenderer::JvrProjectionRequested(const Settings_t& settings) const
+{
+	return settings.bUseD3D11 && settings.bJvrFlatView && m_jvrMediaProfile &&
+		m_jvrMediaProfile->type == jvr::ProjectionType::JvrSbs;
 }
 
 HRESULT CMpcVideoRenderer::DoRenderSample(IMediaSample* pSample)
@@ -1439,13 +1493,16 @@ HRESULT CMpcVideoRenderer::Receive(IMediaSample* pSample)
 	if (!m_depthLookahead || !m_localFile || m_bFlushing) return ReceiveScheduled(pSample, 0);
 	const auto epoch = m_depthLookahead->Epoch();
 	CComPtr<IMediaSample> detached;
+	bool projected = false;
 	int64_t pts = -1;
 	uint64_t bytes = 0;
 	{
 		CAutoLock lock(&m_RendererLock);
 		if (m_filterState == State_Running && !m_bFlushing) {
-			if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get()))
-				detached = dx11->CloneLookaheadSample(pSample, pts, bytes);
+			if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) {
+				projected = dx11->CanProjectJvr();
+				if (!projected) detached = dx11->CloneLookaheadSample(pSample, pts, bytes);
+			}
 		}
 	}
 	if (detached) {
@@ -1463,7 +1520,7 @@ HRESULT CMpcVideoRenderer::Receive(IMediaSample* pSample)
 		if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get()))
 			dx11->StopZipDepthLookahead();
 	}
-	return ReceiveScheduled(pSample, 0);
+	return projected ? ReceiveWithSourceTime(pSample) : ReceiveScheduled(pSample, 0);
 }
 
 void CMpcVideoRenderer::ResetSourceTime()
@@ -1696,26 +1753,27 @@ HRESULT CMpcVideoRenderer::ReceiveScheduled(IMediaSample* pSample, uint64_t epoc
 	//  to complete
 	m_bInReceive = FALSE;
 
-	// We must hold both these locks
-	CAutoLock cVideoLock(&m_InterfaceLock);
+	for (;;) {
+		{
+			CAutoLock cVideoLock(&m_InterfaceLock);
+			CAutoLock cRendererLock(&m_RendererLock);
+			if (m_State == State_Stopped || m_pMediaSample != pSample) return NOERROR;
 
-	// since we gave away the filter wide lock, the sate of the filter could
-	// have chnaged to Stopped
-	if (m_State == State_Stopped)
-		return NOERROR;
-
-	CAutoLock cRendererLock(&m_RendererLock);
-
-	// Deal with this sample
-
-	if (m_State == State_Running && !LookaheadCancelled(epoch)) {
-		Render(m_pMediaSample);
+			const bool running = m_State == State_Running && !m_bFlushing && !LookaheadCancelled(epoch);
+			auto* dx11 = running && !m_bClockStalled && m_Sets.iMfgMultiplier
+				? dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get()) : nullptr;
+			const bool drainMfg = dx11 && dx11->MfgSourceMeetsDisplayRate() && dx11->LegacyFramesPending();
+			if (!drainMfg) {
+				if (running) Render(m_pMediaSample);
+				ClearPendingSample();
+				SendEndOfStream();
+				CancelNotification();
+				return NOERROR;
+			}
+		}
+		// Let the presenter finish the older originals on their own deadlines.
+		Sleep(2);
 	}
-
-	ClearPendingSample();
-	SendEndOfStream();
-	CancelNotification();
-	return NOERROR;
 }
 
 void CMpcVideoRenderer::UpdateDisplayInfo()
@@ -2115,6 +2173,11 @@ STDMETHODIMP CMpcVideoRenderer::GetCurrentImage(long *pBufferSize, long *pDIBIma
 		}
 	}
 
+	if (const auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get());
+		dx11 && dx11->CanProjectJvr()) {
+		framesize = CSize(jvr::FrameWidth(dx11->m_srcRectHeight), dx11->m_srcRectHeight);
+	}
+
 	const auto w = framesize.cx;
 	const auto h = framesize.cy;
 
@@ -2498,6 +2561,10 @@ STDMETHODIMP_(void) CMpcVideoRenderer::SetSettings(const Settings_t& setings)
 	CAutoLock cRendererLock(&m_RendererLock);
 
 	m_Sets = setings;
+	m_Sets.iJvrVertical = std::clamp(m_Sets.iJvrVertical, JVR_VERTICAL_MIN, JVR_VERTICAL_MAX);
+	m_Sets.iJvrReprojection = std::clamp(m_Sets.iJvrReprojection, JVR_REPROJECTION_MIN, JVR_REPROJECTION_MAX);
+	m_Sets.iJvrProfile = 0;
+	m_Sets.iJvrEye = m_Sets.iJvrEye == 1 ? 1 : 0;
 	m_Sets.bMfgLowMotion = false;
 	m_Sets.bAdaptiveMfgDepth = false;
 	m_Sets.bDepth3DPreview = false;
@@ -2508,7 +2575,8 @@ STDMETHODIMP_(void) CMpcVideoRenderer::SetSettings(const Settings_t& setings)
 		: discard<int>(m_Sets.iVPSuperRes, SUPERRES_Disable, SUPERRES_Disable, SUPERRES_DLSS_SR);
 	mfg::EnforceScope(m_Sets);
 	m_VideoProcessor->Configure(m_Sets);
-	if (!m_Sets.bShowFeatureBadges && m_bStartupOverlayPending.exchange(false, std::memory_order_acq_rel)) {
+	if (!m_Sets.bShowFeatureBadges &&
+		m_bStartupOverlayPending.exchange(false, std::memory_order_acq_rel)) {
 		if (m_hWndWindow) PostMessageW(m_hWndWindow, WM_VR_STARTUP_OVERLAY, FALSE, 0);
 	}
 
@@ -2553,6 +2621,10 @@ STDMETHODIMP CMpcVideoRenderer::SaveSettings()
 	if (key.QueryDWORDValue(L"WaitForExtendedStartup", savedStartup) != ERROR_SUCCESS) return E_FAIL;
 	DWORD savedZipDepthMode = 0;
 	if (key.QueryDWORDValue(L"ZipDepthMode", savedZipDepthMode) != ERROR_SUCCESS) return E_FAIL;
+	DWORD savedSvdLut = 0;
+	DWORD savedSvdLutStrength = 0;
+	if (key.QueryDWORDValue(L"SvdLut", savedSvdLut) != ERROR_SUCCESS ||
+		key.QueryDWORDValue(L"SvdLutStrength", savedSvdLutStrength) != ERROR_SUCCESS) return E_FAIL;
 	DWORD savedDepthOverlay = 0;
 	if (key.QueryDWORDValue(L"ShowDepthOverlay", savedDepthOverlay) != ERROR_SUCCESS) return E_FAIL;
 	DWORD savedLowMotion = 1, savedAdaptive = 1, savedDepth3D = 1;
@@ -2563,6 +2635,8 @@ STDMETHODIMP CMpcVideoRenderer::SaveSettings()
 		savedStartup == static_cast<DWORD>(snapshot.bWaitForExtendedStartup) &&
 		savedZipDepthMode == static_cast<DWORD>(ZipDepthModeFromSettings(snapshot)) &&
 		savedDepthOverlay == static_cast<DWORD>(snapshot.bShowDepthOverlay) &&
+		savedSvdLutStrength == static_cast<DWORD>(snapshot.GetSvdLutStrength()) &&
+		savedSvdLut == static_cast<DWORD>(snapshot.GetSvdLutStrength() != 0) &&
 		savedLowMotion == 0 && savedAdaptive == 0 && savedDepth3D == 0 ? S_OK : E_FAIL;
 }
 
@@ -2687,10 +2761,13 @@ STDMETHODIMP CMpcVideoRenderer::Flt_GetString(LPCSTR field, LPWSTR* value, unsig
 	const bool bStats = !strcmp(field, "statsText");
 	const bool bLogo = !strcmp(field, "logoStatus");
 	const bool bLogoList = !strcmp(field, "logoList");
-	if (bNR || bSR || bStats || bLogo || bLogoList) {
+	const bool bProjection = !strcmp(field, "projectionProfileName");
+	if (bNR || bSR || bStats || bLogo || bLogoList || bProjection) {
 		CAutoLock cRendererLock(&m_RendererLock);
 		std::wstring str;
-		if (m_VideoProcessor) {
+		if (bProjection) {
+			if (m_jvrMediaProfile && GetActive()) str = m_jvrMediaProfile->name;
+		} else if (m_VideoProcessor) {
 			str = bLogoList ? m_VideoProcessor->GetLogoList()
 				: bLogo ? m_VideoProcessor->GetLogoStatus()
 				: bStats ? m_VideoProcessor->GetStatsText()
@@ -2828,6 +2905,18 @@ STDMETHODIMP CMpcVideoRenderer::Flt_SetBool(LPCSTR field, bool value)
 
 STDMETHODIMP CMpcVideoRenderer::Flt_SetInt(LPCSTR field, int value)
 {
+	if (!strcmp(field, "svdLutStrengthPreview")) {
+		if (value < 0 || value > SVDLUT_STRENGTH_MAX) return E_INVALIDARG;
+		CAutoLock lock(&m_RendererLock);
+		if (value == m_Sets.GetSvdLutStrength()) return S_FALSE;
+		m_Sets.SetSvdLutStrength(value);
+		if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) {
+			dx11->SetSvdLutStrength(value);
+			if (m_filterState == State_Paused) Redraw();
+		}
+		return S_OK;
+	}
+
 	// One atomic MFG setting entry point, similar to MPCVR-Plus' IExFilterConfig
 	// controls. Do not replace a whole Settings_t captured by another tab.
 	// A requested multiplier is durable even when the NGX runtime is unavailable.
@@ -3205,11 +3294,14 @@ const wchar_t* CMpcVideoRenderer::FeatureStatusText(bool dlssSR, bool vsr, bool 
 
 void CMpcVideoRenderer::BeginStartupOverlay()
 {
-	if (!m_Sets.bWaitForExtendedStartup || !m_Sets.bShowFeatureBadges || m_VideoProcessor->Type() != VP_DX11) return;
+	if (!m_Sets.bWaitForExtendedStartup || !m_Sets.bShowFeatureBadges ||
+		m_VideoProcessor->Type() != VP_DX11) return;
 	const bool dlssSR = m_Sets.bDlssSR;
 	const bool vsr = m_Sets.iVPSuperRes > SUPERRES_Disable &&
 		m_Sets.iVPSuperRes != SUPERRES_DLSS_SR;
-	const auto* text = FeatureStatusText(dlssSR, vsr, m_Sets.iMfgMultiplier >= 2);
+	const auto* dx11 = static_cast<const CDX11VideoProcessor*>(m_VideoProcessor.get());
+	const bool mfg = m_Sets.iMfgMultiplier >= 2 && !dx11->MfgSourceMeetsDisplayRate();
+	const auto* text = FeatureStatusText(dlssSR, vsr, mfg);
 	if (!*text) return;
 	m_startupFeatureText.store(text, std::memory_order_relaxed);
 	m_bStartupOverlayPending.store(true, std::memory_order_release);

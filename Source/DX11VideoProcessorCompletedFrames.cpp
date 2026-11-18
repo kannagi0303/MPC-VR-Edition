@@ -18,6 +18,7 @@ uint64_t TextureBytes(const D3D11_TEXTURE2D_DESC& desc)
 bool CDX11VideoProcessor::CanBufferCompletedSample() const
 {
     return !m_completedFailed && !m_completedPresenter.Failed() && m_pDXGISwapChain1 &&
+        !(m_mfgMultiplier && MfgSourceMeetsDisplayRate()) &&
         m_pDevice && m_pDeviceContext && m_srcDXGIFormat == DXGI_FORMAT_NV12 &&
         m_SwapChainFmt == DXGI_FORMAT_B8G8R8A8_UNORM && !m_bInterlaced && !m_bDoubleFrames &&
         !SourceIsHDR() && !m_bVPUseRTXVideoHDR && !m_bVPRTXVideoHDR && !m_pPSHalfOUtoInterlace &&
@@ -132,7 +133,7 @@ bool CDX11VideoProcessor::PrepareCompletedTarget()
         CComPtr<ID3D11Texture2D> back;
         if (FAILED(m_pDXGISwapChain1->GetBuffer(0, IID_PPV_ARGS(&back)))) return false;
         back->GetDesc(&desc);
-        target.picture = m_videoRect;
+        target.picture = PictureForPlayback(CanProjectJvr());
         const CRect bounds(0, 0, desc.Width, desc.Height);
         CRect visible;
         visible.IntersectRect(target.picture, bounds);
@@ -246,7 +247,9 @@ bool CDX11VideoProcessor::PrepareCompletedBatch(REFERENCE_TIME stream)
     const auto started = GetPreciseTick();
     // Use the geometry and input layout recorded for this batch.
     const auto picture = batch.target.picture;
-    if (!batch.target.videoOnly && picture != m_videoRect && mfg::SourceCadenceTrace().Enabled()) {
+    const bool projected = batch.target.projected;
+    const bool previousFormat = projected != CanProjectJvr();
+    if (!batch.target.videoOnly && picture != PictureForPlayback(projected) && mfg::SourceCadenceTrace().Enabled()) {
         mfg::SourceCadenceTrace().Record("completed_geometry_transition", GetPreciseTick(),
             original.timestamp, stream, original.serial, original.index,
             0, 0, 0, false, m_mfgLostGenerated, S_OK);
@@ -277,6 +280,7 @@ bool CDX11VideoProcessor::PrepareCompletedBatch(REFERENCE_TIME stream)
         }
         target.picture = picture;
         target.videoOnly = batch.target.videoOnly;
+        target.projected = projected;
         target.pts = phase.timestamp;
         target.due = phase.presentationTime;
         target.serial = phase.serial;
@@ -284,7 +288,7 @@ bool CDX11VideoProcessor::PrepareCompletedBatch(REFERENCE_TIME stream)
         target.mfg = true;
         sampled = true;
         if (FAILED(RenderMfgVideo(surface, phase.nativeInput, target.image.pTexture, phase.timestamp,
-                                  picture, batch.videoOnlyInput)) ||
+                                  picture, batch.videoOnlyInput, previousFormat, projected)) ||
             !QueueCompletedFrame(std::move(target))) {
             ++m_mfgLostGenerated;
             ++m_mfgSkipped;
@@ -299,10 +303,10 @@ bool CDX11VideoProcessor::PrepareCompletedBatch(REFERENCE_TIME stream)
     target.mfg = true;
     const mfg::FrameSurface surface{original.original->texture.Get(), original.original->view.Get()};
     auto rendered = RenderMfgVideo(surface, original.nativeInput, target.image.pTexture, original.timestamp,
-                                   picture, batch.videoOnlyInput);
+                                   picture, batch.videoOnlyInput, previousFormat, projected);
     if (FAILED(rendered)) {
         rendered = RenderMfgVideo(surface, original.nativeInput, target.image.pTexture, original.timestamp,
-                                  picture, batch.videoOnlyInput, true);
+                                  picture, batch.videoOnlyInput, true, projected);
     }
     if (FAILED(rendered) || !QueueCompletedFrame(std::move(target))) {
         ++m_mfgLostReal;
@@ -353,13 +357,16 @@ REFERENCE_TIME CDX11VideoProcessor::CompletedSubmitLead()
     // pending MFG batches and can starve the completed queue until it empties.
     // Keep resetting the estimator for a brief settling period after the last
     // geometry event; Start() then uses the normal initial lead.
-    constexpr ULONGLONG geometrySettleMs = 500;
-    const auto now = GetTickCount64();
-    if (m_resizeLastChangeTick && now >= m_resizeLastChangeTick &&
-        now - m_resizeLastChangeTick < geometrySettleMs) {
+    if (CompletedGeometryChanging()) {
         m_completedDisplayPacing.Reset();
     }
     return REFERENCE_TIME(m_completedDisplayPacing.Start(refresh) * 10'000);
+}
+
+bool CDX11VideoProcessor::CompletedGeometryChanging() const
+{
+    constexpr ULONGLONG settleMs = 500;
+    return m_resizePending || (m_completedGeometryTick && GetTickCount64() - m_completedGeometryTick < settleMs);
 }
 
 bool CDX11VideoProcessor::PresentCompletedFrame()
@@ -393,11 +400,7 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
     }
     m_RenderStats.syncoffset = REFERENCE_TIME(stream) - frame.due;
     const auto refresh = m_dRefreshPeriodMs > 0.0 ? 1000.0 / m_dRefreshPeriodMs : 0.0;
-    constexpr ULONGLONG geometrySettleMs = 500;
-    const auto nowTick = GetTickCount64();
-    const bool geometryTransient = m_resizeLastChangeTick && nowTick >= m_resizeLastChangeTick &&
-        nowTick - m_resizeLastChangeTick < geometrySettleMs;
-    if (geometryTransient) {
+    if (CompletedGeometryChanging()) {
         // Resize/compositor lateness is transient and must not consume the
         // steady-state batch-composition window after the user stops resizing.
         m_completedDisplayPacing.Reset();
@@ -446,7 +449,8 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
     return true;
 }
 
-HRESULT CDX11VideoProcessor::DrawCompletedVideo(const CompletedFrame& frame, ID3D11Texture2D* target, const CRect& picture)
+HRESULT CDX11VideoProcessor::DrawCompletedVideo(const CompletedFrame& frame, ID3D11Texture2D* target,
+                                                const CRect& picture, bool geometryChanging, const CRect* targetBounds)
 {
     D3D11_TEXTURE2D_DESC desc{};
     target->GetDesc(&desc);
@@ -468,10 +472,14 @@ HRESULT CDX11VideoProcessor::DrawCompletedVideo(const CompletedFrame& frame, ID3
     auto hr = m_pDevice->CreateRenderTargetView(target, nullptr, &view);
     if (FAILED(hr)) return hr;
     const float black[4] = {0, 0, 0, 1};
-    m_pDeviceContext->ClearRenderTargetView(view, black);
-    const CRect bounds(0, 0, desc.Width, desc.Height);
+    const CRect textureBounds(0, 0, desc.Width, desc.Height);
+    const CRect& bounds = targetBounds ? *targetBounds : textureBounds;
+    if (bounds != textureBounds && m_svdLut.clearViewSupported)
+        m_pDeviceContext->ClearView(view, black, &bounds, 1);
+    else
+        m_pDeviceContext->ClearRenderTargetView(view, black);
     CRect visible;
-    if (frame.videoOnly && visible.IntersectRect(to, bounds) && visible == to) {
+    if (frame.videoOnly && !geometryChanging && visible.IntersectRect(to, bounds) && visible == to) {
         const auto scaled = ResizeShaderPass(frame.image, target, from, to, 0, false, &m_completedResizeTexture);
         if (SUCCEEDED(scaled)) return scaled;
     }
@@ -490,7 +498,7 @@ HRESULT CDX11VideoProcessor::PresentCompletedVideo(const CompletedFrame& frame, 
     CComPtr<ID3D11Texture2D> back;
     auto hr = m_pDXGISwapChain1->GetBuffer(0, IID_PPV_ARGS(&back));
     if (FAILED(hr)) return hr;
-    CRect picture = m_videoRect;
+    CRect picture = PictureForPlayback(frame.projected);
     if (m_resizePending && !m_resizeTarget.IsRectEmpty()) {
         D3D11_TEXTURE2D_DESC desc{};
         back->GetDesc(&desc);
@@ -525,15 +533,21 @@ HRESULT CDX11VideoProcessor::PresentCompletedVideo(const CompletedFrame& frame, 
             }
         }
     }
-    hr = DrawCompletedVideo(frame, back, picture);
+    const bool geometryChanging = scheduled && CompletedGeometryChanging();
+    // Use one pass while the picture rectangle is changing. The normal
+    // scaler can need a new intermediate texture at each transient size.
+    hr = DrawCompletedSvdLut(frame, back, picture, geometryChanging);
+    if (hr != S_OK) hr = DrawCompletedVideo(frame, back, picture, geometryChanging);
     if (trace) {
         const auto finished = GetPreciseTick();
         mfg::SourceCadenceTrace().Record("completed_blit", finished, frame.pts, -1,
             frame.serial, frame.phase, 0, 0, 0, true, m_mfgLostGenerated, hr, finished - started);
     }
     if (FAILED(hr)) return hr;
-    if (m_bVBlankBeforePresent && m_pDXGIOutput) m_pDXGIOutput->WaitForVBlank();
-    return FinishMfgPresent(back, frame.pts, 0, scheduled);
+    if (!geometryChanging && m_bVBlankBeforePresent && m_pDXGIOutput) m_pDXGIOutput->WaitForVBlank();
+    // Use the actual resized video rectangle when applying the grade.
+    const CRect* outputPicture = (frame.projected || m_svdLut.strength) ? &picture : nullptr;
+    return FinishMfgPresent(back, frame.pts, 0, scheduled, outputPicture, true);
 }
 
 void CDX11VideoProcessor::ClearCompletedFrames(bool release)

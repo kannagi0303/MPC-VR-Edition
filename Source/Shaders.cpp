@@ -33,11 +33,8 @@ HRESULT CompileShader(const std::string& srcCode, const D3D_SHADER_MACRO* pDefin
 	//ASSERT(*ppShaderBlob == nullptr);
 
 	static HMODULE s_hD3dcompilerDll = LoadLibraryW(L"d3dcompiler_47.dll");
-	static pD3DCompile s_fnD3DCompile = nullptr;
-
-	if (s_hD3dcompilerDll && !s_fnD3DCompile) {
-		s_fnD3DCompile = (pD3DCompile)GetProcAddress(s_hD3dcompilerDll, "D3DCompile");
-	}
+	static const pD3DCompile s_fnD3DCompile = s_hD3dcompilerDll
+		? (pD3DCompile)GetProcAddress(s_hD3dcompilerDll, "D3DCompile") : nullptr;
 
 	if (!s_fnD3DCompile) {
 		return E_FAIL;

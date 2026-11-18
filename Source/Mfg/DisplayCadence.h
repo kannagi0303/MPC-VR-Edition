@@ -2,8 +2,17 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 namespace mfg {
+inline bool SourceMeetsDisplayRate(int64_t sourcePeriod, double refreshPeriodMs, bool doubleFrames = false)
+{
+    if (sourcePeriod <= 0 || !std::isfinite(refreshPeriodMs) || refreshPeriodMs <= 0.0) return false;
+    const double sourcePeriodMs = double(sourcePeriod) / (doubleFrames ? 20'000.0 : 10'000.0);
+    // Treat fractional and integer rates such as 59.94 and 60 as equivalent.
+    return sourcePeriodMs <= refreshPeriodMs * 1.002;
+}
+
 // Frame-budget policy adapted from the FgGateChoose principle in the bundled
 // DLSS-5-MANAGER reference: do not produce interpolation frames that cannot
 // fit into the output cadence. Keep the source frames, not the excess synthetic
