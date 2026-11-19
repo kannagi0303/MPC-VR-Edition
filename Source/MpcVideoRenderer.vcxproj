@@ -42,13 +42,9 @@
   <PropertyGroup>
     <TargetExt>.ax</TargetExt>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Platform)'=='x64'">
-    <TargetName>MPCVRMFG64</TargetName>
-  </PropertyGroup>
 <ItemDefinitionGroup>
     <Link>
       <ModuleDefinitionFile>MpcVideoRenderer.def</ModuleDefinitionFile>
-      <AdditionalDependencies>$(SolutionDir)vendor\nvidia\lib\nvsdk_ngx_s.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>
       <DelayLoadDLLs>d3d9.dll;dxva2.dll;dxgi.dll;d3d11.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
@@ -63,19 +59,6 @@
   </ItemDefinitionGroup>
 <ItemGroup>
     <ClCompile Include="csputils.cpp" />
-    <ClCompile Include="Mfg\Runtime.cpp">
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <AdditionalIncludeDirectories>$(SolutionDir)vendor\nvidia\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-    </ClCompile>
-    <ClCompile Include="Mfg\Session.cpp" />
-    <ClCompile Include="Mfg\DecodedFrameDifference.cpp" />
-    <ClCompile Include="Mfg\FlowMotionCheck.cpp" />
-    <ClCompile Include="Mfg\PresentationThread.cpp">
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-    </ClCompile>
-    <ClCompile Include="DX11VideoProcessorMfg.cpp" />
-    <ClCompile Include="DX11VideoProcessorCompletedFrames.cpp" />
-    <ClCompile Include="DX11VideoProcessorSvdLut.cpp" />
     <ClCompile Include="CustomAllocator.cpp" />
     <ClCompile Include="D3D11VP.cpp" />
     <ClCompile Include="D3DUtil\D3D11Font.cpp" />
@@ -85,18 +68,6 @@
     <ClCompile Include="DisplayConfig.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="DX11Helper.cpp" />
-    <ClCompile Include="DLSS\DlssOpticalFlow.cpp" />
-    <ClCompile Include="DLSS\ZipDepthGpu.cpp" />
-    <ClCompile Include="DLSS\DecodedFrameLookahead.cpp" />
-    <ClCompile Include="DLSS\ZipDepthNative.cpp">
-      <PreprocessorDefinitions>MPCVR_ENABLE_SVDLUT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <AdditionalIncludeDirectories>$(SolutionDir)vendor\zipdepth\include;$(SolutionDir)vendor\zipdepth\flatbuffers\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-    </ClCompile>
-    <ClCompile Include="DLSS\ZipDepth.cpp" />
-    <ClCompile Include="DLSS\DlssSR.cpp">
-      <AdditionalIncludeDirectories>$(SolutionDir)vendor\nvidia\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-    </ClCompile>
     <ClCompile Include="DX11VideoProcessor.cpp" />
     <ClCompile Include="DX9Helper.cpp" />
     <ClCompile Include="DX9VideoProcessor.cpp" />
@@ -135,22 +106,6 @@
     <ClInclude Include="D3DUtil\D3DCommon.h" />
     <ClInclude Include="DisplayConfig.h" />
     <ClInclude Include="DX11Helper.h" />
-    <ClInclude Include="DLSS\DlssOpticalFlow.h" />
-    <ClInclude Include="DLSS\DlssSR.h" />
-    <ClInclude Include="DLSS\ZipDepthGpu.h" />
-    <ClInclude Include="DLSS\ZipDepthNative.h" />
-    <ClInclude Include="DLSS\SvdLutModel.h" />
-    <ClInclude Include="DLSS\SvdLutModel.inc" />
-    <ClInclude Include="DLSS\SvdLutShader.h" />
-    <ClInclude Include="DLSS\ZipDepthPack.h" />
-    <ClInclude Include="DLSS\ZipDepthGpuShaders.h" />
-    <ClInclude Include="DLSS\ZipDepthTemporalShaders.h" />
-    <ClInclude Include="DLSS\DecodedFrameLookahead.h" />
-    <ClInclude Include="DLSS\ZipDepthLookahead.h" />
-    <ClInclude Include="DLSS\ZipDepth.h" />
-    <ClInclude Include="DLSS\NvOF\nvOpticalFlowCommon.h" />
-    <ClInclude Include="DLSS\NvOF\nvOpticalFlowD3D11.h" />
-    <ClInclude Include="DLSS\NgxRuntime.h" />
     <ClInclude Include="DX11VideoProcessor.h" />
     <ClInclude Include="DX9Helper.h" />
     <ClInclude Include="DX9VideoProcessor.h" />
@@ -197,6 +152,7 @@
     <None Include="res\dither32x32float16.bin" />
     <None Include="res\MpcVideoRenderer.rc2" />
   </ItemGroup>
+  <Import Project="$(ProjectDir)..\build-support\edition\Edition.targets" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

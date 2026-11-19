@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Imported only by the renderer, before Microsoft.Cpp.targets.
+       Item paths are relative to the importing Source project.
+       Keep Edition build dependencies here when updating the upstream project. -->
+  <PropertyGroup Condition="'$(Platform)'=='x64'">
+    <TargetName>MPCVRMFG64</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <Link>
+      <AdditionalDependencies>$(SolutionDir)vendor\nvidia\lib\nvsdk_ngx_s.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="Mfg\Runtime.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(SolutionDir)vendor\nvidia\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="Mfg\Session.cpp" />
+    <ClCompile Include="Mfg\DecodedFrameDifference.cpp" />
+    <ClCompile Include="Mfg\FlowMotionCheck.cpp" />
+    <ClCompile Include="Mfg\PresentationThread.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="DX11VideoProcessorMfg.cpp" />
+    <ClCompile Include="DX11VideoProcessorCompletedFrames.cpp" />
+    <ClCompile Include="DX11VideoProcessorSvdLut.cpp" />
+    <ClCompile Include="DLSS\DlssOpticalFlow.cpp" />
+    <ClCompile Include="DLSS\ZipDepthGpu.cpp" />
+    <ClCompile Include="DLSS\DecodedFrameLookahead.cpp" />
+    <ClCompile Include="DLSS\ZipDepthNative.cpp">
+      <PreprocessorDefinitions>MPCVR_ENABLE_SVDLUT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(SolutionDir)vendor\zipdepth\include;$(SolutionDir)vendor\zipdepth\flatbuffers\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="DLSS\ZipDepth.cpp" />
+    <ClCompile Include="DLSS\DlssSR.cpp">
+      <AdditionalIncludeDirectories>$(SolutionDir)vendor\nvidia\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClInclude Include="DLSS\DlssOpticalFlow.h" />
+    <ClInclude Include="DLSS\DlssSR.h" />
+    <ClInclude Include="DLSS\ZipDepthGpu.h" />
+    <ClInclude Include="DLSS\ZipDepthNative.h" />
+    <ClInclude Include="DLSS\SvdLutModel.h" />
+    <ClInclude Include="DLSS\SvdLutModel.inc" />
+    <ClInclude Include="DLSS\SvdLutShader.h" />
+    <ClInclude Include="DLSS\ZipDepthPack.h" />
+    <ClInclude Include="DLSS\ZipDepthGpuShaders.h" />
+    <ClInclude Include="DLSS\ZipDepthTemporalShaders.h" />
+    <ClInclude Include="DLSS\DecodedFrameLookahead.h" />
+    <ClInclude Include="DLSS\ZipDepthLookahead.h" />
+    <ClInclude Include="DLSS\ZipDepth.h" />
+    <ClInclude Include="DLSS\NvOF\nvOpticalFlowCommon.h" />
+    <ClInclude Include="DLSS\NvOF\nvOpticalFlowD3D11.h" />
+    <ClInclude Include="DLSS\NgxRuntime.h" />
+    <ClCompile Include="DX11VideoProcessorJvr.cpp" />
+    <ClInclude Include="JvrProjection.h" />
+    <ClCompile Include="Edition\DX11DepthOverlay.cpp" />
+    <ClCompile Include="Edition\DX11SuperResolution.cpp" />
+    <ClCompile Include="Edition\DX11DepthPrefetch.cpp" />
+    <ClCompile Include="Edition\SettingsRegistry.cpp" />
+    <ClInclude Include="Edition\SettingsRegistry.h" />
+    <ClCompile Include="Edition\PropPageExtended.cpp" />
+    <ClInclude Include="Edition\ResourceIds.h" />
+    <None Include="Edition\ExtendedControls.rcinc" />
+    <None Include="Edition\Dialogs.rcinc" />
+    <ClCompile Include="Edition\DX11VideoPipeline.cpp" />
+    <ClCompile Include="Edition\DX11Lifecycle.cpp" />
+    <ClCompile Include="Edition\DX11Presentation.cpp" />
+    <ClCompile Include="Edition\DX11FeatureStatus.cpp" />
+    <ClCompile Include="Edition\VideoRendererScheduling.cpp" />
+    <ClCompile Include="Edition\VideoRendererLifecycle.cpp" />
+    <ClInclude Include="Edition\VideoFrame.h" />
+    <ClInclude Include="Edition\WindowMessages.h" />
+    <ClCompile Include="Edition\DX11ProcessingSource.cpp" />
+    <ClCompile Include="Edition\DX11Statistics.cpp" />
+    <ClInclude Include="Edition\SettingsValues.h" />
+    <ClInclude Include="Edition\SettingsExtension.inc" />
+    <ClInclude Include="Edition\SettingsPresets.inc" />
+    <ClInclude Include="Edition\DX11EditionState.inc" />
+    <ClInclude Include="Edition\DX11ProjectionState.inc" />
+    <ClInclude Include="Edition\DX11ProcessingMethods.inc" />
+    <ClInclude Include="Edition\RendererTimingState.inc" />
+    <ClInclude Include="Edition\RendererSourceState.inc" />
+    <ClInclude Include="Edition\VideoProcessorInterface.inc" />
+    <ClInclude Include="Edition\DX11LifecycleMethods.inc" />
+    <ClInclude Include="Edition\ShaderExtensions.h" />
+    <ClCompile Include="Edition\RendererSettings.cpp" />
+    <ClCompile Include="Edition\RendererPresets.cpp" />
+    <ClCompile Include="Edition\RendererControls.cpp" />
+    <ClCompile Include="Edition\RendererSourceConnection.cpp" />
+    <ClInclude Include="Edition\RendererSettings.h" />
+    <None Include="Edition\SettingsDialogs.rcinc" />
+    <ClCompile Include="Edition\VideoShaderExtensions.cpp" />
+    <ClCompile Include="Edition\D3D11VideoProcessorBridge.cpp" />
+    <ClCompile Include="Edition\DX11SubtitleCompatibility.cpp" />
+    <ClCompile Include="Edition\VideoProcessorStatistics.cpp" />
+    <ClInclude Include="Edition\DX11Dependencies.h" />
+    <ClCompile Include="Edition\RendererWindow.cpp" />
+  </ItemGroup>
+</Project>

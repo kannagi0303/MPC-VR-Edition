@@ -23,8 +23,6 @@
 #include "Helper.h"
 #include "DisplayConfig.h"
 #include "PropPage.h"
-#include "JvrProjection.h"
-#include <FilterInterfaces.h>
 
 void SetCursor(HWND hWnd, LPCWSTR lpCursorName)
 {
@@ -36,7 +34,7 @@ void SetCursor(HWND hWnd, UINT nID, LPCWSTR lpCursorName)
 	SetCursor(::GetDlgItem(hWnd, nID), lpCursorName);
 }
 
-inline void ComboBox_AddStringData(HWND hWnd, int nIDComboBox, LPCWSTR str, LONG_PTR data)
+void ComboBox_AddStringData(HWND hWnd, int nIDComboBox, LPCWSTR str, LONG_PTR data)
 {
 	LRESULT lValue = SendDlgItemMessageW(hWnd, nIDComboBox, CB_ADDSTRING, 0, (LPARAM)str);
 	if (lValue != CB_ERR) {
@@ -44,7 +42,7 @@ inline void ComboBox_AddStringData(HWND hWnd, int nIDComboBox, LPCWSTR str, LONG
 	}
 }
 
-inline LONG_PTR ComboBox_GetCurItemData(HWND hWnd, int nIDComboBox)
+LONG_PTR ComboBox_GetCurItemData(HWND hWnd, int nIDComboBox)
 {
 	LRESULT lValue = SendDlgItemMessageW(hWnd, nIDComboBox, CB_GETCURSEL, 0, 0);
 	if (lValue != CB_ERR) {
@@ -68,19 +66,6 @@ void ComboBox_SelectByItemData(HWND hWnd, int nIDComboBox, LONG_PTR data)
 }
 
 
-static int ZipDepthModeFromSettings(const Settings_t& settings)
-{
-	if (settings.bUseZipDepthSr) return settings.bUseZipDepthMfg ? ZIPDEPTH_Both : ZIPDEPTH_DlssSrOnly;
-	return settings.bUseZipDepthMfg ? ZIPDEPTH_MfgOnly : ZIPDEPTH_Disable;
-}
-
-static void ApplyZipDepthMode(Settings_t& settings, const int mode)
-{
-	settings.bUseZipDepthSr = mode == ZIPDEPTH_Both || mode == ZIPDEPTH_DlssSrOnly;
-	settings.bUseZipDepthMfg = mode == ZIPDEPTH_Both || mode == ZIPDEPTH_MfgOnly;
-}
-
-
 // CVRMainPPage
 
 // https://msdn.microsoft.com/ru-ru/library/windows/desktop/dd375010(v=vs.85).aspx
@@ -96,61 +81,12 @@ CVRMainPPage::~CVRMainPPage()
 	DLog(L"~CVRMainPPage()");
 }
 
-void CVRMainPPage::UpdateJvrViewLabels()
-{
-	const int vertical = m_SetsPP.iJvrVertical;
-	SetDlgItemTextW(IDC_JVR_VERTICAL_VALUE, std::format(L"Vertical framing: {}{}%", vertical > 0 ? L"+" : L"", vertical).c_str());
-	SetDlgItemTextW(IDC_JVR_REPROJECTION_VALUE, std::format(L"Reprojection: {}%", m_SetsPP.iJvrReprojection).c_str());
-}
-
-void CVRMainPPage::ApplyJvrPreview()
-{
-	Settings_t live;
-	m_pVideoRenderer->GetSettings(live);
-	if (live.bJvrFlatView == m_SetsPP.bJvrFlatView && live.iJvrVertical == m_SetsPP.iJvrVertical &&
-		live.iJvrReprojection == m_SetsPP.iJvrReprojection && live.iJvrEye == m_SetsPP.iJvrEye) return;
-	live.bJvrFlatView = m_SetsPP.bJvrFlatView;
-	live.iJvrVertical = m_SetsPP.iJvrVertical;
-	live.iJvrReprojection = m_SetsPP.iJvrReprojection;
-	live.iJvrEye = m_SetsPP.iJvrEye;
-	m_pVideoRenderer->SetSettings(live);
-}
-
-void CVRMainPPage::UpdateSvdLutLabel()
-{
-	const int strength = m_SetsPP.GetSvdLutStrength();
-	const auto label = strength ? std::format(L"SVDLUT color: {}%", strength) : L"SVDLUT color: Off";
-	SetDlgItemTextW(IDC_SVDLUT_VALUE, label.c_str());
-}
-
-void CVRMainPPage::PreviewSvdLutStrength(int strength)
-{
-	CComQIPtr<IExFilterConfig> config(m_pVideoRenderer.p);
-	if (config && config->Flt_SetInt("svdLutStrengthPreview", strength) == S_OK)
-		m_svdLutPreviewed = true;
-}
-
 void CVRMainPPage::SetControls()
 {
 	CheckDlgButton(IDC_CHECK1, m_SetsPP.bUseD3D11             ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK2, m_SetsPP.bShowStats            ? BST_CHECKED : BST_UNCHECKED);
-	CheckDlgButton(IDC_JVR_FLAT_VIEW, m_SetsPP.bJvrFlatView ? BST_CHECKED : BST_UNCHECKED);
-	SendDlgItemMessageW(IDC_JVR_VERTICAL, TBM_SETPOS, TRUE, m_SetsPP.iJvrVertical);
-	SendDlgItemMessageW(IDC_JVR_REPROJECTION, TBM_SETPOS, TRUE, m_SetsPP.iJvrReprojection);
-	ComboBox_SelectByItemData(m_hWnd, IDC_JVR_EYE, m_SetsPP.iJvrEye);
-	UpdateJvrViewLabels();
-
+	SetEditionControls();
 	ComboBox_SelectByItemData(m_hWnd, IDC_COMBO1, m_SetsPP.iTexFormat);
-	CheckDlgButton(IDC_MFG_MULTIPLIER, m_SetsPP.iMfgMultiplier >= 2 ? BST_CHECKED : BST_UNCHECKED);
-	ComboBox_SelectByItemData(m_hWnd, IDC_ZIPDEPTH_MODE, ZipDepthModeFromSettings(m_SetsPP));
-	CheckDlgButton(IDC_SHOW_MFG_MOTION, m_SetsPP.bShowMfgMotion ? BST_CHECKED : BST_UNCHECKED);
-	SendDlgItemMessageW(IDC_SVDLUT_STRENGTH, TBM_SETPOS, TRUE, m_SetsPP.GetSvdLutStrength());
-	UpdateSvdLutLabel();
-	CheckDlgButton(IDC_SHOW_DEPTH_OVERLAY, m_SetsPP.bShowDepthOverlay ? BST_CHECKED : BST_UNCHECKED);
-	CheckDlgButton(IDC_MFG_FEATURE_BADGES, m_SetsPP.bShowFeatureBadges ? BST_CHECKED : BST_UNCHECKED);
-	ComboBox_SelectByItemData(m_hWnd, IDC_MFG_PROCESSING_MODE, m_SetsPP.iMfgProcessingMode);
-	ComboBox_SelectByItemData(m_hWnd, IDC_EXTENDED_STARTUP, m_SetsPP.bWaitForExtendedStartup);
-
 	CheckDlgButton(IDC_CHECK7, m_SetsPP.VPFmts.bNV12          ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK8, m_SetsPP.VPFmts.bP01x          ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK9, m_SetsPP.VPFmts.bYUY2          ? BST_CHECKED : BST_UNCHECKED);
@@ -159,7 +95,6 @@ void CVRMainPPage::SetControls()
 	CheckDlgButton(IDC_CHECK3, m_SetsPP.bDeintDouble          ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK5, m_SetsPP.bVPScaling            ? BST_CHECKED : BST_UNCHECKED);
 	SendDlgItemMessageW(IDC_COMBO8, CB_SETCURSEL, m_SetsPP.iVPSuperRes, 0);
-    ComboBox_SelectByItemData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT, m_SetsPP.iDlssSRSourceLimit);
 	CheckDlgButton(IDC_CHECK19, m_SetsPP.bVPRTXVideoHDR       ? BST_CHECKED : BST_UNCHECKED);
 
 	if (m_SetsPP.bHdrPassthrough) {
@@ -205,23 +140,6 @@ void CVRMainPPage::SetControls()
 void CVRMainPPage::EnableControls()
 {
 	GetDlgItem(IDC_CHECK1).EnableWindow(IsWindows7SP1OrGreater());
-	for (const int id : {IDC_JVR_FLAT_VIEW, IDC_JVR_PROFILE_NAME, IDC_JVR_EYE, IDC_JVR_VERTICAL,
-		IDC_JVR_VERTICAL_VALUE, IDC_JVR_REPROJECTION, IDC_JVR_REPROJECTION_VALUE}) {
-		GetDlgItem(id).ShowWindow(m_showJvrOptions ? SW_SHOW : SW_HIDE);
-	}
-	if (m_showJvrOptions) {
-		CComQIPtr<IExFilterConfig> config(m_pVideoRenderer.p);
-		LPWSTR name = nullptr;
-		if (config) config->Flt_GetString("projectionProfileName", &name, nullptr);
-		SetDlgItemTextW(IDC_JVR_PROFILE_NAME, name ? name : L"");
-		CoTaskMemFree(name);
-	}
-	GetDlgItem(IDC_JVR_FLAT_VIEW).EnableWindow(m_SetsPP.bUseD3D11);
-	const bool jvrEnabled = m_SetsPP.bUseD3D11 && m_SetsPP.bJvrFlatView;
-	for (const int id : {IDC_JVR_VERTICAL, IDC_JVR_VERTICAL_VALUE, IDC_JVR_REPROJECTION,
-		IDC_JVR_REPROJECTION_VALUE, IDC_JVR_EYE}) {
-		GetDlgItem(id).EnableWindow(jvrEnabled);
-	}
 	if (!IsWindows8OrGreater()) { // Windows 7
 		const BOOL bEnable = !m_SetsPP.bUseD3D11;
 		GetDlgItem(IDC_STATIC1).EnableWindow(bEnable); // not working for GROUPBOX
@@ -264,19 +182,7 @@ void CVRMainPPage::EnableControls()
 	GetDlgItem(IDC_STATIC_DVTM).EnableWindow(bLocal);
 	GetDlgItem(IDC_COMBO_DVTM).EnableWindow(bLocal);
 	GetDlgItem(IDC_CHECK20).EnableWindow(bLocal);
-	const BOOL bMfgEnabled = m_SetsPP.bUseD3D11 && m_SetsPP.iMfgMultiplier >= 2 && IsWindows10OrGreater();
-	GetDlgItem(IDC_MFG_MULTIPLIER).EnableWindow(m_SetsPP.bUseD3D11 && IsWindows10OrGreater());
-	GetDlgItem(IDC_MFG_PROCESSING_MODE).EnableWindow(bMfgEnabled);
-	const BOOL canUseDlssSR = m_SetsPP.bUseD3D11 && IsWindows10OrGreater();
-	const bool srEnabled = canUseDlssSR && m_SetsPP.bDlssSR;
-	GetDlgItem(IDC_ZIPDEPTH_MODE).EnableWindow(canUseDlssSR);
-	GetDlgItem(IDC_SVDLUT_STRENGTH).EnableWindow(canUseDlssSR);
-	GetDlgItem(IDC_SVDLUT_VALUE).EnableWindow(canUseDlssSR);
-	GetDlgItem(IDC_SHOW_MFG_MOTION).EnableWindow(bMfgEnabled);
-	const bool depthAvailable = (srEnabled && m_SetsPP.bUseZipDepthSr) ||
-		(bMfgEnabled && m_SetsPP.bUseZipDepthMfg);
-	GetDlgItem(IDC_SHOW_DEPTH_OVERLAY).EnableWindow(depthAvailable);
-	GetDlgItem(IDC_DLSS_SR_SOURCE_LIMIT).EnableWindow(canUseDlssSR);
+	EnableEditionControls();
 }
 
 HRESULT CVRMainPPage::OnConnect(IUnknown *pUnk)
@@ -297,24 +203,7 @@ HRESULT CVRMainPPage::OnDisconnect()
 		return E_UNEXPECTED;
 	}
 
-	Settings_t live;
-	m_pVideoRenderer->GetSettings(live);
-	if (live.iSDRDisplayNits != m_oldSDRDisplayNits || live.bJvrFlatView != m_oldJvrFlatView ||
-		live.iJvrVertical != m_oldJvrVertical || live.iJvrReprojection != m_oldJvrReprojection ||
-		live.iJvrEye != m_oldJvrEye) {
-		// Roll back the fields that can be previewed before Apply.
-		live.iSDRDisplayNits = m_oldSDRDisplayNits;
-		live.bJvrFlatView = m_oldJvrFlatView;
-		live.iJvrVertical = m_oldJvrVertical;
-		live.iJvrReprojection = m_oldJvrReprojection;
-		live.iJvrEye = m_oldJvrEye;
-		m_pVideoRenderer->SetSettings(live);
-	}
-
-	if (m_svdLutPreviewed) {
-		PreviewSvdLutStrength(m_oldSvdLutStrength);
-		m_svdLutPreviewed = false;
-	}
+	RestorePreviewSettings();
 	m_pVideoRenderer.Release();
 
 	return S_OK;
@@ -324,15 +213,9 @@ HRESULT CVRMainPPage::OnActivate()
 {
 	// set m_hWnd for CWindow
 	m_hWnd = m_hwnd;
-	m_showJvrOptions = !jvr::ProfileFiles(g_hInst).empty();
 
 	m_pVideoRenderer->GetSettings(m_SetsPP);
-	m_oldSDRDisplayNits = m_SetsPP.iSDRDisplayNits;
-	if (!m_svdLutPreviewed) m_oldSvdLutStrength = m_SetsPP.GetSvdLutStrength();
-	m_oldJvrFlatView = m_SetsPP.bJvrFlatView;
-	m_oldJvrVertical = m_SetsPP.iJvrVertical;
-	m_oldJvrReprojection = m_SetsPP.iJvrReprojection;
-	m_oldJvrEye = m_SetsPP.iJvrEye;
+	CapturePreviewSettings();
 
 	if (!IsWindows7SP1OrGreater()) {
 		GetDlgItem(IDC_CHECK1).EnableWindow(FALSE);
@@ -374,12 +257,6 @@ HRESULT CVRMainPPage::OnActivate()
 	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"RTX VSR \x2264 720p");
 	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"RTX VSR \x2264 1080p");
 	SendDlgItemMessageW(IDC_COMBO8, CB_ADDSTRING, 0, (LPARAM)L"RTX VSR \x2264 1440p");
-    ComboBox_AddStringData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT, L"Disable", DLSSSR_SOURCE_Disable);
-    ComboBox_AddStringData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT, L"DLSS for SD", DLSSSR_SOURCE_SD);
-    ComboBox_AddStringData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT, L"DLSS \x2264 720p", DLSSSR_SOURCE_720p);
-    ComboBox_AddStringData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT, L"DLSS \x2264 1080p", DLSSSR_SOURCE_1080p);
-    ComboBox_AddStringData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT, L"DLSS \x2264 1440p", DLSSSR_SOURCE_1440p);
-
 	SendDlgItemMessageW(IDC_COMBO7, CB_ADDSTRING, 0, (LPARAM)L"Do not change");
 	SendDlgItemMessageW(IDC_COMBO7, CB_ADDSTRING, 0, (LPARAM)L"Allow turn on (fullscreen)");
 	SendDlgItemMessageW(IDC_COMBO7, CB_ADDSTRING, 0, (LPARAM)L"Allow turn on");
@@ -407,18 +284,6 @@ HRESULT CVRMainPPage::OnActivate()
 	SendDlgItemMessageW(IDC_COMBO4, CB_ADDSTRING, 0, (LPARAM)L"Discard");
 	SendDlgItemMessageW(IDC_COMBO4, CB_ADDSTRING, 0, (LPARAM)L"Flip");
 
-	SendDlgItemMessageW(IDC_SVDLUT_STRENGTH, TBM_SETRANGE, TRUE, MAKELONG(0, SVDLUT_STRENGTH_MAX));
-	SendDlgItemMessageW(IDC_SVDLUT_STRENGTH, TBM_SETTIC, 0, SVDLUT_STRENGTH_MAX / 2);
-	SendDlgItemMessageW(IDC_SVDLUT_STRENGTH, TBM_SETPAGESIZE, 0, 10);
-	SendDlgItemMessageW(IDC_JVR_VERTICAL, TBM_SETRANGEMIN, FALSE, JVR_VERTICAL_MIN);
-	SendDlgItemMessageW(IDC_JVR_VERTICAL, TBM_SETRANGEMAX, TRUE, JVR_VERTICAL_MAX);
-	SendDlgItemMessageW(IDC_JVR_VERTICAL, TBM_SETTIC, 0, JVR_VERTICAL_DEFAULT);
-	SendDlgItemMessageW(IDC_JVR_REPROJECTION, TBM_SETRANGEMIN, FALSE, JVR_REPROJECTION_MIN);
-	SendDlgItemMessageW(IDC_JVR_REPROJECTION, TBM_SETRANGEMAX, TRUE, JVR_REPROJECTION_MAX);
-	SendDlgItemMessageW(IDC_JVR_REPROJECTION, TBM_SETTIC, 0, JVR_REPROJECTION_DEFAULT);
-	SendDlgItemMessageW(IDC_JVR_REPROJECTION, TBM_SETTIC, 0, 100);
-	ComboBox_AddStringData(m_hWnd, IDC_JVR_EYE, L"Left eye", 0);
-	ComboBox_AddStringData(m_hWnd, IDC_JVR_EYE, L"Right eye", 1);
 	SendDlgItemMessageW(IDC_SLIDER1, TBM_SETRANGE, 0, MAKELONG(0, 2));
 	SendDlgItemMessageW(IDC_SLIDER1, TBM_SETTIC, 0, 1);
 
@@ -445,22 +310,8 @@ HRESULT CVRMainPPage::OnActivate()
 	ComboBox_AddStringData(m_hWnd, IDC_COMBO_SDRTM, L"Metadata", SDRTM_Metadata);
 	ComboBox_AddStringData(m_hWnd, IDC_COMBO_SDRTM, L"Measured", SDRTM_Measured);
 
-	ComboBox_AddStringData(m_hWnd, IDC_MFG_PROCESSING_MODE,
-		L"Upscale then MFG", 0);
-	ComboBox_AddStringData(m_hWnd, IDC_MFG_PROCESSING_MODE,
-		L"MFG then upscale", 1);
-
-	ComboBox_AddStringData(m_hWnd, IDC_EXTENDED_STARTUP, L"Play first", 0);
-	ComboBox_AddStringData(m_hWnd, IDC_EXTENDED_STARTUP, L"Wait for Extended", 1);
-
-	ComboBox_AddStringData(m_hWnd, IDC_ZIPDEPTH_MODE, L"Both", ZIPDEPTH_Both);
-	ComboBox_AddStringData(m_hWnd, IDC_ZIPDEPTH_MODE, L"DLSS SR Only", ZIPDEPTH_DlssSrOnly);
-	ComboBox_AddStringData(m_hWnd, IDC_ZIPDEPTH_MODE, L"MFG Only", ZIPDEPTH_MfgOnly);
-	ComboBox_AddStringData(m_hWnd, IDC_ZIPDEPTH_MODE, L"Disable", ZIPDEPTH_Disable);
-
-	// The public MFG setting is now a checkbox. The internal Auto cadence
-	// algorithm remains unchanged (Off=0, Auto=7).
-	if (!::GetDlgItem(m_hWnd, IDC_MFG_MULTIPLIER)) return E_FAIL;
+	const HRESULT editionControls = InitializeEditionControls();
+	if (FAILED(editionControls)) return editionControls;
 	SetControls();
 
 	SetCursor(m_hWnd, IDC_ARROW);
@@ -473,36 +324,7 @@ HRESULT CVRMainPPage::OnActivate()
 		L"Available for Direct3D 11 with video processor resizing.\n"
 		L"RTX VSR requests driver upscaling up to the selected source size.\n"
 		L"DLSS Super Resolution takes priority when enabled.");
-	AddHint(IDC_DLSS_SR_SOURCE_LIMIT,
-        L"Apply DLSS only at or below the selected source resolution (same limits as RTX VSR).\n"
-        L"Target is always the display-fit resolution. DLAA is used at 1:1; otherwise DLSS SR.\n"
-        L"Forward/backward Optical Flow validation is requested automatically.\n"
-        L"Requires NVIDIA RTX, 8-bit SDR and edition\\nvngx_dlss.dll. The processing order controls the MFG slot.");
-	AddHint(IDC_MFG_PROCESSING_MODE,
-		L"Choose whether to upscale before or after MFG. Both orders support RTX VSR and DLSS SR.\n"
-		L"After-MFG upscaling uses the native-size path when the video and output support it.\n"
-		L"The new order applies immediately. Pending original frames are presented before the route changes; a brief pause is possible.");
-	AddHint(IDC_EXTENDED_STARTUP,
-		L"Play first: Show video while Extended features load.\n"
-		L"Wait for Extended: Prepare enabled features before playback.\n"
-		L"Applies when you open a video.");
-	AddHint(IDC_ZIPDEPTH_MODE,
-		L"Choose which Extended path receives ZipDepth.\n"
-		L"Both (default), DLSS SR Only, MFG Only, or Disable.");
-	AddHint(IDC_SVDLUT_STRENGTH,
-		L"Adjust SVDLUT color strength for SDR video. 0% disables SVDLUT.\n"
-		L"Requires the DirectML model in the edition folder.");
-	AddHint(IDC_SHOW_DEPTH_OVERLAY,
-		L"Show the active ZipDepth map as a diagnostic overlay.");
-	AddHint(IDC_SHOW_MFG_MOTION,
-		L"Draw MFG motion arrows on the final picture.\n"
-		L"Arrows point from the current source frame to the previous source frame.");
-	AddHint(IDC_MFG_FEATURE_BADGES,
-		L"Show DLSS SR, VSR and MFG status.\n"
-		L"Keep it visible while paused. Show it for 5 seconds after starting, resuming or resizing.");
-	AddHint(IDC_MFG_MULTIPLIER,
-		L"Enable automatic DLSS Multi Frame Generation (Auto).\n"
-		L"Requires Direct3D 11, compatible NVIDIA RTX hardware and drivers.");
+	AddEditionHints();
 	AddHint(IDC_CHECK19,
 		L"Available for Direct3D 11.\n"
 		"Requires hardware and driver support:\n"
@@ -534,15 +356,6 @@ HRESULT CVRMainPPage::OnActivate()
 		L"'Flip' is more efficient, but 'Discard' may work\n"
 		"more correctly in some rare situations.");
 
-	AddHint(IDC_JVR_FLAT_VIEW,
-		L"Show one eye of progressive SDR Full SBS video using a 16:9 stereographic view.");
-	AddHint(IDC_JVR_VERTICAL,
-		L"Move the centre of the 16:9 view. Negative looks up; positive looks down.");
-	AddHint(IDC_JVR_REPROJECTION,
-		L"0% shifts the framing after projection. 100% uses camera pitch alone.\n"
-		L"Above 100%, additional pitch is offset by a shift in the opposite direction.\n"
-		L"The selected centre stays in the same place.");
-
 	m_bActivated = true;
 
 	return S_OK;
@@ -550,29 +363,13 @@ HRESULT CVRMainPPage::OnActivate()
 
 INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+	if (OnEditionMessage(uMsg, wParam, lParam)) return TRUE;
 	if (uMsg == WM_COMMAND) {
 		LRESULT lValue;
 		const int nID = LOWORD(wParam);
 		int action = HIWORD(wParam);
 
-		if (action == CBN_SELCHANGE && nID == IDC_JVR_EYE) {
-			const LONG_PTR value = ComboBox_GetCurItemData(m_hWnd, nID);
-			if (value != CB_ERR) {
-				m_SetsPP.iJvrEye = static_cast<int>(value);
-				ApplyJvrPreview();
-				SetDirty();
-			}
-			return TRUE;
-		}
-
 		if (action == BN_CLICKED) {
-			if (nID == IDC_JVR_FLAT_VIEW) {
-				m_SetsPP.bJvrFlatView = IsDlgButtonChecked(IDC_JVR_FLAT_VIEW) == BST_CHECKED;
-				ApplyJvrPreview();
-				EnableControls();
-				SetDirty();
-				return (LRESULT)1;
-			}
 			if (nID == IDC_CHECK1) {
 				m_SetsPP.bUseD3D11 = IsDlgButtonChecked(IDC_CHECK1) == BST_CHECKED;
 				EnableControls();
@@ -673,29 +470,6 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 				return (LRESULT)1;
 			}
 
-			if (nID == IDC_SHOW_DEPTH_OVERLAY) {
-				m_SetsPP.bShowDepthOverlay = IsDlgButtonChecked(IDC_SHOW_DEPTH_OVERLAY) == BST_CHECKED;
-				SetDirty();
-				return (LRESULT)1;
-			}
-			if (nID == IDC_SHOW_MFG_MOTION) {
-				SetDirty();
-				return (LRESULT)1;
-			}
-			if (nID == IDC_MFG_FEATURE_BADGES) {
-				m_SetsPP.bShowFeatureBadges = IsDlgButtonChecked(IDC_MFG_FEATURE_BADGES) == BST_CHECKED;
-				SetDirty();
-				return (LRESULT)1;
-			}
-			if (nID == IDC_MFG_MULTIPLIER) {
-				const unsigned requested = IsDlgButtonChecked(IDC_MFG_MULTIPLIER) == BST_CHECKED ? 7u : 0u;
-				if (m_SetsPP.iMfgMultiplier != requested) {
-					m_SetsPP.iMfgMultiplier = requested;
-					EnableControls();
-					SetDirty();
-				}
-				return (LRESULT)1;
-			}
 			if (nID == IDC_BUTTON1) {
 				m_SetsPP.SetDefault();
 				if (!m_showJvrOptions) {
@@ -713,43 +487,6 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 		}
 
 		if (action == CBN_SELCHANGE) {
-			if (nID == IDC_ZIPDEPTH_MODE) {
-				const LRESULT mode = ComboBox_GetCurItemData(m_hWnd, nID);
-				if (mode >= ZIPDEPTH_Both && mode <= ZIPDEPTH_Disable) {
-					ApplyZipDepthMode(m_SetsPP, static_cast<int>(mode));
-					EnableControls();
-					SetDirty();
-				}
-				return (LRESULT)1;
-			}
-			if (nID == IDC_EXTENDED_STARTUP) {
-				lValue = ComboBox_GetCurItemData(m_hWnd, nID);
-				if ((lValue == 0 || lValue == 1) && m_SetsPP.bWaitForExtendedStartup != (lValue == 1)) {
-					m_SetsPP.bWaitForExtendedStartup = lValue == 1;
-					SetDirty();
-				}
-				return (LRESULT)1;
-			}
-            if (nID == IDC_DLSS_SR_SOURCE_LIMIT) {
-                const LRESULT choice = ComboBox_GetCurItemData(m_hWnd, nID);
-                if (choice >= DLSSSR_SOURCE_Disable && choice <= DLSSSR_SOURCE_1440p &&
-                    m_SetsPP.iDlssSRSourceLimit != choice) {
-                    m_SetsPP.iDlssSRSourceLimit = static_cast<int>(choice);
-                    m_SetsPP.bDlssSR = choice != DLSSSR_SOURCE_Disable;
-                    m_SetsPP.bDlssSRDlaa = m_SetsPP.bDlssSR;
-                    EnableControls();
-                    SetDirty();
-                }
-                return (LRESULT)1;
-            }
-			if (nID == IDC_MFG_PROCESSING_MODE) {
-				lValue = ComboBox_GetCurItemData(m_hWnd, nID);
-				if ((lValue == 0 || lValue == 1) && m_SetsPP.iMfgProcessingMode != static_cast<unsigned>(lValue)) {
-					m_SetsPP.iMfgProcessingMode = static_cast<unsigned>(lValue);
-					SetDirty();
-				}
-				return (LRESULT)1;
-			}
 			if (nID == IDC_COMBO6) {
 				lValue = SendDlgItemMessageW(IDC_COMBO6, CB_GETCURSEL, 0, 0);
 				if (lValue != m_SetsPP.iResizeStats) {
@@ -897,24 +634,6 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 		}
 	}
 	else if (uMsg == WM_HSCROLL) {
-		if ((HWND)lParam == GetDlgItem(IDC_SVDLUT_STRENGTH)) {
-			const int strength = static_cast<int>(SendDlgItemMessageW(IDC_SVDLUT_STRENGTH, TBM_GETPOS));
-			if (strength != m_SetsPP.GetSvdLutStrength()) {
-				m_SetsPP.SetSvdLutStrength(strength);
-				UpdateSvdLutLabel();
-				PreviewSvdLutStrength(strength);
-				SetDirty();
-			}
-			return (LRESULT)1;
-		}
-		if ((HWND)lParam == GetDlgItem(IDC_JVR_VERTICAL) || (HWND)lParam == GetDlgItem(IDC_JVR_REPROJECTION)) {
-			m_SetsPP.iJvrVertical = static_cast<int>(SendDlgItemMessageW(IDC_JVR_VERTICAL, TBM_GETPOS));
-			m_SetsPP.iJvrReprojection = static_cast<int>(SendDlgItemMessageW(IDC_JVR_REPROJECTION, TBM_GETPOS));
-			UpdateJvrViewLabels();
-			ApplyJvrPreview();
-			SetDirty();
-			return (LRESULT)1;
-		}
 		if ((HWND)lParam == GetDlgItem(IDC_SLIDER1)) {
 			LRESULT lValue = SendDlgItemMessageW(IDC_SLIDER1, TBM_GETPOS, 0, 0);
 			if (lValue != m_SetsPP.iHdrOsdBrightness) {
@@ -960,54 +679,15 @@ HRESULT CVRMainPPage::OnApplyChanges()
 		m_SetsPP.iHdrDisplayMaxNits = displayMaxNits;
 	}
 
-	// This is the only settings page and owns the MFG field.  Read the
-	// actual control on Apply, including when Windows did not send a selection
-	// notification.  Reject a missing selection instead of interpreting -1 as
-	// a multiplier or overwriting another saved preference.
-	m_SetsPP.bMfgLowMotion = false;
-	m_SetsPP.bAdaptiveMfgDepth = false;
-	m_SetsPP.bDepth3DPreview = false;
-	if (m_showJvrOptions) {
-		m_SetsPP.bJvrFlatView = IsDlgButtonChecked(IDC_JVR_FLAT_VIEW) == BST_CHECKED;
-		m_SetsPP.iJvrVertical = static_cast<int>(SendDlgItemMessageW(IDC_JVR_VERTICAL, TBM_GETPOS));
-		m_SetsPP.iJvrReprojection = static_cast<int>(SendDlgItemMessageW(IDC_JVR_REPROJECTION, TBM_GETPOS));
-		const LONG_PTR jvrEye = ComboBox_GetCurItemData(m_hWnd, IDC_JVR_EYE);
-		if (jvrEye != CB_ERR) m_SetsPP.iJvrEye = static_cast<int>(jvrEye);
-	}
-	const LRESULT zipDepthMode = ComboBox_GetCurItemData(m_hWnd, IDC_ZIPDEPTH_MODE);
-	if (zipDepthMode < ZIPDEPTH_Both || zipDepthMode > ZIPDEPTH_Disable) return E_INVALIDARG;
-	ApplyZipDepthMode(m_SetsPP, static_cast<int>(zipDepthMode));
-	m_SetsPP.bShowMfgMotion = IsDlgButtonChecked(IDC_SHOW_MFG_MOTION) == BST_CHECKED;
-	m_SetsPP.bShowDepthOverlay = IsDlgButtonChecked(IDC_SHOW_DEPTH_OVERLAY) == BST_CHECKED;
-	m_SetsPP.SetSvdLutStrength(static_cast<int>(SendDlgItemMessageW(IDC_SVDLUT_STRENGTH, TBM_GETPOS)));
-	m_SetsPP.bShowFeatureBadges = IsDlgButtonChecked(IDC_MFG_FEATURE_BADGES) == BST_CHECKED;
-    const LRESULT srLimit = ComboBox_GetCurItemData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT);
-    if (srLimit < DLSSSR_SOURCE_Disable || srLimit > DLSSSR_SOURCE_1440p) return E_INVALIDARG;
-    m_SetsPP.iDlssSRSourceLimit = static_cast<int>(srLimit);
-    m_SetsPP.bDlssSR = srLimit != DLSSSR_SOURCE_Disable;
-    m_SetsPP.bDlssSRDlaa = m_SetsPP.bDlssSR;
-	const UINT mfgState = IsDlgButtonChecked(IDC_MFG_MULTIPLIER);
-	if (mfgState != BST_CHECKED && mfgState != BST_UNCHECKED) return E_INVALIDARG;
-	m_SetsPP.iMfgMultiplier = mfgState == BST_CHECKED ? 7u : 0u;
-	const LRESULT processing = ComboBox_GetCurItemData(m_hWnd, IDC_MFG_PROCESSING_MODE);
-	if (processing != 0 && processing != 1) return E_INVALIDARG;
-	m_SetsPP.iMfgProcessingMode = static_cast<unsigned>(processing);
-	const LRESULT startup = ComboBox_GetCurItemData(m_hWnd, IDC_EXTENDED_STARTUP);
-	if (startup != 0 && startup != 1) return E_INVALIDARG;
-	m_SetsPP.bWaitForExtendedStartup = startup == 1;
+	const HRESULT editionControls = ReadEditionControls();
+	if (FAILED(editionControls)) return editionControls;
 	m_pVideoRenderer->SetSettings(m_SetsPP);
 	const HRESULT saved = m_pVideoRenderer->SaveSettings();
 	if (FAILED(saved)) return saved;
 	// The renderer switches at the old timeline boundary in Configure().
 	// Do not prompt for a player restart when Apply has already committed it.
 
-	m_oldSDRDisplayNits = m_SetsPP.iSDRDisplayNits;
-	m_oldSvdLutStrength = m_SetsPP.GetSvdLutStrength();
-	m_svdLutPreviewed = false;
-	m_oldJvrFlatView = m_SetsPP.bJvrFlatView;
-	m_oldJvrVertical = m_SetsPP.iJvrVertical;
-	m_oldJvrReprojection = m_SetsPP.iJvrReprojection;
-	m_oldJvrEye = m_SetsPP.iJvrEye;
+	CommitPreviewSettings();
 
 	return S_OK;
 }

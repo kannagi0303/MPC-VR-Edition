@@ -1,0 +1,302 @@
+{
+  "schemaVersion": 1,
+  "commit": "6be828bfc415aa72286862e6e262eb652abd9a53",
+  "policy": "Only explicit native seams and retained compatibility fixes. Edition features belong in extension modules. These are maxima, not growth allowances.",
+  "files": [
+    {
+      "path": "Source/D3D11VP.cpp",
+      "maxAdded": 63,
+      "maxRemoved": 34,
+      "reason": "Input history/UAV/decoder compatibility remains native; Edition vendor policy uses one explicit optional hook before native VSR threshold/vendor dispatch.",
+      "roles": [
+        "edition-seam",
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/D3D11VP.h",
+      "maxAdded": 62,
+      "maxRemoved": 2,
+      "reason": "Typed input-hold, external-processing and UAV bridge contracts; native resource order is retained.",
+      "roles": [
+        "edition-seam",
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/DX11Helper.cpp",
+      "maxAdded": 12,
+      "maxRemoved": 0,
+      "reason": "Packed-video render-target/UAV format support required by shared processing.",
+      "roles": [
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/DX11Helper.h",
+      "maxAdded": 13,
+      "maxRemoved": 1,
+      "reason": "Capacity-aware texture and packed-video resource primitives.",
+      "roles": [
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/DX11VideoProcessor.cpp",
+      "maxAdded": 216,
+      "maxRemoved": 114,
+      "reason": "Explicit Edition lifecycle/source/render/statistics hooks; required native geometry and HDR/subtitle compatibility patches.",
+      "roles": [
+        "edition-seam",
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/DX11VideoProcessor.h",
+      "maxAdded": 69,
+      "maxRemoved": 8,
+      "reason": "Edition fragment imports and narrow native drawing/processing signatures; no copied renderer implementation.",
+      "roles": [
+        "edition-seam",
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/DX9VideoProcessor.cpp",
+      "maxAdded": 56,
+      "maxRemoved": 27,
+      "reason": "Existing subtitle/HDR, source-duration and dynamic-statistics compatibility; no Edition GPU features inserted.",
+      "roles": [
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/DX9VideoProcessor.h",
+      "maxAdded": 8,
+      "maxRemoved": 0,
+      "reason": "Existing subtitle/statistics compatibility state and override declarations.",
+      "roles": [
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/FrameStats.h",
+      "maxAdded": 41,
+      "maxRemoved": 0,
+      "reason": "Stable source-PTS cadence and backwards-timestamp accounting required by scheduling.",
+      "roles": [
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/Helper.cpp",
+      "maxAdded": 19,
+      "maxRemoved": 5,
+      "reason": "NVIDIA-specific source labels and existing color/font compatibility.",
+      "roles": [
+        "edition-identity",
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/IVideoRenderer.h",
+      "maxAdded": 66,
+      "maxRemoved": 3,
+      "reason": "Stable Edition settings/enum/interface extension includes, private IID and preserved defaults.",
+      "roles": [
+        "edition-seam",
+        "settings-contract"
+      ]
+    },
+    {
+      "path": "Source/MpcVideoRenderer.rc",
+      "maxAdded": 10,
+      "maxRemoved": 21,
+      "reason": "Edition resource includes, preserved extended page dimensions and native HDR control layout.",
+      "roles": [
+        "resource-integration"
+      ]
+    },
+    {
+      "path": "Source/MpcVideoRenderer.vcxproj",
+      "maxAdded": 8,
+      "maxRemoved": 8,
+      "reason": "Single Edition targets import and retained local build configuration.",
+      "roles": [
+        "build-integration"
+      ]
+    },
+    {
+      "path": "Source/PropPage.cpp",
+      "maxAdded": 40,
+      "maxRemoved": 27,
+      "reason": "Edition lifecycle/event hooks and retained native preview transaction.",
+      "roles": [
+        "edition-seam",
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/PropPage.h",
+      "maxAdded": 27,
+      "maxRemoved": 0,
+      "reason": "Private Edition page-hook declarations and unchanged preview checkpoint fields.",
+      "roles": [
+        "edition-seam"
+      ]
+    },
+    {
+      "path": "Source/Shaders.cpp",
+      "maxAdded": 49,
+      "maxRemoved": 10,
+      "reason": "Thread-safe shader compiler lookup and shared pixel reconstruction/packed-output hooks.",
+      "roles": [
+        "edition-seam",
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/Shaders.h",
+      "maxAdded": 2,
+      "maxRemoved": 0,
+      "reason": "One extension declaration include.",
+      "roles": [
+        "edition-seam"
+      ]
+    },
+    {
+      "path": "Source/VideoProcessor.cpp",
+      "maxAdded": 6,
+      "maxRemoved": 1,
+      "reason": "Retained source metrics and notice/statistics integration.",
+      "roles": [
+        "edition-seam",
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/VideoProcessor.h",
+      "maxAdded": 29,
+      "maxRemoved": 3,
+      "reason": "Extension virtual interface include and shared source/statistics compatibility state.",
+      "roles": [
+        "edition-seam",
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/VideoRenderer.cpp",
+      "maxAdded": 309,
+      "maxRemoved": 311,
+      "reason": "Native key tables/read/write and startup-only tuning have one owner in the renderer, shared with presets; Edition is composed through explicit hooks. Snapshot locking and save error semantics remain intact.",
+      "roles": [
+        "edition-seam",
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/VideoRenderer.h",
+      "maxAdded": 50,
+      "maxRemoved": 1,
+      "reason": "Edition state fragments plus narrow source/window/control override declarations.",
+      "roles": [
+        "edition-seam",
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/VideoRendererInputPin.cpp",
+      "maxAdded": 9,
+      "maxRemoved": 2,
+      "reason": "Segment rate propagation, safe sample receipt and subtitle format notification.",
+      "roles": [
+        "edition-seam",
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/VideoRendererInputPin.h",
+      "maxAdded": 1,
+      "maxRemoved": 0,
+      "reason": "Retained segment-rate handoff field.",
+      "roles": [
+        "edition-seam"
+      ]
+    },
+    {
+      "path": "Source/csputils.cpp",
+      "maxAdded": 5,
+      "maxRemoved": 0,
+      "reason": "BT.709 transfer helper needed by existing HDR/subtitle compatibility.",
+      "roles": [
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/csputils.h",
+      "maxAdded": 2,
+      "maxRemoved": 0,
+      "reason": "Declaration of the retained transfer helper.",
+      "roles": [
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/dllmain.cpp",
+      "maxAdded": 3,
+      "maxRemoved": 1,
+      "reason": "Edition filter identity and compatibility property-page class factory.",
+      "roles": [
+        "edition-identity",
+        "edition-seam"
+      ]
+    },
+    {
+      "path": "Source/renbase2.cpp",
+      "maxAdded": 24,
+      "maxRemoved": 2,
+      "reason": "Minimal virtual scheduling/media-time/EOS integration and finite-clock-wait diagnostics.",
+      "roles": [
+        "edition-seam",
+        "native-compatibility"
+      ]
+    },
+    {
+      "path": "Source/renbase2.h",
+      "maxAdded": 13,
+      "maxRemoved": 0,
+      "reason": "Virtual dispatch seams used by Edition delivery without replacing the native base renderer.",
+      "roles": [
+        "edition-seam"
+      ]
+    },
+    {
+      "path": "Source/res/MpcVideoRenderer.rc2",
+      "maxAdded": 6,
+      "maxRemoved": 6,
+      "reason": "Edition binary identity and existing subtitle PQ shader resource.",
+      "roles": [
+        "edition-identity",
+        "resource-integration"
+      ]
+    },
+    {
+      "path": "Source/resource.h",
+      "maxAdded": 12,
+      "maxRemoved": 3,
+      "reason": "One Edition ID include and retained resource-editor counters.",
+      "roles": [
+        "resource-integration"
+      ]
+    },
+    {
+      "path": "Source/stdafx.cpp",
+      "maxAdded": 1,
+      "maxRemoved": 0,
+      "reason": "Retained local Include/Version.h spelling/path compatibility.",
+      "roles": [
+        "build-integration"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+// Edition-only dialogs. Language and resource symbols come from the parent RC.
+IDD_MFGPAGE DIALOGEX 0, 0, 350, 154
+STYLE DS_SETFONT | WS_CHILD
+FONT 9, "Segoe UI", 400, 0, 0x0
+BEGIN
+    GROUPBOX "DLSS Multi Frame Generation Extended",IDC_STATIC,7,5,336,60
+    CONTROL "Enable DLSS Multi Frame Generation (Auto)",IDC_MFG_MULTIPLIER,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,15,24,260,12
+    LTEXT "Auto follows source timing and display refresh rate.",IDC_STATIC,15,43,319,12
+    GROUPBOX "Live status / diagnostic",IDC_STATIC,7,70,336,75
+    EDITTEXT IDC_MFG_STATUS,15,84,319,53,ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL
+END
+

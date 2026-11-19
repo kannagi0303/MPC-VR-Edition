@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "commit": "6be828bfc415aa72286862e6e262eb652abd9a53",
+  "policy": "Review limits for public headers, shader sources and native build integration. Relocations are explicit. Approved absent examples remain absent; no automatic deletion is performed.",
+  "files": [
+    {
+      "path": "Include/Version.h",
+      "maxAdded": 6,
+      "maxRemoved": 0,
+      "reason": "Edition identity/version labels; public renderer interface headers otherwise remain pinned."
+    },
+    {
+      "path": "MpcVideoRenderer.sln",
+      "maxAdded": 19,
+      "maxRemoved": 0,
+      "reason": "Local dependency projects, NGX shim and offline converter solution wiring."
+    },
+    {
+      "path": "Shaders/Shaders.vcxproj",
+      "maxAdded": 13,
+      "maxRemoved": 31,
+      "reason": "Relocated build props, retained PQ subtitle shader and promoted Jinc shaders; unused upstream examples are omitted."
+    },
+    {
+      "path": "Shaders/Shaders.vcxproj.filters",
+      "maxAdded": 21,
+      "maxRemoved": 27,
+      "reason": "IDE mapping for retained subtitle/Jinc shaders and omitted examples."
+    },
+    {
+      "path": "Shaders/examples/ps_mpv.hlsl",
+      "maxAdded": 0,
+      "maxRemoved": 11,
+      "allowMissing": true,
+      "reason": "Upstream example source omitted from this Edition tree; not a renderer runtime dependency. Jinc variants are explicitly promoted to runtime paths in the shader project."
+    },
+    {
+      "path": "Shaders/examples/ps_resize_onepass_bilinear.hlsl",
+      "maxAdded": 0,
+      "maxRemoved": 32,
+      "allowMissing": true,
+      "reason": "Upstream example source omitted from this Edition tree; not a renderer runtime dependency. Jinc variants are explicitly promoted to runtime paths in the shader project."
+    },
+    {
+      "path": "Shaders/examples/ps_resize_onepass_catmull4.hlsl",
+      "maxAdded": 0,
+      "maxRemoved": 46,
+      "allowMissing": true,
+      "reason": "Upstream example source omitted from this Edition tree; not a renderer runtime dependency. Jinc variants are explicitly promoted to runtime paths in the shader project."
+    },
+    {
+      "path": "Shaders/examples/ps_resize_onepass_jinc2.hlsl",
+      "maxAdded": 0,
+      "maxRemoved": 100,
+      "allowMissing": true,
+      "reason": "Upstream example source omitted from this Edition tree; not a renderer runtime dependency. Jinc variants are explicitly promoted to runtime paths in the shader project."
+    },
+    {
+      "path": "Shaders/examples/ps_vlc.hlsl",
+      "maxAdded": 0,
+      "maxRemoved": 96,
+      "allowMissing": true,
+      "reason": "Upstream example source omitted from this Edition tree; not a renderer runtime dependency. Jinc variants are explicitly promoted to runtime paths in the shader project."
+    },
+    {
+      "path": "Shaders/examples/resizer_onepass_jinc2.hlsl",
+      "maxAdded": 0,
+      "maxRemoved": 88,
+      "allowMissing": true,
+      "reason": "Upstream example source omitted from this Edition tree; not a renderer runtime dependency. Jinc variants are explicitly promoted to runtime paths in the shader project."
+    },
+    {
+      "path": "Shaders/examples/vs_mpv.hlsl",
+      "maxAdded": 0,
+      "maxRemoved": 7,
+      "allowMissing": true,
+      "reason": "Upstream example source omitted from this Edition tree; not a renderer runtime dependency. Jinc variants are explicitly promoted to runtime paths in the shader project."
+    },
+    {
+      "path": "Shaders/examples/vs_vlc.hlsl",
+      "maxAdded": 0,
+      "maxRemoved": 17,
+      "allowMissing": true,
+      "reason": "Upstream example source omitted from this Edition tree; not a renderer runtime dependency. Jinc variants are explicitly promoted to runtime paths in the shader project."
+    },
+    {
+      "path": "update_revision.cmd",
+      "maxAdded": 10,
+      "maxRemoved": 1,
+      "reason": "Relocated script root and existing no-Git/uncommitted-build handling."
+    }
+  ]
+}

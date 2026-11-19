@@ -103,48 +103,14 @@ private:
 	friend class CDX11VideoProcessor;
 
 	// Options
+	static void ReadSettings(CRegKey& key, Settings_t& sets);
+	static void WriteSettings(CRegKey& key, const Settings_t& sets);
 	Settings_t m_Sets;
 
 	FILTER_STATE m_filterState = State_Stopped;
 	bool m_bFlushing = false;
 	bool m_bValidBuffer = false;
-	// Startup is not specific to MFG: SR, DLAA, VSR and MFG may all be
-	// preparing before the first picture is ready for the DirectShow clock.
-	std::atomic<bool> m_bStartupOverlayPending{ false };
-	std::atomic<unsigned> m_featureStatusPlaybackRun{ 0 };
-	// How often a picture's turn was cancelled after it had been scheduled, leaving
-	// the streaming thread with nothing that could ever wake it. Nothing should ever
-	// raise this; the statistics carry it because that is the only place it can be
-	// seen from, and because it is the proof that the freeze it prevents was real.
-	int m_nRenderWaitsBroken = 0;
-	// How often a picture's turn was still seconds away when the renderer had been
-	// handed only that one picture: the time it was scheduled against is not the time
-	// the clock is keeping. Counted apart from the one above because which of the two
-	// fires is what says where the fault is.
-	int m_nRenderWaitsLate = 0;
-	// What the last overdue turn looked like: how far away it still was, and how far
-	// the clock had moved since the one before it. A distance that stays the same
-	// while the clock runs normally means the renderer and the pictures it is fed are
-	// not measuring from the same place.
-	int m_msLastTurnAhead = 0;
-	int m_msClockSinceLastTurn = 0;
-	int m_msBaseSinceLastTurn = 0;
-	REFERENCE_TIME m_rtLastTurnClock = 0;
-	REFERENCE_TIME m_rtLastTurnBase = 0;
-	// Set when the clock was caught not moving between two turns given up on, and
-	// cleared by the first turn that arrives. While it is set the pictures are paced
-	// by the stream's own frame duration, because a stopped clock cannot be waited
-	// for and every picture after one looks further ahead than the last.
-	bool m_bClockStalled = false;
-	// When the next picture is due while the clock is stopped, in ticks. Kept from
-	// one picture to the next so the rate is the film's and not the film's minus
-	// whatever drawing cost.
-	ULONGLONG m_tickPictureDue = 0;
-	// Which filter gives the graph its clock, for the statistics: when that clock
-	// stops, the first thing worth knowing is whose it is. A fixed buffer because the
-	// statistics are drawn on another thread than the one that fills it.
-	wchar_t m_szClockName[64] = {};
-	void NoteWhoKeepsTime();
+#include "Edition/RendererTimingState.inc"
 
 	HWND m_hWnd           = nullptr;
 	// Thread-local keyboard hook for the DLSS toggle key. Scoped to the thread
@@ -185,33 +151,7 @@ private:
 	std::unique_ptr<CVideoProcessor> m_VideoProcessor;
 
 	CMediaType m_inputMT;
-	// The film the source reads, for the logo library: read when the input pin connects,
-	// and never asked of the graph again (CompleteConnect).
-	std::wstring m_strFilm;
-	std::optional<jvr::MediaProfile> m_jvrMediaProfile;
-	bool JvrProjectionRequested(const Settings_t& settings) const;
-	std::unique_ptr<class DecodedFrameLookahead> m_depthLookahead;
-	bool m_localFile = false;
-	std::unique_ptr<mfg::AvcPresentationClock> m_avcSourceClock;
-	unsigned m_correctedSourcePts = 0;
-	HRESULT ReceiveWithSourceTime(IMediaSample* sample);
-	void ResetSourceTime();
-	double m_completedSegmentRate = 1.0;
-	bool m_schedulingCompletedSample = false;
-	uint64_t m_completedEpoch = 0;
-	std::optional<HRESULT> ReceiveCompletedSample(IMediaSample* sample);
-	std::atomic<bool> m_completedEndOfStream{false};
-	HRESULT EndOfStream() override;
-	bool TryCompleteBufferedEndOfStream();
-	void OnReceiveMediaTime(IMediaSample* sample) override;
-	void ReportCompletedMediaTime(REFERENCE_TIME pts, REFERENCE_TIME end);
-	BOOL ScheduleSample(IMediaSample* sample) override;
-	HRESULT ReceiveScheduled(IMediaSample* sample, uint64_t epoch);
-	HRESULT WaitForRenderTime(uint64_t epoch);
-	bool LookaheadCancelled(uint64_t epoch) const;
-	bool PrefetchZipDepth(IMediaSample* sample, int64_t pts, uint64_t epoch);
-	void DrainLookahead();
-	void ReportLookaheadError(HRESULT hr);
+#include "Edition/RendererSourceState.inc"
 
 	ISubRenderCallback* m_pSubCallBack = nullptr;
 	ISubRender11Callback* m_pSub11CallBack = nullptr;

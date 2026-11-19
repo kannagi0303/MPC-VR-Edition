@@ -1,0 +1,511 @@
+{
+  "schemaVersion": 1,
+  "commit": "6be828bfc415aa72286862e6e262eb652abd9a53",
+  "scope": "Include, Shaders, solution and relocated upstream build configuration; excludes vendor/external and Edition-only build files.",
+  "files": [
+    {
+      "path": "Include/FilterInterfaces.h",
+      "localPath": "Include/FilterInterfaces.h",
+      "gitBlob": "f9c667ac8f803e2c0cddcdf04f8579314371ae8f",
+      "size": 3944
+    },
+    {
+      "path": "Include/FilterInterfacesImpl.h",
+      "localPath": "Include/FilterInterfacesImpl.h",
+      "gitBlob": "56b8e4f8ce77cc00379ed4d9310bf750763bcfcf",
+      "size": 2308
+    },
+    {
+      "path": "Include/ID3DFullscreenControl.h",
+      "localPath": "Include/ID3DFullscreenControl.h",
+      "gitBlob": "79243a431ad9cfa7ebb88774fa55e44f48981a12",
+      "size": 977
+    },
+    {
+      "path": "Include/ID3DVideoMemoryConfiguration.h",
+      "localPath": "Include/ID3DVideoMemoryConfiguration.h",
+      "gitBlob": "ccf97cbf4b1e0a7c95ceff69b03bcd372afea030",
+      "size": 3753
+    },
+    {
+      "path": "Include/IMediaSideData.h",
+      "localPath": "Include/IMediaSideData.h",
+      "gitBlob": "edd26eacbaf2c3cfcb5f8a7778674bd80672dc9e",
+      "size": 14241
+    },
+    {
+      "path": "Include/ISubRender.h",
+      "localPath": "Include/ISubRender.h",
+      "gitBlob": "da9283e7c92462f1aebcfe0aa1e9b015c3249f75",
+      "size": 2480
+    },
+    {
+      "path": "Include/ISubRender11.h",
+      "localPath": "Include/ISubRender11.h",
+      "gitBlob": "8a6be5b6cf21838490ac5ccd32a5dcfad4f5c578",
+      "size": 1592
+    },
+    {
+      "path": "Include/MediaTypes.h",
+      "localPath": "Include/MediaTypes.h",
+      "gitBlob": "6f198fb462ffc518fe88254e613b930d89771419",
+      "size": 2274
+    },
+    {
+      "path": "Include/SubRenderIntf.h",
+      "localPath": "Include/SubRenderIntf.h",
+      "gitBlob": "9fc542650c281ff345a7261f4cdb6977cfbf3a37",
+      "size": 21228
+    },
+    {
+      "path": "Include/Version.h",
+      "localPath": "Include/Version.h",
+      "gitBlob": "c047f6eb18f4530f1542e7238158d41c1e2c2a6d",
+      "size": 632
+    },
+    {
+      "path": "MpcVideoRenderer.sln",
+      "localPath": "MpcVideoRenderer.sln",
+      "gitBlob": "08c9f888f17560cac2f01da90c2db783db9c15b9",
+      "size": 4648
+    },
+    {
+      "path": "Shaders/Shaders.vcxproj",
+      "localPath": "Shaders/Shaders.vcxproj",
+      "gitBlob": "12c8fcf2e0be3c7c9133d2c8d9f10803bafabc83",
+      "size": 12319
+    },
+    {
+      "path": "Shaders/Shaders.vcxproj.filters",
+      "localPath": "Shaders/Shaders.vcxproj.filters",
+      "gitBlob": "e8ba0f4faff134880b8c04032ce87a920c85636a",
+      "size": 6049
+    },
+    {
+      "path": "Shaders/compile_shaders.cmd",
+      "localPath": "Shaders/compile_shaders.cmd",
+      "gitBlob": "6ae724625ff49bb954ecd3523fd299c131149d89",
+      "size": 6866
+    },
+    {
+      "path": "Shaders/convert/colorspace_gamut_conversion.hlsl",
+      "localPath": "Shaders/convert/colorspace_gamut_conversion.hlsl",
+      "gitBlob": "2521871b2c786cf3005b42eb114e3f4c0c3eefb4",
+      "size": 2929
+    },
+    {
+      "path": "Shaders/convert/conv_matrix.hlsl",
+      "localPath": "Shaders/convert/conv_matrix.hlsl",
+      "gitBlob": "4fc255a2948b6b6cd605106440914ff064e92a45",
+      "size": 487
+    },
+    {
+      "path": "Shaders/convert/hdr_tone_mapping.hlsl",
+      "localPath": "Shaders/convert/hdr_tone_mapping.hlsl",
+      "gitBlob": "e231f40d934fc7ad752a6c0d861d73181f1a34ce",
+      "size": 328
+    },
+    {
+      "path": "Shaders/convert/hdr_tone_mapping_spline.hlsl",
+      "localPath": "Shaders/convert/hdr_tone_mapping_spline.hlsl",
+      "gitBlob": "43be8630dc7bfb04b0e4c26047caa92aa81e87c8",
+      "size": 4988
+    },
+    {
+      "path": "Shaders/convert/hlg.hlsl",
+      "localPath": "Shaders/convert/hlg.hlsl",
+      "gitBlob": "b87faefe3e41325e659c73dfe96bbb0bc1d68fde",
+      "size": 534
+    },
+    {
+      "path": "Shaders/convert/st2084.hlsl",
+      "localPath": "Shaders/convert/st2084.hlsl",
+      "gitBlob": "c576dd109daf0b1d33aa9c9279d4d3e7063e945e",
+      "size": 789
+    },
+    {
+      "path": "Shaders/d3d11/cs_hdr_hist.hlsl",
+      "localPath": "Shaders/d3d11/cs_hdr_hist.hlsl",
+      "gitBlob": "907ff1e9f2bb50f94c58a417859003a67bb1b20e",
+      "size": 1882
+    },
+    {
+      "path": "Shaders/d3d11/cs_hdr_resolve.hlsl",
+      "localPath": "Shaders/d3d11/cs_hdr_resolve.hlsl",
+      "gitBlob": "c4f4fe1bf8f2a539d92a07b7a6bdf66b49162c20",
+      "size": 7438
+    },
+    {
+      "path": "Shaders/d3d11/ps_TEST.hlsl",
+      "localPath": "Shaders/d3d11/ps_TEST.hlsl",
+      "gitBlob": "c27f90e4848b27e5bbde25b0c7e3eecb84465066",
+      "size": 284
+    },
+    {
+      "path": "Shaders/d3d11/ps_convert_biplanar.hlsl",
+      "localPath": "Shaders/d3d11/ps_convert_biplanar.hlsl",
+      "gitBlob": "1c64266f6c707babdbfe75d9d76e69d7676f58c8",
+      "size": 688
+    },
+    {
+      "path": "Shaders/d3d11/ps_convert_bitmap_to_pq.hlsl",
+      "localPath": "Shaders/d3d11/ps_convert_bitmap_to_pq.hlsl",
+      "gitBlob": "b25d97a5797565452c6ae149478b8a827a6efe97",
+      "size": 1331
+    },
+    {
+      "path": "Shaders/d3d11/ps_convert_color.hlsl",
+      "localPath": "Shaders/d3d11/ps_convert_color.hlsl",
+      "gitBlob": "e57e90cd6d1738e8d1f6f2f0a98733f51bb8dc93",
+      "size": 1589
+    },
+    {
+      "path": "Shaders/d3d11/ps_convert_hlg_to_pq.hlsl",
+      "localPath": "Shaders/d3d11/ps_convert_hlg_to_pq.hlsl",
+      "gitBlob": "e448ed1b699fdcc21f873717f1d0db7520e5abb6",
+      "size": 515
+    },
+    {
+      "path": "Shaders/d3d11/ps_convert_planar.hlsl",
+      "localPath": "Shaders/d3d11/ps_convert_planar.hlsl",
+      "gitBlob": "61e87a1dc11f18c4096d57842cf988c539615fa3",
+      "size": 773
+    },
+    {
+      "path": "Shaders/d3d11/ps_convert_planar_yv.hlsl",
+      "localPath": "Shaders/d3d11/ps_convert_planar_yv.hlsl",
+      "gitBlob": "8f289ff52b5337599475cc822b73231b66f75494",
+      "size": 773
+    },
+    {
+      "path": "Shaders/d3d11/ps_convert_pq_to_sdr.hlsl",
+      "localPath": "Shaders/d3d11/ps_convert_pq_to_sdr.hlsl",
+      "gitBlob": "9d37dc785abe657c2193fc77e87ae48f0a9debae",
+      "size": 835
+    },
+    {
+      "path": "Shaders/d3d11/ps_convert_pq_to_sdr_tonemap.hlsl",
+      "localPath": "Shaders/d3d11/ps_convert_pq_to_sdr_tonemap.hlsl",
+      "gitBlob": "331383931f19c2ce2d0861a10daffaee387ac19b",
+      "size": 1773
+    },
+    {
+      "path": "Shaders/d3d11/ps_convert_pq_to_sdr_tonemap_measured.hlsl",
+      "localPath": "Shaders/d3d11/ps_convert_pq_to_sdr_tonemap_measured.hlsl",
+      "gitBlob": "a561ef3c0432b52f4c7fc83e468359f05c0eb128",
+      "size": 299
+    },
+    {
+      "path": "Shaders/d3d11/ps_convolution.hlsl",
+      "localPath": "Shaders/d3d11/ps_convolution.hlsl",
+      "gitBlob": "afec344adc941011272cc94183295d530cc332a3",
+      "size": 1142
+    },
+    {
+      "path": "Shaders/d3d11/ps_final_pass.hlsl",
+      "localPath": "Shaders/d3d11/ps_final_pass.hlsl",
+      "gitBlob": "e82a2b4d26ffc93abfc2d8d0a8bd276b5f7b2d5e",
+      "size": 671
+    },
+    {
+      "path": "Shaders/d3d11/ps_fix_bt2020.hlsl",
+      "localPath": "Shaders/d3d11/ps_fix_bt2020.hlsl",
+      "gitBlob": "19ee7f9ed3091d4afc49456c20bbf708864cd94e",
+      "size": 794
+    },
+    {
+      "path": "Shaders/d3d11/ps_fix_ycgco.hlsl",
+      "localPath": "Shaders/d3d11/ps_fix_ycgco.hlsl",
+      "gitBlob": "9d48e230b7f6dcee4bbe0446f0be0efb5bd0159e",
+      "size": 504
+    },
+    {
+      "path": "Shaders/d3d11/ps_fixconvert_hlg_to_sdr.hlsl",
+      "localPath": "Shaders/d3d11/ps_fixconvert_hlg_to_sdr.hlsl",
+      "gitBlob": "1b14a443d6de41e3a791f5dbe6dd968d51615d87",
+      "size": 1204
+    },
+    {
+      "path": "Shaders/d3d11/ps_fixconvert_hlg_to_sdr_tonemap.hlsl",
+      "localPath": "Shaders/d3d11/ps_fixconvert_hlg_to_sdr_tonemap.hlsl",
+      "gitBlob": "ad553f44c611a94b5dc0f5d79c26db64e9ab6473",
+      "size": 1766
+    },
+    {
+      "path": "Shaders/d3d11/ps_fixconvert_pq_to_sdr.hlsl",
+      "localPath": "Shaders/d3d11/ps_fixconvert_pq_to_sdr.hlsl",
+      "gitBlob": "ead992f9e58baf7b293a01466cf4a6564bc3dd4b",
+      "size": 1042
+    },
+    {
+      "path": "Shaders/d3d11/ps_fixconvert_pq_to_sdr_tonemap.hlsl",
+      "localPath": "Shaders/d3d11/ps_fixconvert_pq_to_sdr_tonemap.hlsl",
+      "gitBlob": "e408088e0b460403c3ac5c3ec872cea073f5d2f8",
+      "size": 1984
+    },
+    {
+      "path": "Shaders/d3d11/ps_fixconvert_pq_to_sdr_tonemap_measured.hlsl",
+      "localPath": "Shaders/d3d11/ps_fixconvert_pq_to_sdr_tonemap_measured.hlsl",
+      "gitBlob": "2e56c7771e59385d678be612c5d12a9c244e0b52",
+      "size": 305
+    },
+    {
+      "path": "Shaders/d3d11/ps_font.hlsl",
+      "localPath": "Shaders/d3d11/ps_font.hlsl",
+      "gitBlob": "a2be696ffc1e876b49b7c9b2031bb095fe0a0aeb",
+      "size": 319
+    },
+    {
+      "path": "Shaders/d3d11/ps_geometry.hlsl",
+      "localPath": "Shaders/d3d11/ps_geometry.hlsl",
+      "gitBlob": "c679aeba4a5bb6a30595a669b6dfac807c34de87",
+      "size": 185
+    },
+    {
+      "path": "Shaders/d3d11/ps_halfoverunder_to_interlace.hlsl",
+      "localPath": "Shaders/d3d11/ps_halfoverunder_to_interlace.hlsl",
+      "gitBlob": "d9e24f7e64a7b1792ff313e84d56612251648486",
+      "size": 587
+    },
+    {
+      "path": "Shaders/d3d11/ps_hdr10_tonemap.hlsl",
+      "localPath": "Shaders/d3d11/ps_hdr10_tonemap.hlsl",
+      "gitBlob": "612ff453d04f442ef5f9a0bdac9db4e8f489a2d6",
+      "size": 10997
+    },
+    {
+      "path": "Shaders/d3d11/ps_hdr10_tonemap_measured.hlsl",
+      "localPath": "Shaders/d3d11/ps_hdr10_tonemap_measured.hlsl",
+      "gitBlob": "2dfa5d8a233871b34f6fed8eb65977f430272ab0",
+      "size": 290
+    },
+    {
+      "path": "Shaders/d3d11/ps_interpolation_lanczos2.hlsl",
+      "localPath": "Shaders/d3d11/ps_interpolation_lanczos2.hlsl",
+      "gitBlob": "8436e356477d851aa586338476e1e8c77b773a40",
+      "size": 1893
+    },
+    {
+      "path": "Shaders/d3d11/ps_interpolation_lanczos3.hlsl",
+      "localPath": "Shaders/d3d11/ps_interpolation_lanczos3.hlsl",
+      "gitBlob": "8409acfb820347db52f9912da490d27c0dd6a7f5",
+      "size": 2411
+    },
+    {
+      "path": "Shaders/d3d11/ps_interpolation_spline4.hlsl",
+      "localPath": "Shaders/d3d11/ps_interpolation_spline4.hlsl",
+      "gitBlob": "fa2a4318e7632121cc1eced76d97c55d958eee18",
+      "size": 1871
+    },
+    {
+      "path": "Shaders/d3d11/ps_simple.hlsl",
+      "localPath": "Shaders/d3d11/ps_simple.hlsl",
+      "gitBlob": "93a6305548799bd7a3a07974de458359fdf50435",
+      "size": 228
+    },
+    {
+      "path": "Shaders/d3d11/vs_geometry.hlsl",
+      "localPath": "Shaders/d3d11/vs_geometry.hlsl",
+      "gitBlob": "28fe54b009b8a03542a8a3b4944c3398a29eb079",
+      "size": 252
+    },
+    {
+      "path": "Shaders/d3d11/vs_simple.hlsl",
+      "localPath": "Shaders/d3d11/vs_simple.hlsl",
+      "gitBlob": "b711339d540cd4f7df6e30887036ff8605dee7f4",
+      "size": 209
+    },
+    {
+      "path": "Shaders/d3d9/convert_biplanar.hlsl",
+      "localPath": "Shaders/d3d9/convert_biplanar.hlsl",
+      "gitBlob": "f9a84fb9c51b8d4d016c6b7e13855191209f679d",
+      "size": 492
+    },
+    {
+      "path": "Shaders/d3d9/convert_color.hlsl",
+      "localPath": "Shaders/d3d9/convert_color.hlsl",
+      "gitBlob": "af2610cfff2c8f951864b9c0d9d6a7061c022a07",
+      "size": 1469
+    },
+    {
+      "path": "Shaders/d3d9/convert_planar.hlsl",
+      "localPath": "Shaders/d3d9/convert_planar.hlsl",
+      "gitBlob": "66b39d5b27bd354f38426c9e178801475daba76f",
+      "size": 514
+    },
+    {
+      "path": "Shaders/d3d9/convert_planar_yv.hlsl",
+      "localPath": "Shaders/d3d9/convert_planar_yv.hlsl",
+      "gitBlob": "891cfca7d38bf88c04f01d3bf24c8643d3156979",
+      "size": 514
+    },
+    {
+      "path": "Shaders/d3d9/convolution.hlsl",
+      "localPath": "Shaders/d3d9/convolution.hlsl",
+      "gitBlob": "a446f63364193b00471c2d5815497b2f391c8924",
+      "size": 850
+    },
+    {
+      "path": "Shaders/d3d9/final_pass.hlsl",
+      "localPath": "Shaders/d3d9/final_pass.hlsl",
+      "gitBlob": "2c1604789c1bf73f45e99b03ee1c5767d4294d04",
+      "size": 482
+    },
+    {
+      "path": "Shaders/d3d9/fix_bt2020.hlsl",
+      "localPath": "Shaders/d3d9/fix_bt2020.hlsl",
+      "gitBlob": "fcfed82cec4a9b0601abd3d519ac70f70725af13",
+      "size": 669
+    },
+    {
+      "path": "Shaders/d3d9/fix_ycgco.hlsl",
+      "localPath": "Shaders/d3d9/fix_ycgco.hlsl",
+      "gitBlob": "a730e5a43e51847b9f382522c27c9eacc72b9f8e",
+      "size": 379
+    },
+    {
+      "path": "Shaders/d3d9/fixconvert_hlg_to_sdr.hlsl",
+      "localPath": "Shaders/d3d9/fixconvert_hlg_to_sdr.hlsl",
+      "gitBlob": "c95d690e07cb756f8b04404e63000e396ece3e57",
+      "size": 1100
+    },
+    {
+      "path": "Shaders/d3d9/fixconvert_hlg_to_sdr_tonemap.hlsl",
+      "localPath": "Shaders/d3d9/fixconvert_hlg_to_sdr_tonemap.hlsl",
+      "gitBlob": "d449d15d050f38263a132550892a78e1131b404a",
+      "size": 1599
+    },
+    {
+      "path": "Shaders/d3d9/fixconvert_pq_to_sdr.hlsl",
+      "localPath": "Shaders/d3d9/fixconvert_pq_to_sdr.hlsl",
+      "gitBlob": "1858f008d4e29adae167e2186f7f49bc673faca3",
+      "size": 938
+    },
+    {
+      "path": "Shaders/d3d9/fixconvert_pq_to_sdr_tonemap.hlsl",
+      "localPath": "Shaders/d3d9/fixconvert_pq_to_sdr_tonemap.hlsl",
+      "gitBlob": "c87eb83bd3962d3ed610e84c1114ae55843ac2d6",
+      "size": 1238
+    },
+    {
+      "path": "Shaders/d3d9/fixconvert_pq_to_sdr_tonemap_measured.hlsl",
+      "localPath": "Shaders/d3d9/fixconvert_pq_to_sdr_tonemap_measured.hlsl",
+      "gitBlob": "3219fada3453a32d5c77f6a1f7c54fad24664b04",
+      "size": 1700
+    },
+    {
+      "path": "Shaders/d3d9/halfoverunder_to_interlace.hlsl",
+      "localPath": "Shaders/d3d9/halfoverunder_to_interlace.hlsl",
+      "gitBlob": "0627b45542a3ff2a990591c60039d7764000c47b",
+      "size": 448
+    },
+    {
+      "path": "Shaders/d3d9/hdr_peak_down.hlsl",
+      "localPath": "Shaders/d3d9/hdr_peak_down.hlsl",
+      "gitBlob": "7e62cf4c9abf47062a228ecc772e1f3233a573d0",
+      "size": 1212
+    },
+    {
+      "path": "Shaders/d3d9/hdr_peak_first.hlsl",
+      "localPath": "Shaders/d3d9/hdr_peak_first.hlsl",
+      "gitBlob": "142d73685f595986063be427bfca505bc5332110",
+      "size": 2582
+    },
+    {
+      "path": "Shaders/d3d9/hdr_peak_state.hlsl",
+      "localPath": "Shaders/d3d9/hdr_peak_state.hlsl",
+      "gitBlob": "bb8d028bb44bbb47c20d3d9102289604e93f3a08",
+      "size": 3472
+    },
+    {
+      "path": "Shaders/d3d9/interpolation_lanczos2.hlsl",
+      "localPath": "Shaders/d3d9/interpolation_lanczos2.hlsl",
+      "gitBlob": "d65119e177c2cac582931f21090c269403dee7dc",
+      "size": 1372
+    },
+    {
+      "path": "Shaders/d3d9/interpolation_lanczos3.hlsl",
+      "localPath": "Shaders/d3d9/interpolation_lanczos3.hlsl",
+      "gitBlob": "f5eb09c3980d8ed955796033e5ac1b3dc05b1208",
+      "size": 1793
+    },
+    {
+      "path": "Shaders/d3d9/interpolation_spline4.hlsl",
+      "localPath": "Shaders/d3d9/interpolation_spline4.hlsl",
+      "gitBlob": "47d78efe45825557c60417b433dee5b2b21a7f6f",
+      "size": 1408
+    },
+    {
+      "path": "Shaders/examples/ps_mpv.hlsl",
+      "localPath": "Shaders/examples/ps_mpv.hlsl",
+      "gitBlob": "4ad591f4a6967c73b15d3050ae187c1d7fc9337d",
+      "size": 300
+    },
+    {
+      "path": "Shaders/examples/ps_resize_onepass_bilinear.hlsl",
+      "localPath": "Shaders/examples/ps_resize_onepass_bilinear.hlsl",
+      "gitBlob": "efc11fbc14e33b538ca9cfb2c68088c8fd57b2db",
+      "size": 697
+    },
+    {
+      "path": "Shaders/examples/ps_resize_onepass_catmull4.hlsl",
+      "localPath": "Shaders/examples/ps_resize_onepass_catmull4.hlsl",
+      "gitBlob": "be749c27b6d7b1269a04429f66384ad74a102581",
+      "size": 1508
+    },
+    {
+      "path": "Shaders/examples/ps_resize_onepass_jinc2.hlsl",
+      "localPath": "Shaders/examples/ps_resize_onepass_jinc2.hlsl",
+      "gitBlob": "1c52787133b9f77048d89625b8ec51820e04c3ff",
+      "size": 3249
+    },
+    {
+      "path": "Shaders/examples/ps_vlc.hlsl",
+      "localPath": "Shaders/examples/ps_vlc.hlsl",
+      "gitBlob": "de2bce6af42847f1d9d3150edc53f55d9a0b653b",
+      "size": 2402
+    },
+    {
+      "path": "Shaders/examples/resizer_onepass_jinc2.hlsl",
+      "localPath": "Shaders/examples/resizer_onepass_jinc2.hlsl",
+      "gitBlob": "442abbf5485bf5a2cf983f603f95dc0e69286f8b",
+      "size": 2994
+    },
+    {
+      "path": "Shaders/examples/vs_mpv.hlsl",
+      "localPath": "Shaders/examples/vs_mpv.hlsl",
+      "gitBlob": "97413e4328c1870ce0ed34dbaef5f57689069821",
+      "size": 239
+    },
+    {
+      "path": "Shaders/examples/vs_vlc.hlsl",
+      "localPath": "Shaders/examples/vs_vlc.hlsl",
+      "gitBlob": "ebf51a3639f23cafdd1a082a5935fa81d78bc76f",
+      "size": 276
+    },
+    {
+      "path": "Shaders/resize/convolution_filters.hlsl",
+      "localPath": "Shaders/resize/convolution_filters.hlsl",
+      "gitBlob": "4d80842b41b7ba187204493a98ba1feb83520cba",
+      "size": 1413
+    },
+    {
+      "path": "common.props",
+      "localPath": "build-support/common.props",
+      "gitBlob": "9ddbabe4a3bc4d031badefe67898cd6ae1bbf864",
+      "size": 5548
+    },
+    {
+      "path": "platform.props",
+      "localPath": "build-support/platform.props",
+      "gitBlob": "ba35f57ef66c82bda53a90ff22ec1683f321960b",
+      "size": 796
+    },
+    {
+      "path": "update_revision.cmd",
+      "localPath": "build-support/update_revision.cmd",
+      "gitBlob": "e9131f5f6100b6a6237e906bfe50d7903ed66887",
+      "size": 785
+    }
+  ]
+}

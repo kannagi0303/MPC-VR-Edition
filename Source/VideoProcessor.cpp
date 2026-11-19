@@ -112,42 +112,6 @@ void CVideoProcessor::UpdateStatsByDisplay()
 	}
 }
 
-bool CVideoProcessor::UpdateStatsLayout(const std::wstring& text)
-{
-	int lines = 1;
-	int columns = 0;
-	int column = 0;
-	for (const wchar_t c : text) {
-		if (c == L'\n') {
-			lines++;
-			columns = std::max(columns, column);
-			column = 0;
-		} else {
-			column++;
-		}
-	}
-	columns = std::clamp(std::max(columns, column), kStatsMinColumns, kStatsMaxColumns);
-
-	if (lines > m_StatsLines || columns > m_StatsColumns) {
-		m_StatsLines = std::max(lines, m_StatsLines);
-		m_StatsColumns = std::max(columns, m_StatsColumns);
-		m_StatsShrinkCount = 0;
-		return true;
-	}
-	if (lines < m_StatsLines || columns < m_StatsColumns) {
-		// About a second at any frame rate anyone plays films at.
-		if (++m_StatsShrinkCount < 30) {
-			return false;
-		}
-		m_StatsLines = lines;
-		m_StatsColumns = columns;
-		m_StatsShrinkCount = 0;
-		return true;
-	}
-	m_StatsShrinkCount = 0;
-	return false;
-}
-
 bool CVideoProcessor::CheckGraphPlacement() const
 {
 	return m_GraphRect.left >= 0 && m_GraphRect.top >= 0

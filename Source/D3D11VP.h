@@ -19,6 +19,7 @@
 */
 
 #pragma once
+#include <optional>
 
 #include <d3d11.h>
 #include <unordered_map>
@@ -249,6 +250,7 @@ private:
 	UINT m_nInputFrameOrField = 0;
 	bool m_bPresentFrame      = false;
 	bool m_bDecoderInput      = false;
+	std::optional<HRESULT> ApplyEditionSuperResPolicy(int mode);
 	bool m_bUseFutureFrames   = false;
 	UINT m_nPastFrames        = 0;
 	UINT m_nFutureFrames      = 0;

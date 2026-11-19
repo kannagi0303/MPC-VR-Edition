@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Source Files">
@@ -33,12 +33,6 @@
     <ClCompile Include="VideoRenderer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="DX11VideoProcessorCompletedFrames.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="DX11VideoProcessorSvdLut.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="Helper.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -46,33 +40,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="DX9VideoProcessor.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="SettingsPage\SettingsPage.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Mfg\FlowMotionCheck.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Mfg\DecodedFrameDifference.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="DLSS\DlssOpticalFlow.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="DLSS\ZipDepth.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="DLSS\ZipDepthGpu.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="DLSS\DecodedFrameLookahead.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="DLSS\ZipDepthNative.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="DLSS\DlssSR.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="DX11VideoProcessor.cpp">
@@ -178,57 +145,6 @@
     </ClInclude>
     <ClInclude Include="DX9VideoProcessor.h">
       <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="SettingsPage\SettingsPage.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DLSS\DlssOpticalFlow.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DLSS\ZipDepth.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DLSS\ZipDepthGpu.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DLSS\ZipDepthNative.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DLSS\SvdLutModel.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DLSS\SvdLutModel.inc">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DLSS\SvdLutShader.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DLSS\ZipDepthPack.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DLSS\ZipDepthGpuShaders.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DLSS\ZipDepthTemporalShaders.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DLSS\DecodedFrameLookahead.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DLSS\ZipDepthLookahead.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DLSS\DlssSR.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DLSS\NvOF\nvOpticalFlowCommon.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DLSS\NvOF\nvOpticalFlowD3D11.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DLSS\NgxRuntime.h">
-      <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="DX11VideoProcessor.h">
       <Filter>Header Files</Filter>

@@ -1,0 +1,396 @@
+{
+  "schemaVersion": 1,
+  "commit": "6be828bfc415aa72286862e6e262eb652abd9a53",
+  "files": [
+    {
+      "path": "Source/CustomAllocator.cpp",
+      "gitBlob": "1750ff3764305eb36fcde0a5de4942cb45359fc6",
+      "size": 5292
+    },
+    {
+      "path": "Source/CustomAllocator.h",
+      "gitBlob": "127910269aa07ba97b8cd8000663cc1f223fbb5a",
+      "size": 1709
+    },
+    {
+      "path": "Source/D3D11VP.cpp",
+      "gitBlob": "8330a6403279ec39f517a53d51ee0b60cf686fa6",
+      "size": 33595
+    },
+    {
+      "path": "Source/D3D11VP.h",
+      "gitBlob": "f9d879eb009d41bb5082e2aebd583838f301c923",
+      "size": 6987
+    },
+    {
+      "path": "Source/D3DUtil/D3D11Font.cpp",
+      "gitBlob": "9e1500306fc69b502410f273c071e2675b0679f2",
+      "size": 12310
+    },
+    {
+      "path": "Source/D3DUtil/D3D11Font.h",
+      "gitBlob": "2c70d43d5315c7272243d688a43e5b2f828f7e40",
+      "size": 2414
+    },
+    {
+      "path": "Source/D3DUtil/D3D11Geometry.cpp",
+      "gitBlob": "b2d4f0c43af1aaeddbd5bcafef00e6cf68927a02",
+      "size": 10054
+    },
+    {
+      "path": "Source/D3DUtil/D3D11Geometry.h",
+      "gitBlob": "3f10ad02c563b82d37c23ee42a6a86257deee057",
+      "size": 3932
+    },
+    {
+      "path": "Source/D3DUtil/D3D9Font.cpp",
+      "gitBlob": "ff75dbfd92cd76d72506a664e93abb1b886debe9",
+      "size": 10753
+    },
+    {
+      "path": "Source/D3DUtil/D3D9Font.h",
+      "gitBlob": "342f14595c950ecd78167af99c713d3237b14010",
+      "size": 2201
+    },
+    {
+      "path": "Source/D3DUtil/D3D9Geometry.cpp",
+      "gitBlob": "de870f859b6500aed71977f81533ffa9a05057f8",
+      "size": 6376
+    },
+    {
+      "path": "Source/D3DUtil/D3D9Geometry.h",
+      "gitBlob": "c0c2e693b638d54c12cd0bcb841746549ebef0a8",
+      "size": 3178
+    },
+    {
+      "path": "Source/D3DUtil/D3DCommon.h",
+      "gitBlob": "9c946ae8abee29fa68f97702c6a394ed19901da1",
+      "size": 895
+    },
+    {
+      "path": "Source/D3DUtil/FontBitmap.h",
+      "gitBlob": "c5116b83d15cb79902e75fc15007a148fab49a70",
+      "size": 14524
+    },
+    {
+      "path": "Source/DX11Helper.cpp",
+      "gitBlob": "d0e4b6807082deb1addc5d3fad6c384a343d152a",
+      "size": 5894
+    },
+    {
+      "path": "Source/DX11Helper.h",
+      "gitBlob": "82038e48adcc2c84636f3c85be3c7edc3c899b9f",
+      "size": 7899
+    },
+    {
+      "path": "Source/DX11VideoProcessor.cpp",
+      "gitBlob": "aca692ea4b8c91bea43c9f0728f3a0a73841d292",
+      "size": 172163
+    },
+    {
+      "path": "Source/DX11VideoProcessor.h",
+      "gitBlob": "6f158175b9be1ee5788fc8a68f0a9834136942e0",
+      "size": 14080
+    },
+    {
+      "path": "Source/DX9Helper.cpp",
+      "gitBlob": "115a5ea688f1fef68c882e2ace0e3fc51ec4d393",
+      "size": 4214
+    },
+    {
+      "path": "Source/DX9Helper.h",
+      "gitBlob": "8ba8e90f39b8ac727c3f0ad7b5722874190d50b3",
+      "size": 4442
+    },
+    {
+      "path": "Source/DX9VideoProcessor.cpp",
+      "gitBlob": "3d0f8fd43417b9b61469983da653cb60e7d0686f",
+      "size": 115491
+    },
+    {
+      "path": "Source/DX9VideoProcessor.h",
+      "gitBlob": "da7aabc32a957a7e9efab232f5d55fc4ef5f432b",
+      "size": 8547
+    },
+    {
+      "path": "Source/DXVA2VP.cpp",
+      "gitBlob": "934c772275bc63be4b9a0a99797f89acb5d14472",
+      "size": 18433
+    },
+    {
+      "path": "Source/DXVA2VP.h",
+      "gitBlob": "ec7567105216acf812927a162d199dcd873d50b1",
+      "size": 6888
+    },
+    {
+      "path": "Source/DisplayConfig.cpp",
+      "gitBlob": "53a43a911246a6cbc75d1642ec005cd2930ffdec",
+      "size": 12829
+    },
+    {
+      "path": "Source/DisplayConfig.h",
+      "gitBlob": "6405c359b5364d8d272e09cb47c8d0100a26741c",
+      "size": 4723
+    },
+    {
+      "path": "Source/FrameStats.h",
+      "gitBlob": "02c9f5c881798f713cab73ea8010e8f2a75b1740",
+      "size": 5081
+    },
+    {
+      "path": "Source/Helper.cpp",
+      "gitBlob": "5a6fd5791b066799addb2bb6656ceee8376b735a",
+      "size": 48554
+    },
+    {
+      "path": "Source/Helper.h",
+      "gitBlob": "385c073299f4be32c5109c8afb5be3704b18d360",
+      "size": 8003
+    },
+    {
+      "path": "Source/IVideoRenderer.h",
+      "gitBlob": "59e2887f9f76fcc6ce31d69cc5a116321a197ee2",
+      "size": 5934
+    },
+    {
+      "path": "Source/MediaSampleSideData.cpp",
+      "gitBlob": "34cee6ea8e185534c8e103dc9487abf29ff36265",
+      "size": 3528
+    },
+    {
+      "path": "Source/MediaSampleSideData.h",
+      "gitBlob": "d558046d5be83fa07cb38d5422014e8ccf91e9b9",
+      "size": 1756
+    },
+    {
+      "path": "Source/MpcVideoRenderer.def",
+      "gitBlob": "da0864e25c28ad6396f8088b7d160b930b25f3c5",
+      "size": 149
+    },
+    {
+      "path": "Source/MpcVideoRenderer.rc",
+      "gitBlob": "4a3de7997da07d5596652978600fb146e4ab2afb",
+      "size": 7950
+    },
+    {
+      "path": "Source/MpcVideoRenderer.vcxproj",
+      "gitBlob": "07a3be809a040d1818b5c8c87750ee754fe2bde8",
+      "size": 6740
+    },
+    {
+      "path": "Source/MpcVideoRenderer.vcxproj.filters",
+      "gitBlob": "01d62851ee0d420aaa94e737635a0299bb585dcc",
+      "size": 8360
+    },
+    {
+      "path": "Source/PropPage.cpp",
+      "gitBlob": "9351bda8a700bd708f02016b81a36bc53587bc58",
+      "size": 28584
+    },
+    {
+      "path": "Source/PropPage.h",
+      "gitBlob": "aae83c63e14f3031fe9dd4c42ce34f5beb962938",
+      "size": 2152
+    },
+    {
+      "path": "Source/Shaders.cpp",
+      "gitBlob": "7f6944fe4aa922b11d92c55a4d589bf5f667bf7e",
+      "size": 30959
+    },
+    {
+      "path": "Source/Shaders.h",
+      "gitBlob": "93c9a8a661fdab2f6da496169a164da5e95f0879",
+      "size": 1894
+    },
+    {
+      "path": "Source/SubPic/DX11SubPic.cpp",
+      "gitBlob": "503c6052895072ae1d0e1d466b6a52fb4c887737",
+      "size": 16710
+    },
+    {
+      "path": "Source/SubPic/DX11SubPic.h",
+      "gitBlob": "1c32eaa32b8ffb04354f275d2d4a6fc5a658a5e8",
+      "size": 2770
+    },
+    {
+      "path": "Source/SubPic/DX9SubPic.cpp",
+      "gitBlob": "d3f4596fb1638346567112a3e9b482dfdb279b71",
+      "size": 11683
+    },
+    {
+      "path": "Source/SubPic/DX9SubPic.h",
+      "gitBlob": "5c0400d6bf8a84cd37af8ac541ea273f88786883",
+      "size": 2280
+    },
+    {
+      "path": "Source/SubPic/ISubPic.h",
+      "gitBlob": "5b66e66a3098dc584f69d83a254ecc9f80a40e13",
+      "size": 6072
+    },
+    {
+      "path": "Source/SubPic/SubPicImpl.cpp",
+      "gitBlob": "5807cbe5967742cb0c0b0e5e7d31a70e3944d390",
+      "size": 8731
+    },
+    {
+      "path": "Source/SubPic/SubPicImpl.h",
+      "gitBlob": "e323bacaeedbf5ba60ae66dfb3dfd3b751995e1c",
+      "size": 5645
+    },
+    {
+      "path": "Source/SubPic/SubPicQueueImpl.cpp",
+      "gitBlob": "0a539146cd86b0151c427c41a70a3efdecd0a118",
+      "size": 21981
+    },
+    {
+      "path": "Source/SubPic/SubPicQueueImpl.h",
+      "gitBlob": "47a73784adec22985543102cf64165a187781392",
+      "size": 5500
+    },
+    {
+      "path": "Source/SubPic/XySubPicProvider.cpp",
+      "gitBlob": "52f1b6e5f680dad4572b511a922cda8177562daa",
+      "size": 3450
+    },
+    {
+      "path": "Source/SubPic/XySubPicProvider.h",
+      "gitBlob": "1d79f078eb434b14df8f88240db0bda95c5eff3c",
+      "size": 2617
+    },
+    {
+      "path": "Source/SubPic/XySubPicQueueImpl.cpp",
+      "gitBlob": "961ed4d38fe97277b03cd13ca77a10e8c437445e",
+      "size": 4071
+    },
+    {
+      "path": "Source/SubPic/XySubPicQueueImpl.h",
+      "gitBlob": "31f53b7a14a22d4dca1406b9581b8155b0aa3a25",
+      "size": 1267
+    },
+    {
+      "path": "Source/Times.cpp",
+      "gitBlob": "b6f84e7a0770ab4e1155ec3a0b104d500fd4504f",
+      "size": 1554
+    },
+    {
+      "path": "Source/Times.h",
+      "gitBlob": "fe33277dc55de074b1853c9a2639d063531b43b7",
+      "size": 846
+    },
+    {
+      "path": "Source/Utils/CPUInfo.cpp",
+      "gitBlob": "95d4430726ef712061dd4a7e28829585b0004cad",
+      "size": 4258
+    },
+    {
+      "path": "Source/Utils/CPUInfo.h",
+      "gitBlob": "a8d5b03465032436e848d35d30b2ea2dc3df4129",
+      "size": 660
+    },
+    {
+      "path": "Source/Utils/StringUtil.cpp",
+      "gitBlob": "c46620a750d02f1e6d8a5531da9d47cc2af1aa4a",
+      "size": 2917
+    },
+    {
+      "path": "Source/Utils/StringUtil.h",
+      "gitBlob": "13ebe266c195a9f2852bc0514c2f260992f0e0a8",
+      "size": 3847
+    },
+    {
+      "path": "Source/Utils/Util.cpp",
+      "gitBlob": "63696185c23905b67fdfe6021b9ee8541f201f8c",
+      "size": 6681
+    },
+    {
+      "path": "Source/Utils/Util.h",
+      "gitBlob": "3cfea8bccabd0a434084bbab5d774cbc765e572b",
+      "size": 2237
+    },
+    {
+      "path": "Source/Utils/gpu_memcpy_sse4.h",
+      "gitBlob": "804d9d2fbf50662a518fb7734e0e69f292f46021",
+      "size": 4535
+    },
+    {
+      "path": "Source/VideoProcessor.cpp",
+      "gitBlob": "e174f5b1ae3949bcb18183175b88be88e886381d",
+      "size": 11808
+    },
+    {
+      "path": "Source/VideoProcessor.h",
+      "gitBlob": "08192b49cf2a5c69dd2eaaa948c47a5e6205dd2f",
+      "size": 12081
+    },
+    {
+      "path": "Source/VideoRenderer.cpp",
+      "gitBlob": "81996ffe586044f5e6a51c1a1db386b93a1c888f",
+      "size": 54686
+    },
+    {
+      "path": "Source/VideoRenderer.h",
+      "gitBlob": "7bc4fba80361e32602d9d53d7dd0832478f672e5",
+      "size": 14545
+    },
+    {
+      "path": "Source/VideoRendererInputPin.cpp",
+      "gitBlob": "bd13305d03504a5f0218ad4ae553603810fe3075",
+      "size": 6468
+    },
+    {
+      "path": "Source/VideoRendererInputPin.h",
+      "gitBlob": "133a52ed7b8af00744750866e241e0f44158e1ba",
+      "size": 2518
+    },
+    {
+      "path": "Source/csputils.cpp",
+      "gitBlob": "54eace97aceff217ff713bcfbe10026062d9b709",
+      "size": 18878
+    },
+    {
+      "path": "Source/csputils.h",
+      "gitBlob": "e125cb4da2c15957101afaea533d74f7468f03fe",
+      "size": 5234
+    },
+    {
+      "path": "Source/dllmain.cpp",
+      "gitBlob": "5dfbc2ed69826f0119b52e65f3d2aeee8ca27a78",
+      "size": 3998
+    },
+    {
+      "path": "Source/renbase2.cpp",
+      "gitBlob": "6aff6d22afe26277e2142a8ec9649e922eb56915",
+      "size": 38475
+    },
+    {
+      "path": "Source/renbase2.h",
+      "gitBlob": "1d26210524f1b26fe873bad5e613b366ada5ccf1",
+      "size": 10582
+    },
+    {
+      "path": "Source/res/MpcVideoRenderer.rc2",
+      "gitBlob": "282a00d25e0cab14f8f65d2ef083ddb93e61b304",
+      "size": 11129
+    },
+    {
+      "path": "Source/res/dither32x32float16.bin",
+      "gitBlob": "acf2f0702be62bcb63dcea72ecf4cf2e450c42e8",
+      "size": 2048
+    },
+    {
+      "path": "Source/resource.h",
+      "gitBlob": "3fefb378b6b8b91b81c22ed134c44f48f9bf976e",
+      "size": 7088
+    },
+    {
+      "path": "Source/stdafx.cpp",
+      "gitBlob": "34676d2e6b12e81ad8c88cb5b15c0ba49804e8a7",
+      "size": 1085
+    },
+    {
+      "path": "Source/stdafx.h",
+      "gitBlob": "80c30d0e954010c34fd25d65273d8684c37e9226",
+      "size": 1543
+    }
+  ]
+}

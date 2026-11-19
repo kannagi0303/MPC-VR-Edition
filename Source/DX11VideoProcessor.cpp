@@ -19,8 +19,6 @@
 */
 
 #include "stdafx.h"
-#include "Mfg/SettingsScope.h"
-#include "Mfg/DisplayCadence.h"
 #include <uuids.h>
 #include <Mferror.h>
 #include <Mfidl.h>
@@ -29,11 +27,11 @@
 #include <limits>
 #include "Helper.h"
 #include "Times.h"
-#include "Mfg/CadenceTrace.h"
 #include "resource.h"
 #include "VideoRenderer.h"
 #include "Version.h"
 #include "DX11VideoProcessor.h"
+#include "Edition/VideoFrame.h"
 #include <ID3DVideoMemoryConfiguration.h>
 #include "Shaders.h"
 #include "Utils/CPUInfo.h"
@@ -121,12 +119,6 @@ struct VERTEX {
 	DirectX::XMFLOAT2 TexCoord;
 };
 
-struct DEPTH3D_VERTEX {
-	DirectX::XMFLOAT2 Pos;
-	DirectX::XMFLOAT2 TexCoord;
-	DirectX::XMFLOAT2 DepthCoord;
-};
-
 struct PS_EXTSHADER_CONSTANTS {
 	DirectX::XMFLOAT2 pxy; // pixel size in normalized coordinates
 	DirectX::XMFLOAT2 wh;  // width and height of texture
@@ -189,7 +181,7 @@ static void FillVertices(VERTEX (&Vertices)[4], const UINT srcW, const UINT srcH
 	Vertices[3] = { {(float)points[3].x, (float)points[3].y, 0}, {src_r, src_t} };
 }
 
-static HRESULT CreateVertexBuffer(ID3D11Device* pDevice, ID3D11Buffer** ppVertexBuffer,
+HRESULT CDX11VideoProcessor::CreateVertexBuffer(ID3D11Device* pDevice, ID3D11Buffer** ppVertexBuffer,
 	const UINT srcW, const UINT srcH, const RECT& srcRect,
 	const int iRotation, const bool bFlip)
 {
@@ -208,7 +200,7 @@ static HRESULT CreateVertexBuffer(ID3D11Device* pDevice, ID3D11Buffer** ppVertex
 	return hr;
 }
 
-static HRESULT FillVertexBuffer(ID3D11DeviceContext* pDeviceContext, ID3D11Buffer* pVertexBuffer,
+HRESULT CDX11VideoProcessor::FillVertexBuffer(ID3D11DeviceContext* pDeviceContext, ID3D11Buffer* pVertexBuffer,
 	const UINT srcW, const UINT srcH, const RECT& srcRect,
 	const int iRotation, const bool bFlip)
 {
@@ -230,7 +222,7 @@ static HRESULT FillVertexBuffer(ID3D11DeviceContext* pDeviceContext, ID3D11Buffe
 	return hr;
 }
 
-static void TextureBlt11(
+void CDX11VideoProcessor::TextureBlt11(
 	ID3D11DeviceContext* pDeviceContext,
 	ID3D11RenderTargetView* pRenderTargetView, D3D11_VIEWPORT& viewport,
 	ID3D11InputLayout* pInputLayout,
@@ -240,8 +232,8 @@ static void TextureBlt11(
 	ID3D11SamplerState* pSampler,
 	ID3D11Buffer* pConstantBuffer,
 	ID3D11Buffer* pVertexBuffer,
-	ID3D11BlendState* pBlendState = nullptr,
-	const FLOAT* pBlendFactor = nullptr)
+	ID3D11BlendState* pBlendState,
+	const FLOAT* pBlendFactor)
 {
 	ASSERT(pDeviceContext);
 	ASSERT(pRenderTargetView);
@@ -391,34 +383,11 @@ HRESULT CDX11VideoProcessor::TextureResizeShader(
 
 // CDX11VideoProcessor
 
-static void ApplyJvrPlaybackMode(Settings_t& config, bool projectJvr)
-{
-	if (!projectJvr) return;
-
-	// The decoder VP must deliver source colour for projection. Its RTX
-	// enhancements would operate on both eyes before the RGB source exists.
-	config.iVPSuperRes = SUPERRES_Disable;
-	config.bVPRTXVideoHDR = false;
-}
-
 CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Settings_t& requested, HRESULT& hr)
 	: CVideoProcessor(pFilter)
 {
 	Settings_t config = requested;
-	mfg::EnforceScope(config);
-	m_jvrFlatView = m_pFilter->JvrProjectionRequested(config);
-	ApplyJvrPlaybackMode(config, m_jvrFlatView);
-	ConfigureJvrProjection(config);
-	m_mfgMultiplier=(config.bUseD3D11 ? config.iMfgMultiplier : 0);m_rtVideoDelay=config.iVideoDelay*10000LL;
-    m_mfgProcessingMode = config.iMfgProcessingMode <= 1 ? config.iMfgProcessingMode : 0;
-	m_svdLut.strength = config.GetSvdLutStrength();
-	m_useZipDepthSr = config.bUseZipDepthSr;
-	m_useZipDepthMfg = config.bUseZipDepthMfg;
-	m_adaptiveMfgDepth = config.bAdaptiveMfgDepth;
-	m_showMfgMotion = config.bShowMfgMotion;
-	m_showDepthOverlay = config.bShowDepthOverlay;
-	m_depth3DPreview = config.bDepth3DPreview;
-	m_mfgLowMotionEnabled = config.bMfgLowMotion;
+	InitializeEdition(config);
 	m_bShowStats           = config.bShowStats;
 	m_showFeatureStatus.store(config.bShowFeatureBadges, std::memory_order_relaxed);
 	m_iResizeStats         = config.iResizeStats;
@@ -500,8 +469,7 @@ CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Setti
 
 CDX11VideoProcessor::~CDX11VideoProcessor()
 {
-	m_fastShutdown = true;
-	m_completedPresenter.Stop();
+	BeginEditionShutdown();
 	for (const auto& [displayName, state] : m_hdrModeSavedState) {
 		DisplayConfig_t displayConfig = {};
 		if (GetDisplayConfig(displayName.c_str(), displayConfig)) {
@@ -712,13 +680,7 @@ bool CDX11VideoProcessor::Initialized() const
 
 void CDX11VideoProcessor::ReleaseVP()
 {
-	m_zipDepth.ResetHistory();
-	m_dlssSRAfterMfg = false;
-	m_dlssSR.Reset();
-	m_dlssSRSource.Release();
-	m_depthOverlayCapture.Release();
-    // A media-format change also invalidates the dedicated post-MFG VP.
-    if(m_mfgPostVsrReady || m_mfgPostVsrBroken) StopMfg();
+	ResetEditionVideoProcessor();
 	DLog(L"CDX11VideoProcessor::ReleaseVP()");
 
 	m_pFilter->ResetStreamingTimes2();
@@ -754,10 +716,7 @@ void CDX11VideoProcessor::ReleaseVP()
 
 void CDX11VideoProcessor::ReleaseDevice()
 {
-	ClearCompletedFrames(true);
-	StopMfg(true, m_fastShutdown);
-	m_zipDepth.Stop(m_fastShutdown);
-	ReleaseSvdLut();
+	StopEditionDevice();
 	DLog(L"CDX11VideoProcessor::ReleaseDevice()");
 
 	ReleaseVP();
@@ -800,30 +759,16 @@ void CDX11VideoProcessor::ReleaseDevice()
 	m_pHDR10ToneMappingConstants.Release();
 	m_pDoViDynamicConstants.Release();
 
+#if TEST_SHADER
+	m_pPS_TEST.Release();
+#endif
+
 	m_pVSimpleInputLayout.Release();
 	m_pVS_Simple.Release();
 	m_pPS_Simple.Release();
-	m_jvrShader.Release();
-	m_jvrConstants.Release();
-	m_jvrShaderFailed = false;
+	ReleaseEditionProjectionResources();
 	m_pPS_BitmapToFrame.Release();
-	m_pPS_DepthOverlay.Release();
-	m_pDepthOverlayBlendState.Release();
-	m_pDepthOverlayConstants.Release();
-	m_pVS_Depth3DPreview.Release();
-	m_pPS_Depth3DPreview.Release();
-	m_pVDepth3DPreviewInputLayout.Release();
-	m_pDepth3DPreviewConstants.Release();
-	m_pDepth3DPreviewVertexBuffer.Release();
-	m_pDepth3DPreviewIndexBuffer.Release();
-	m_pDepth3DPreviewRasterizer.Release();
-	m_depth3DPreviewIndexCount = 0;
-	m_depth3DPreviewTexture.Release();
-	m_pMfgMotionShader.Release();
-	m_pMfgMotionBlend.Release();
-	m_pMfgMotionConstants.Release();
-	m_depthOverlayShaderFailed = false;
-	m_depth3DPreviewShaderFailed = false;
+	ReleaseEditionOverlayResources();
 	m_pSamplerPoint.Release();
 	m_pSamplerLinear.Release();
 	m_pSamplerDither.Release();
@@ -1716,6 +1661,10 @@ HRESULT CDX11VideoProcessor::SetDevice(ID3D11Device *pDevice, ID3D11DeviceContex
 
 	EXECUTE_ASSERT(S_OK == CreatePShaderFromResource(&m_pPS_Simple, IDF_PS_11_SIMPLE));
 
+#if TEST_SHADER
+	EXECUTE_ASSERT(S_OK == CreatePShaderFromResource(&m_pPS_TEST, IDF_PS_11_TEST));
+#endif
+
 	D3D11_BUFFER_DESC BufferDesc = { sizeof(VERTEX) * 4, D3D11_USAGE_DYNAMIC, D3D11_BIND_VERTEX_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0 };
 	EXECUTE_ASSERT(S_OK == m_pDevice->CreateBuffer(&BufferDesc, nullptr, &m_pVertexBuffer));
 
@@ -2563,125 +2512,9 @@ BOOL CDX11VideoProcessor::GetAlignmentSize(const CMediaType& mt, SIZE& Size)
 	return FALSE;
 }
 
-namespace {
-class LookaheadSample final : public CMediaSample, public IMediaSampleD3D11 {
-    CComPtr<CMemAllocator> m_allocator;
-    CComPtr<ID3D11Texture2D> m_texture;
-public:
-    LookaheadSample(CMemAllocator* allocator, ID3D11Texture2D* texture)
-        : CMediaSample(L"ZipDepth lookahead sample", allocator, nullptr), m_allocator(allocator), m_texture(texture) {}
-
-    STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
-        if (iid == __uuidof(IMediaSampleD3D11)) return GetInterface(static_cast<IMediaSampleD3D11*>(this), out);
-        return CMediaSample::QueryInterface(iid, out);
-    }
-    STDMETHODIMP_(ULONG) AddRef() override { return CMediaSample::AddRef(); }
-    STDMETHODIMP_(ULONG) Release() override {
-        const LONG refs = InterlockedDecrement(&m_cRef);
-        if (!refs) delete this;
-        return refs;
-    }
-    STDMETHODIMP GetD3D11Texture(int view, ID3D11Texture2D** texture, UINT* slice) override {
-        if (!texture || !slice) return E_POINTER;
-        if (view) return E_INVALIDARG;
-        *slice = 0;
-        return m_texture.CopyTo(texture);
-    }
-};
-}
-
-CComPtr<IMediaSample> CDX11VideoProcessor::CloneLookaheadSample(IMediaSample* sample, int64_t& pts, uint64_t& bytes)
-{
-    if (CanProjectJvr() || !m_pDeviceContext || !m_pDevice || (!UsesZipDepthMfg() && !UsesZipDepthSr()) ||
-        !MfgDepthSourceEligible() || m_bInterlaced || m_srcDXGIFormat != DXGI_FORMAT_NV12 ||
-        m_srcExFmt.VideoTransferMatrix != DXVA2_VideoTransferMatrix_BT709 ||
-        sample->IsDiscontinuity() == S_OK || sample->IsPreroll() == S_OK)
-        return {};
-    REFERENCE_TIME end = 0;
-    if (sample->GetTime(&pts, &end) != S_OK || pts < 0 || end <= pts) return {};
-    AM_MEDIA_TYPE* changedType = nullptr;
-    if (sample->GetMediaType(&changedType) == S_OK) {
-        DeleteMediaType(changedType);
-        return {};
-    }
-    if (CComQIPtr<IMediaSideData> sideData = sample) {
-        const BYTE* data = nullptr;
-        size_t size = 0;
-        if (SUCCEEDED(sideData->GetSideData(IID_MediaSideDataDOVIMetadataV2, &data, &size)) && size) return {};
-    }
-    const CComQIPtr<IMediaSampleD3D11> decoded(sample);
-    CComPtr<ID3D11Texture2D> input;
-    UINT slice = 0;
-    if (!decoded || FAILED(decoded->GetD3D11Texture(0, &input, &slice)) || !input) return {};
-    CComPtr<ID3D11Device> owner;
-    input->GetDevice(&owner);
-    if (owner.p != static_cast<ID3D11Device*>(m_pDevice.p)) return {};
-    D3D11_TEXTURE2D_DESC desc{};
-    input->GetDesc(&desc);
-    if (desc.Format != DXGI_FORMAT_NV12 || desc.MipLevels != 1 || slice >= desc.ArraySize ||
-        desc.Width < m_srcWidth || desc.Height < m_srcHeight)
-        return {};
-    desc.ArraySize = 1;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    if (m_D3D11VP.IsReady()) desc.BindFlags |= D3D11_BIND_RENDER_TARGET;
-    desc.CPUAccessFlags = desc.MiscFlags = 0;
-    CComPtr<ID3D11Texture2D> copy;
-    if (FAILED(m_pDevice->CreateTexture2D(&desc, nullptr, &copy))) return {};
-    // Check the VP view before acknowledging a sample as queued for later use.
-    if (m_D3D11VP.IsReady() && FAILED(m_D3D11VP.CheckInputTexture(copy))) return {};
-    if (!m_lookaheadAllocator) {
-        HRESULT hr = S_OK;
-        auto* allocator = new(std::nothrow) CMemAllocator(L"ZipDepth lookahead", nullptr, &hr);
-        if (!allocator || FAILED(hr)) {
-            delete allocator;
-            return {};
-        }
-        m_lookaheadAllocator = allocator;
-    }
-    auto* packet = new(std::nothrow) LookaheadSample(m_lookaheadAllocator, copy);
-    if (!packet) return {};
-    CComPtr<IMediaSample> result(static_cast<IMediaSample*>(packet));
-    packet->SetTime(&pts, &end);
-    packet->SetSyncPoint(sample->IsSyncPoint() == S_OK);
-    LONGLONG mediaStart = 0, mediaEnd = 0;
-    if (sample->GetMediaTime(&mediaStart, &mediaEnd) == S_OK) packet->SetMediaTime(&mediaStart, &mediaEnd);
-    m_pDeviceContext->CopySubresourceRegion(copy, 0, 0, 0, 0, input, slice, nullptr);
-    bytes = uint64_t(desc.Width) * desc.Height * 3 / 2;
-    return result;
-}
-
-bool CDX11VideoProcessor::PrefetchZipDepth(IMediaSample* sample, int64_t pts)
-{
-    if (CanProjectJvr() || (!UsesZipDepthMfg() && !UsesZipDepthSr()) || !m_pDevice || !m_pDeviceContext || !MfgDepthSourceEligible())
-        return true;
-    CComQIPtr<IMediaSampleD3D11> decoded(sample);
-    CComPtr<ID3D11Texture2D> texture;
-    UINT slice = 0;
-    if (!decoded || FAILED(decoded->GetD3D11Texture(0, &texture, &slice)) || !texture || slice) return true;
-    CComPtr<ID3D11Device> owner;
-    texture->GetDevice(&owner);
-    if (owner.p != static_cast<ID3D11Device*>(m_pDevice.p)) return true;
-    return m_zipDepth.PrefetchNv12(m_pDevice, m_pDeviceContext, texture, m_srcRect,
-        m_srcExFmt.NominalRange == DXVA2_NominalRange_0_255, pts);
-}
-
 HRESULT CDX11VideoProcessor::ProcessSample(IMediaSample* pSample)
 {
-	// The decoder can explicitly mark a discontinuity even when timestamps
-	// remain monotonic (e.g. a stream splice or a new segment). Never allow
-	// DLSS SR to reproject history across that boundary. Restart duplicate
-	// detection and interpolation history after a splice or new segment.
-	if (pSample->IsDiscontinuity() == S_OK) {
-		if (m_mfgMultiplier) {
-			StopMfg(false);
-			m_mfg.ResetHistory();
-			m_mfgAutoEpoch = m_mfgAutoLastPts = -1;
-		}
-		m_dlssSR.ResetHistory();
-		m_zipDepth.ResetHistory();
-		m_D3D11VP.ResetFrameOrder();
-	}
+	BeginEditionSample(pSample);
 	REFERENCE_TIME rtStart = 0, rtEnd = 0;
 	const HRESULT timing = pSample->GetTime(&rtStart, &rtEnd);
 	if (FAILED(timing)) {
@@ -3147,11 +2980,7 @@ HRESULT CDX11VideoProcessor::CopySample(IMediaSample* pSample)
 			// do not use UpdateSubresource for D3D11 VP here
 			// because it can cause green screens and freezes on some configurations
 			hr = MemCopyToTexSrcVideo(data, m_srcPitch);
-			if (SUCCEEDED(hr) && !CanProjectJvr() && MfgFrameAnalysisEligible() && m_srcDXGIFormat == DXGI_FORMAT_NV12 &&
-			    m_srcPitch > 0 && m_srcLines >= m_srcHeight + m_srcHeight / 2) {
-				m_mfgDecodedDifference.SubmitCpuNv12(data, m_srcPitch, m_srcHeight, m_srcRect, m_rtStart, m_mfgLowMotionEnabled);
-				comparedCpuNv12 = true;
-			}
+			comparedCpuNv12 = AnalyzeEditionCpuNv12(data, hr);
 			if (SUCCEEDED(hr) && m_D3D11VP.IsReady()) {
 				// ID3D11VideoProcessor does not use textures with D3D11_CPU_ACCESS_WRITE flag
 				m_pDeviceContext->CopyResource(m_D3D11VP.GetNextInputTexture(m_SampleFormat), m_TexSrcVideo.pTexture);
@@ -3159,16 +2988,7 @@ HRESULT CDX11VideoProcessor::CopySample(IMediaSample* pSample)
 		}
 	}
 
-	if (!comparedCpuNv12 && !CanProjectJvr() && MfgFrameAnalysisEligible() && SUCCEEDED(hr)) {
-		if (m_D3D11VP.IsReady()) {
-			const auto held = m_D3D11VP.HoldFrame();
-			m_mfgDecodedDifference.Submit(m_pDevice, m_pDeviceContext, held.pTexture,
-				held.ArraySlice, m_srcRect, m_rtStart);
-		} else {
-			m_mfgDecodedDifference.Submit(m_pDevice, m_pDeviceContext, m_TexSrcVideo.pTexture,
-				0, m_srcRect, m_rtStart);
-		}
-	}
+	AnalyzeEditionDecodedFrame(hr, comparedCpuNv12);
 
 	if (updateStats) {
 		UpdateStatsStatic();
@@ -3184,69 +3004,13 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 	CheckPointer(m_TexSrcVideo.pTexture, E_FAIL);
 	CheckPointer(m_pDXGISwapChain1, E_FAIL);
 
-	const bool mfgConfigured = m_mfgMultiplier.load(std::memory_order_relaxed) >= 2;
-	const bool mfgBypassed = mfgConfigured && MfgSourceMeetsDisplayRate();
-	const bool mfgEnabledForRate = mfgConfigured && !mfgBypassed;
-	if (field && mfgBypassed && m_mfgInputModeKnown) {
-		// Scheduled input has drained legacy originals. Completed originals
-		// already own their surfaces and retain their existing deadlines.
-		StopMfg(false);
-		if (!m_mfg.Failed()) m_mfg.ResetHistory();
-		m_mfgAutoEpoch = m_mfgAutoLastPts = -1;
-		m_mfgInputModeKnown = false;
-	}
-
-	// Buffered video-only frames apply the window size at presentation.
-	if (!m_completingSample) {
-		if (field || !m_completedLast) {
-			const auto resizeHr = ApplyPendingWindowResize();
-			if (FAILED(resizeHr)) return resizeHr;
-		}
-		UpdateProcessingResolution();
-	}
-	if (!field && m_completedLast && (!CanProjectJvr() || m_pFilter->m_filterState == State_Running ||
-	    m_completedLast->pts != m_rtStart)) {
-		return PresentCompletedVideo(*m_completedLast);
-	}
-	if (field && !m_completingSample && !CompletedFramesPending()) m_completedLast.reset();
-	const bool detached = m_processingSize.cx > 0;
-	if (!field && detached && mfgEnabledForRate && m_mfgInputModeKnown &&
-	    !m_mfg.Failed() && !m_mfgPresentFailed && m_pFilter->m_filterState == State_Running) {
-		// The presenter owns the current picture and will draw with the new window geometry.
-		return S_OK;
-	}
-	const bool completedVideoOnly = m_completedTarget && m_completedTarget->videoOnly;
-	if (field) {
-		m_FieldDrawn = field;
-	}
-	const bool second = m_FieldDrawn == 2;
-	const bool wantsProjection = CanProjectJvr() && !m_windowRect.IsRectEmpty() && !m_videoRect.IsRectEmpty();
-	const CRect sourceRect = ProcessingSourceRect(wantsProjection);
-	const uint64_t tick1 = GetPreciseTick();
-	const auto projectionHr = wantsProjection ? PrepareJvrFrame(sourceRect, second) : S_FALSE;
-	const bool projected = wantsProjection && SUCCEEDED(projectionHr);
-	const auto projectionTicks = wantsProjection ? GetPreciseTick() - tick1 : 0;
-	DLogIf(FAILED(projectionHr), L"JVR source preparation failed ({}); showing decoded source", HR2Str(projectionHr));
-	const bool sourceReady = !wantsProjection || projected;
-	const CRect frameSource = projected ? sourceRect : m_srcRect;
-	const CRect outputPicture = m_completedTarget ? m_completedTarget->picture : PictureForPlayback(projected);
-	const CRect processingRect = detached ? ProcessingRect() : outputPicture;
-	if (m_completedTarget) m_completedTarget->projected = projected;
-
+	edition::VideoFrame editionFrame{};
+	editionFrame.field = field;
+	editionFrame.frameStartTime = frameStartTime;
 	CComPtr<ID3D11Texture2D> pBackBuffer;
 	HRESULT hr = S_OK;
-	if (m_completedTarget) {
-		pBackBuffer = m_completedTarget->image.pTexture;
-		m_completedTarget->pts = frameStartTime;
-		m_completedTarget->end = frameStartTime + m_sampleDuration;
-		m_completedTarget->due = frameStartTime + m_rtVideoDelay;
-	} else {
-		hr = m_pDXGISwapChain1->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
-		if (FAILED(hr)) {
-			DLog(L"CDX11VideoProcessor::Render() : GetBuffer() failed with error {}", HR2Str(hr));
-			return hr;
-		}
-	}
+	uint64_t tick1 = 0;
+	if (const auto result = PrepareEditionRender(editionFrame, pBackBuffer, tick1, hr)) return *result;
 
 	if (!m_windowRect.IsRectEmpty()) {
 		// fill the BackBuffer with black
@@ -3360,217 +3124,9 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 		}
 	}
 
-	const bool playFirst = !m_pFilter->m_Sets.bWaitForExtendedStartup;
-	const bool wantSr = sourceReady && CanDlssSRUpscale(frameSource, processingRect, projected);
-	if (projected && field && frameStartTime >= 0) {
-		if (MfgFrameAnalysisEligible()) {
-			m_mfgDecodedDifference.Submit(m_pDevice, m_pDeviceContext, m_jvrFrame.pTexture, 0, frameSource, frameStartTime);
-		}
-		if ((UsesZipDepthSr() && wantSr) || UsesZipDepthMfg()) {
-			m_zipDepth.Update(m_pDevice, m_pDeviceContext, m_jvrFrame.pShaderResource,
-				frameSource, frameSource.Size(), frameStartTime);
-		}
-	}
-	if (m_svdLut.strength && sourceReady && field == 1) {
-		CaptureSvdLut(frameStartTime, projected, second);
-	}
-	const bool warmZipDepth = (UsesZipDepthMfg() && MfgDepthSourceEligible()) ||
-		(UsesZipDepthSr() && wantSr);
-	if (field && frameStartTime != INVALID_TIME && warmZipDepth && (playFirst || mfgEnabledForRate)) {
-		m_zipDepth.Prepare(m_pDevice);
-	}
-	const bool canEnhance = !playFirst || (m_startupHasPicture && (!warmZipDepth || !m_zipDepth.Loading()));
-	const bool pausedMfg = sourceReady && mfgEnabledForRate && field && frameStartTime != INVALID_TIME &&
-		m_pFilter->m_filterState == State_Paused && !m_pPSHalfOUtoInterlace &&
-		!m_mfg.Failed();
-	const bool prerollMfg = pausedMfg && !playFirst;
-	const bool canQueueMfg = sourceReady && mfgEnabledForRate && field && frameStartTime != INVALID_TIME &&
-		m_pFilter->m_filterState == State_Running && !m_pFilter->m_bClockStalled && !m_pPSHalfOUtoInterlace;
-	const bool prepareMfg = canQueueMfg || pausedMfg;
-	auto mfgReady = [&](ID3D11Texture2D* input) {
-		return !playFirst || m_mfg.PollWarmup(m_pDevice, m_pDeviceContext, input);
-	};
-	bool useMfg = canQueueMfg && canEnhance;
-	bool nativeWarmupSelected = false;
-	bool nativeWarmupPending = false;
-	m_extendedStartupPending = playFirst && (!canEnhance && (prepareMfg || wantSr));
-	// Fast path is deliberately conservative.  D3D11 VP (or the original color
-	// conversion shader) reconstructs chroma/CSC at native video dimensions.
-	// MFG then interpolates that RGB image, and the regular resizer runs once
-	// for *both* real and generated pictures in CompositeMfg().  Never bypass
-	// RTX VSR/HDR, user post shaders, dithering, rotation or interlacing.
-	// Auto x1 still needs the same source-first path for its original frame.
-	// Switching to legacy merely because no interpolation is needed would flush
-	// pending real frames and invert the source timeline.
-    const bool postUpscaleRequested = prepareMfg && m_iVPSuperRes != SUPERRES_Disable && MfgPostUpscaleRequested();
-    const bool postVsrCandidate = postUpscaleRequested && m_bVPUseSuperRes;
-    const bool postDlssSRCandidate = postUpscaleRequested && CanDlssSRUpscale(frameSource, processingRect, projected);
-    // Native-size DLAA can be evaluated after MFG without an enlargement.
-    const bool postNativeDlaa = postDlssSRCandidate &&
-        processingRect.Size() == frameSource.Size();
-	const bool nativeMfg = prepareMfg && (!m_resizePending || detached) && !m_mfg.Failed() &&
-		!m_mfgPresentFailed.load(std::memory_order_relaxed) && (completedVideoOnly || projected || !m_renderRect.IsRectEmpty()) &&
-		!frameSource.IsRectEmpty() && (frameSource.Height() <= 1440 || postNativeDlaa) &&
-		((processingRect.Width() > frameSource.Width() && processingRect.Height() > frameSource.Height()) || postNativeDlaa) &&
-		((!m_bInterlaced && !m_bDoubleFrames && m_SampleFormat == D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE) || postDlssSRCandidate) &&
-		m_iRotation == 0 && !m_bFlip &&
-		!SourceIsHDR() && !m_bVPRTXVideoHDR && !m_bVPUseRTXVideoHDR &&
-        ((m_iVPSuperRes == SUPERRES_Disable && !m_bVPUseSuperRes) || postVsrCandidate || postDlssSRCandidate) &&
-		GetPostScaleSteps() == 0 &&
-		m_SwapChainFmt == DXGI_FORMAT_B8G8R8A8_UNORM &&
-		(projected || (m_D3D11VP.IsReady() ? m_D3D11OutputFmt : m_InternalTexFmt) == DXGI_FORMAT_B8G8R8A8_UNORM);
-	if (nativeMfg) {
-		// No global preference changes: MPC-VR's normal VP/VSR settings remain
-		// authoritative.  Set MPCVR_MFG_NATIVE_INPUT=0 to A/B the legacy path.
-		static const bool nativeEnabled = [] {
-			wchar_t setting[8]{};
-			return GetEnvironmentVariableW(L"MPCVR_MFG_NATIVE_INPUT", setting, _countof(setting)) == 0 || setting[0] != L'0';
-		}();
-        // Post-MFG VSR is opt-in. A failed initialization MUST keep the
-        // original VSR-before-MFG path, not silently use Shader scaling.
-        auto& nativeInput = projected ? m_jvrFrame : m_mfgNativeInput;
-        nativeWarmupSelected = nativeEnabled && (!postVsrCandidate || EnsureMfgPostVsr()) &&
-            (projected || SUCCEEDED(nativeInput.CheckCreate(m_pDevice, DXGI_FORMAT_B8G8R8A8_UNORM,
-                frameSource.Width(), frameSource.Height(), Tex2D_DefaultShaderRTarget)));
-        if (nativeWarmupSelected) {
-            nativeWarmupPending = !mfgReady(nativeInput.pTexture);
-            m_extendedStartupPending |= nativeWarmupPending;
-            if (postDlssSRCandidate && prerollMfg) {
-                const CRect nativeRect(0, 0, frameSource.Width(), frameSource.Height());
-                PrepareDlssSR(nativeRect, processingRect, true);
-            }
-        }
-        if (nativeWarmupSelected &&
-            !nativeWarmupPending && (prerollMfg || (useMfg && !m_mfg.Failed()))) {
-            const CRect nativeRect(0, 0, frameSource.Width(), frameSource.Height());
-            const auto nativeStart=int64_t(GetPreciseTick());
-            HRESULT nativeHr=E_FAIL;
-            if (projected) {
-                nativeHr = S_OK;
-            } else if (postVsrCandidate) {
-                // Copy/CSC through a separate VP that has no RTX VSR enabled.
-                // The regular decoder VP is never reconfigured.
-                const auto held=m_D3D11VP.HoldFrame();
-                if(held.pTexture) nativeHr=m_mfgPreVsrVP.ProcessExternal(
-                    held.pTexture,held.ArraySlice,m_mfgNativeInput.pTexture,m_srcRect,nativeRect);
-                if(FAILED(nativeHr)) {
-                    m_mfgPostVsrBroken=true;
-                    DLog(L"Hybrid MFG pre-VSR source conversion failed: {}; keeping Golden",HR2Str(nativeHr));
-                }
-            } else {
-                nativeHr = m_D3D11VP.IsReady()
-                    ? D3D11VPPass(m_mfgNativeInput.pTexture,m_srcRect,nativeRect,m_FieldDrawn==2)
-                    : Process(m_mfgNativeInput.pTexture,m_srcRect,nativeRect,m_FieldDrawn==2);
-            }
-            const auto nativeEnd=int64_t(GetPreciseTick());
-            if (nativeEnd > nativeStart)
-                m_mfgVideoTicks.fetch_add(uint64_t(nativeEnd-nativeStart) + projectionTicks, std::memory_order_relaxed);
-            m_mfgVideoCount.fetch_add(1,std::memory_order_relaxed);
-            if (SUCCEEDED(nativeHr)) {
-                if (prerollMfg) {
-                    // Create the NGX feature/flow/banks while the DirectShow
-                    // clock is still stopped. Never enqueue a preroll frame.
-                    m_mfg.Warmup(m_pDevice, m_pDeviceContext, nativeInput.pTexture, 2);
-                }
-                bool nativeOverlayHandled = false;
-                if (useMfg && QueueMfg(nativeInput.pTexture, frameStartTime, nativeOverlayHandled, true, postVsrCandidate, false, projected)) {
-                    m_bVPScalingUseShaders=m_D3D11VP.IsReady() && !postVsrCandidate;
-                    return S_OK;
-                }
-            } else {
-                nativeWarmupSelected = false;
-            }
-        }
-	}
-
-	bool videoOnly = false;
-	bool overlayInputHandled = false;
-	// Redraws keep the current PTS. The projected preview uses the newly
-	// sampled surface directly instead of SR's cached result for that PTS.
-	const auto timestamp = frameStartTime == INVALID_TIME
-		? m_rtStart + (second ? m_sampleDuration / 2 : 0)
-		: frameStartTime;
-	auto processPicture = [&](ID3D11Texture2D* target, const CRect& rect, CTex2DRing* postScale) {
-		const bool canWarm = !nativeWarmupSelected && prepareMfg && (!m_resizePending || postScale);
-		const bool ready = !nativeWarmupPending && (!canWarm || mfgReady(target));
-		m_extendedStartupPending |= playFirst && !ready;
-		useMfg = !nativeWarmupSelected && canQueueMfg && canEnhance && ready;
-		const bool srAfterNativeMfg = nativeWarmupSelected && postDlssSRCandidate &&
-			(prerollMfg || (playFirst && !m_mfg.Failed()));
-		const bool allowSr = sourceReady && canEnhance && ready && !srAfterNativeMfg && (field || !projected);
-		const auto result = Process(target, frameSource, rect, second, allowSr, timestamp, postScale,
-			&overlayInputHandled, projected ? &m_jvrFrame : nullptr);
-		m_extendedStartupPending |= playFirst && m_dlssSR.Preparing();
-		return result;
-	};
-	if (completedVideoOnly || projected || !m_renderRect.IsRectEmpty()) {
-		const auto videoStart=int64_t(GetPreciseTick());
-		if (completedVideoOnly) {
-			hr = processPicture(pBackBuffer, outputPicture, &m_processingPostScale);
-			if (FAILED(hr)) return hr;
-		} else if (detached && SUCCEEDED(m_processingTexture.CheckCreate(m_pDevice, m_SwapChainFmt,
-			processingRect.Width(), processingRect.Height(), Tex2D_DefaultShaderRTarget))) {
-			const auto steps = GetPostScaleSteps();
-			if (SUCCEEDED(m_processingPostScale.CheckCreate(m_pDevice, m_InternalTexFmt,
-				processingRect.Width(), processingRect.Height(), steps))) {
-				hr = processPicture(m_processingTexture.pTexture, processingRect, &m_processingPostScale);
-				videoOnly = SUCCEEDED(hr);
-			}
-		}
-		if (!completedVideoOnly && !videoOnly) {
-			hr = processPicture(pBackBuffer, outputPicture, nullptr);
-			if (FAILED(hr)) return hr;
-		}
-		if (mfgEnabledForRate) {
-			const auto videoEnd=int64_t(GetPreciseTick());
-			if (videoEnd > videoStart)
-				m_mfgVideoTicks.fetch_add(uint64_t(videoEnd-videoStart) + projectionTicks, std::memory_order_relaxed);
-			m_mfgVideoCount.fetch_add(1,std::memory_order_relaxed);
-		}
-	}
-
-	// Legacy pre-MFG path: preroll the same full/display-sized input that
-	// the running producer will use, without starting its presentation thread.
-	const bool videoOnlyInput = videoOnly || completedVideoOnly;
-	if (prerollMfg && (!m_resizePending || videoOnlyInput) &&
-	    !m_mfg.InputSize().cx) {
-		auto* mfgInput = videoOnly ? m_processingTexture.pTexture.p : pBackBuffer.p;
-		if (mfgInput) m_mfg.Warmup(m_pDevice, m_pDeviceContext, mfgInput,
-		    2);
-	}
-	// Legacy path preserves VSR/HDR and all other native renderer features.
-	// A back-buffer-sized input may need to fall back while its resize is pending.
-	auto* pictureTexture = videoOnly ? m_processingTexture.pTexture.p : pBackBuffer.p;
-	if (useMfg && (!m_resizePending || videoOnlyInput)) {
-		if (QueueMfg(pictureTexture, frameStartTime, overlayInputHandled, false, false, videoOnlyInput, projected)) return S_OK;
-	} else if (sourceReady && mfgEnabledForRate && !m_resizePending && m_pFilter->m_filterState == State_Running) StopMfg(false);
-	if (!m_completedTarget && (videoOnly || projected || !m_renderRect.IsRectEmpty())) {
-		DrawSvdLut(pictureTexture, videoOnly ? processingRect : outputPicture, timestamp);
-	}
-	if (projected && DepthOverlayEnabled() && !overlayInputHandled) {
-		DrawDepthOverlay(pictureTexture, videoOnlyInput ? processingRect : outputPicture, timestamp);
-	} else if (!wantsProjection && !overlayInputHandled && (videoOnly || m_renderRect == m_videoRect)) {
-		BlendSourceDepthOverlay(pictureTexture, videoOnly ? m_processingTexture.pShaderResource.p : nullptr,
-			videoOnly ? processingRect : outputPicture, timestamp);
-	}
-	if (videoOnly) {
-		hr = ResizeShaderPass(m_processingTexture, pBackBuffer, processingRect, outputPicture, 0);
-	}
-	if (m_completingSample && m_completedTarget) {
-		if (FAILED(hr)) return hr;
-		if (!m_completedBatches.empty()) {
-			m_completedBatches.push_back({std::move(*m_completedTarget), {}});
-			m_completedPresenter.Wake();
-			m_startupHasPicture = true;
-			return S_OK;
-		}
-		if (!QueueCompletedFrame(std::move(*m_completedTarget))) return E_FAIL;
-		m_pDeviceContext->Flush();
-		m_startupHasPicture = true;
-		return S_OK;
-	}
+	if (const auto result = RenderEditionVideo(pBackBuffer, editionFrame, hr)) return *result;
 	if (!m_pPSHalfOUtoInterlace) {
-		DrawSubtitles(pBackBuffer, projected ? &outputPicture : nullptr);
+		DrawSubtitles(pBackBuffer, editionFrame.projected ? &editionFrame.outputPicture : nullptr);
 	}
 
 	if (m_bAlphaBitmapEnable) {
@@ -3644,7 +3200,7 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 	}
 	// If a frame bypassed MFG (warmup/fallback), it was absent from MFG's
 	// presenter counters even though the normal renderer submitted it.
-	if (hr==S_OK && mfgEnabledForRate)
+	if (hr==S_OK && editionFrame.mfgEnabledForRate)
 		m_mfgFallbackPresents.fetch_add(1,std::memory_order_relaxed);
 	DLogIf(FAILED(hr), L"CDX11VideoProcessor::Render() : Present() failed with error {}", HR2Str(hr));
 
@@ -3851,35 +3407,7 @@ HRESULT CDX11VideoProcessor::UpdateConvertColorShader()
 
 void CDX11VideoProcessor::UpdateBitmapShader()
 {
-	if (m_bPGSSubtitles && SourceIsHDR10()) {
-		if (m_bHdrDisplayModeEnabled) {
-			float SDR_peak_lum;
-			switch (m_iHdrOsdBrightness) {
-				default:
-					SDR_peak_lum = 100;
-					break;
-				case 1:
-					SDR_peak_lum = 50;
-					break;
-				case 2:
-					SDR_peak_lum = 30;
-					break;
-			}
-
-			m_pPS_BitmapToFrame = m_pPS_Simple;
-			m_dwStatsTextColor = TransferPQ(D3DCOLOR_XRGB(255, 255, 255), SDR_peak_lum);
-		} else {
-			if (m_bConvertToSdr) {
-				m_pPS_BitmapToFrame.Release();
-				EXECUTE_ASSERT(S_OK == CreatePShaderFromResource(&m_pPS_BitmapToFrame, IDF_PS_11_CONVERT_PQ_TO_SDR));
-			} else {
-				m_pPS_BitmapToFrame = m_pPS_Simple;
-			}
-			m_dwStatsTextColor = D3DCOLOR_XRGB(255, 255, 255);
-		}
-
-		return;
-	}
+	if (PrepareEditionSubtitleShader()) return;
 
 	if (m_bHdrDisplayModeEnabled
 			&& (SourceIsHDR() || m_bVPUseRTXVideoHDR)) {
@@ -4104,417 +3632,6 @@ HRESULT CDX11VideoProcessor::FinalPass(const Tex2D_t& Tex, ID3D11Texture2D* pRen
 	return hr;
 }
 
-bool CDX11VideoProcessor::DepthOverlayEnabled() const
-{
-	return m_showDepthOverlay && (UsesZipDepthSr() || UsesZipDepthMfg()) && !m_depthOverlayShaderFailed &&
-		!m_bHdrDisplayModeEnabled && !m_pPSHalfOUtoInterlace &&
-		MfgDepthSourceEligible();
-}
-
-bool CDX11VideoProcessor::BlendSourceDepthOverlay(ID3D11Texture2D* image, ID3D11ShaderResourceView* source,
-	const CRect& picture, REFERENCE_TIME timestamp)
-{
-	if (!DepthOverlayEnabled() || picture.IsRectEmpty() || timestamp < 0) return false;
-
-	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
-	// Swap-chain buffers need a shader-readable copy for depth capture.
-	if (!source) {
-		D3D11_TEXTURE2D_DESC desc{};
-		image->GetDesc(&desc);
-		if (FAILED(m_depthOverlayCapture.CheckCreate(m_pDevice, desc.Format,
-			desc.Width, desc.Height, Tex2D_DefaultShaderRTarget))) return false;
-		m_pDeviceContext->CopyResource(m_depthOverlayCapture.pTexture, image);
-		source = m_depthOverlayCapture.pShaderResource;
-	}
-	const SIZE modelSize{LONG(m_srcRectWidth), LONG(m_srcRectHeight)};
-	m_zipDepth.Update(m_pDevice, m_pDeviceContext, source, picture, modelSize, timestamp);
-	DrawDepthOverlay(image, picture, timestamp);
-	return true;
-}
-
-void CDX11VideoProcessor::DrawMfgMotion(ID3D11Texture2D* target, uint64_t serial, REFERENCE_TIME pts, const CRect& picture)
-{
-	const auto motion = m_mfg.OverlayMotion(serial, pts);
-	if (!motion.view || picture.IsRectEmpty()) return;
-	if (!m_pMfgMotionConstants) {
-		static constexpr char source[] = R"(
-Texture2D<float2> Motion : register(t0);
-Texture2D<int4> Active : register(t1);
-cbuffer Settings : register(b0) {
-    float4 WorkPicture; // origin and extent in MFG pixels
-    float2 OutputSize;
-    float2 Padding;
-};
-float DistanceToLine(float2 p, float2 a, float2 b) {
-    float2 d = b - a;
-    return length(p - a - d * saturate(dot(p - a, d) / max(dot(d, d), 0.001)));
-}
-float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
-    const float spacing = 32.0;
-    float2 pixel = uv * OutputSize;
-    float2 anchor = (floor(pixel / spacing) + 0.5) * spacing;
-    if (any(anchor >= OutputSize)) return 0;
-    int2 work = int2(WorkPicture.xy + anchor / OutputSize * WorkPicture.zw);
-    const int4 bounds = Active.Load(int3(0, 0, 0));
-    const float2 fragment = WorkPicture.xy + uv * WorkPicture.zw;
-    if (any(work < bounds.xy) || any(work >= bounds.zw) ||
-        any(fragment < bounds.xy) || any(fragment >= bounds.zw)) return 0;
-    float2 mv = Motion.Load(int3(work, 0));
-    float2 delta = mv * OutputSize / WorkPicture.zw;
-    float len = length(delta);
-    float2 p = pixel - anchor;
-    float distance = length(p);
-    if (len > 0.25) {
-        float2 direction = delta / len;
-        float2 tip = direction * clamp(len, 4.0, 13.0);
-        float2 tail = tip - 3.0 * direction;
-        float2 side = float2(-direction.y, direction.x) * 2.2;
-        distance = min(DistanceToLine(p, 0, tip),
-            min(DistanceToLine(p, tip, tail + side), DistanceToLine(p, tip, tail - side)));
-    }
-    return float4(0.15, 1.0, 0.55, 0.85 * saturate(1.65 - distance));
-}
-)";
-		CComPtr<ID3DBlob> blob;
-		CComPtr<ID3D11PixelShader> shader;
-		CComPtr<ID3D11BlendState> blendState;
-		D3D11_BLEND_DESC blend{};
-		auto& rt = blend.RenderTarget[0];
-		rt.BlendEnable = TRUE;
-		rt.SrcBlend = D3D11_BLEND_SRC_ALPHA;
-		rt.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-		rt.BlendOp = rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
-		rt.SrcBlendAlpha = D3D11_BLEND_ZERO;
-		rt.DestBlendAlpha = D3D11_BLEND_ONE;
-		rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-		const D3D11_BUFFER_DESC constants{32, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
-		if (FAILED(CompileShader(source, nullptr, "ps_5_0", &blob)) ||
-			FAILED(m_pDevice->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &shader)) ||
-			FAILED(m_pDevice->CreateBlendState(&blend, &blendState)) ||
-			FAILED(m_pDevice->CreateBuffer(&constants, nullptr, &m_pMfgMotionConstants))) return;
-		m_pMfgMotionShader = shader;
-		m_pMfgMotionBlend = blendState;
-	}
-
-	const CRect work(motion.picture);
-	const float constants[8]{float(work.left), float(work.top), float(work.Width()), float(work.Height()),
-		float(picture.Width()), float(picture.Height())};
-	CComPtr<ID3D11RenderTargetView> view;
-	if (FAILED(m_pDevice->CreateRenderTargetView(target, nullptr, &view)) ||
-		FAILED(FillVertexBuffer(m_pDeviceContext, m_pVertexBuffer, 1, 1, CRect(0, 0, 1, 1), 0, false))) return;
-	m_pDeviceContext->UpdateSubresource(m_pMfgMotionConstants, 0, nullptr, constants, 0, 0);
-	m_pDeviceContext->RSSetState(nullptr);
-	D3D11_VIEWPORT viewport{float(picture.left), float(picture.top), constants[4], constants[5], 0, 1};
-	m_pDeviceContext->PSSetShaderResources(1, 1, &motion.active);
-	TextureBlt11(m_pDeviceContext, view, viewport, m_pVSimpleInputLayout, m_pVS_Simple,
-		m_pMfgMotionShader, motion.view, nullptr, m_pMfgMotionConstants, m_pVertexBuffer, m_pMfgMotionBlend);
-	ID3D11ShaderResourceView* empty = nullptr;
-	m_pDeviceContext->PSSetShaderResources(1, 1, &empty);
-	m_pDeviceContext->OMSetBlendState(nullptr, nullptr, D3D11_DEFAULT_SAMPLE_MASK);
-	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
-	m_mfg.MarkConsumed(serial);
-}
-
-bool CDX11VideoProcessor::EnsureDepth3DMeshResources()
-{
-	if (m_depth3DPreviewShaderFailed) return false;
-	if (m_pVS_Depth3DPreview && m_pPS_Depth3DPreview && m_pVDepth3DPreviewInputLayout &&
-		m_pDepth3DPreviewConstants && m_pDepth3DPreviewVertexBuffer && m_pDepth3DPreviewIndexBuffer &&
-		m_pDepth3DPreviewRasterizer && m_depth3DPreviewIndexCount) return true;
-
-	if (!m_pVS_Depth3DPreview || !m_pPS_Depth3DPreview || !m_pVDepth3DPreviewInputLayout || !m_pDepth3DPreviewConstants) {
-		static constexpr char vertexShaderSource[] = R"(
-Texture2D<float> Depth : register(t0);
-SamplerState Linear : register(s0);
-cbuffer Settings : register(b0) {
-    float4 SourceUV; // xy origin, zw extent in the completed video texture
-    float4 Params;   // rotated, Z depth strength, normalized depth span, camera distance
-};
-struct VS_INPUT {
-    float2 Pos : POSITION;
-    float2 Tex : TEXCOORD0;
-    float2 DepthCoord : TEXCOORD1;
-};
-struct VS_OUTPUT {
-    float4 Pos : SV_POSITION;
-    float2 Tex : TEXCOORD0;
-};
-VS_OUTPUT main(VS_INPUT input) {
-    VS_OUTPUT output;
-    float2 local = input.Pos;
-    float2 depthCoord = input.DepthCoord;
-    float2 depthUV = Params.x > 0.5 ? float2(1.0 - depthCoord.y, depthCoord.x) : depthCoord;
-    float depth = Depth.SampleLevel(Linear, saturate(depthUV), 0);
-    float height = clamp((0.5 - depth) / max(Params.z, 1e-4), -0.5, 0.5);
-
-    // Each tile is independent. All four vertices in the tile share one sampled
-    // depth value, so depth discontinuities create step changes rather than the
-    // rubber-sheet tearing seen with a shared continuous mesh.
-    float x = (local.x - 0.5) * 2.0;
-    float y = (0.5 - local.y) * 2.0;
-    float z = height * Params.y;
-    const float c = 0.8660254; // cos(30 deg)
-    const float s = 0.5;       // sin(30 deg)
-    float xr = x * c + z * s;
-    float zr = -x * s + z * c;
-
-    // Small perspective projection. Fit keeps intentional black borders so
-    // the whole tilted relief remains visible for this diagnostic preview.
-    float cameraDistance = max(Params.w, 1.5);
-    float perspective = cameraDistance / max(cameraDistance - zr, 0.5);
-    const float fit = 0.80;
-    output.Pos = float4(xr * perspective * fit, y * perspective * fit, 0.0, 1.0);
-    output.Tex = local;
-    return output;
-}
-)";
-		static constexpr char pixelShaderSource[] = R"(
-Texture2D<float4> Image : register(t1);
-SamplerState Linear : register(s0);
-cbuffer Settings : register(b0) {
-    float4 SourceUV; // xy origin, zw extent in the completed video texture
-    float4 Params;   // rotated, depth strength, normalized depth span, projected width scale
-};
-struct VS_OUTPUT {
-    float4 Pos : SV_POSITION;
-    float2 Tex : TEXCOORD0;
-};
-float4 main(VS_OUTPUT input) : SV_TARGET {
-    float2 sampleLocal = saturate(input.Tex);
-    return Image.SampleLevel(Linear, SourceUV.xy + sampleLocal * SourceUV.zw, 0);
-}
-)";
-		CComPtr<ID3DBlob> vsCode, psCode;
-		D3D11_BUFFER_DESC constants{32, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
-		if (FAILED(CompileShader(vertexShaderSource, nullptr, "vs_4_0", &vsCode)) ||
-			FAILED(CompileShader(pixelShaderSource, nullptr, "ps_4_0", &psCode)) ||
-			FAILED(m_pDevice->CreateVertexShader(vsCode->GetBufferPointer(), vsCode->GetBufferSize(), nullptr, &m_pVS_Depth3DPreview)) ||
-			FAILED(m_pDevice->CreatePixelShader(psCode->GetBufferPointer(), psCode->GetBufferSize(), nullptr, &m_pPS_Depth3DPreview)) ||
-			FAILED(m_pDevice->CreateBuffer(&constants, nullptr, &m_pDepth3DPreviewConstants))) {
-			m_depth3DPreviewShaderFailed = true;
-			return false;
-		}
-		D3D11_INPUT_ELEMENT_DESC layout[] = {
-			{"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
-			{"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0},
-			{"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
-		};
-		if (FAILED(m_pDevice->CreateInputLayout(layout, std::size(layout), vsCode->GetBufferPointer(), vsCode->GetBufferSize(), &m_pVDepth3DPreviewInputLayout))) {
-			m_depth3DPreviewShaderFailed = true;
-			return false;
-		}
-	}
-
-	if (!m_pDepth3DPreviewVertexBuffer || !m_pDepth3DPreviewIndexBuffer || !m_depth3DPreviewIndexCount) {
-		// Independent depth tiles instead of one continuous cloth-like mesh.
-		// Each tile uses one representative depth for all four of its corners,
-		// so hard depth changes become height steps rather than stretched slopes.
-		constexpr UINT gridX = 192;
-		constexpr UINT gridY = 108;
-		constexpr float overlap = 1.03f; // small XY overlap to hide cracks between tiles
-		std::vector<DEPTH3D_VERTEX> vertices;
-		vertices.reserve(gridX * gridY * 4);
-		std::vector<uint32_t> indices;
-		indices.reserve(gridX * gridY * 6);
-		for (UINT y = 0; y < gridY; y++) {
-			const float v0 = float(y) / gridY;
-			const float v1 = float(y + 1) / gridY;
-			const float vc = (v0 + v1) * 0.5f;
-			for (UINT x = 0; x < gridX; x++) {
-				const float u0 = float(x) / gridX;
-				const float u1 = float(x + 1) / gridX;
-				const float uc = (u0 + u1) * 0.5f;
-				const float halfW = (u1 - u0) * 0.5f * overlap;
-				const float halfH = (v1 - v0) * 0.5f * overlap;
-				const float px0 = uc - halfW;
-				const float px1 = uc + halfW;
-				const float py0 = vc - halfH;
-				const float py1 = vc + halfH;
-				const uint32_t base = uint32_t(vertices.size());
-				const DirectX::XMFLOAT2 dc{uc, vc};
-				vertices.push_back({{px0, py0}, {u0, v0}, dc});
-				vertices.push_back({{px1, py0}, {u1, v0}, dc});
-				vertices.push_back({{px0, py1}, {u0, v1}, dc});
-				vertices.push_back({{px1, py1}, {u1, v1}, dc});
-				indices.push_back(base + 0);
-				indices.push_back(base + 2);
-				indices.push_back(base + 1);
-				indices.push_back(base + 1);
-				indices.push_back(base + 2);
-				indices.push_back(base + 3);
-			}
-		}
-		D3D11_BUFFER_DESC vb{};
-		vb.ByteWidth = UINT(vertices.size() * sizeof(DEPTH3D_VERTEX));
-		vb.Usage = D3D11_USAGE_IMMUTABLE;
-		vb.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-		D3D11_SUBRESOURCE_DATA vd{vertices.data()};
-		D3D11_BUFFER_DESC ib{};
-		ib.ByteWidth = UINT(indices.size() * sizeof(uint32_t));
-		ib.Usage = D3D11_USAGE_IMMUTABLE;
-		ib.BindFlags = D3D11_BIND_INDEX_BUFFER;
-		D3D11_SUBRESOURCE_DATA id{indices.data()};
-		if (FAILED(m_pDevice->CreateBuffer(&vb, &vd, &m_pDepth3DPreviewVertexBuffer)) ||
-			FAILED(m_pDevice->CreateBuffer(&ib, &id, &m_pDepth3DPreviewIndexBuffer))) {
-			m_depth3DPreviewShaderFailed = true;
-			return false;
-		}
-		m_depth3DPreviewIndexCount = UINT(indices.size());
-	}
-
-	if (!m_pDepth3DPreviewRasterizer) {
-		D3D11_RASTERIZER_DESC desc{};
-		desc.FillMode = D3D11_FILL_SOLID;
-		desc.CullMode = D3D11_CULL_NONE;
-		desc.FrontCounterClockwise = FALSE;
-		desc.DepthClipEnable = TRUE;
-		desc.ScissorEnable = FALSE;
-		desc.MultisampleEnable = FALSE;
-		desc.AntialiasedLineEnable = FALSE;
-		if (FAILED(m_pDevice->CreateRasterizerState(&desc, &m_pDepth3DPreviewRasterizer))) {
-			m_depth3DPreviewShaderFailed = true;
-			return false;
-		}
-	}
-
-	return true;
-}
-
-const Tex2D_t* CDX11VideoProcessor::PrepareDepth3DPreview(const CompletedFrame& frame, const CRect& sourceRect)
-{
-	if (!m_depth3DPreview || m_depth3DPreviewShaderFailed || sourceRect.IsRectEmpty() ||
-		(!UsesZipDepthSr() && !UsesZipDepthMfg())) return &frame.image;
-
-	m_zipDepth.PollCompleted();
-	const auto estimate = m_zipDepth.ForFrame(frame.pts);
-	if (!estimate.view) return &frame.image;
-	if (!EnsureDepth3DMeshResources()) return &frame.image;
-
-	if (FAILED(m_depth3DPreviewTexture.CheckCreate(m_pDevice, frame.image.desc.Format,
-		frame.image.desc.Width, frame.image.desc.Height, Tex2D_DefaultShaderRTarget))) return &frame.image;
-
-	CComPtr<ID3D11RenderTargetView> targetView;
-	if (FAILED(m_pDevice->CreateRenderTargetView(m_depth3DPreviewTexture.pTexture, nullptr, &targetView))) return &frame.image;
-
-	const float sourceUV[4]{float(sourceRect.left) / frame.image.desc.Width,
-		float(sourceRect.top) / frame.image.desc.Height,
-		float(sourceRect.Width()) / frame.image.desc.Width,
-		float(sourceRect.Height()) / frame.image.desc.Height};
-	// Independent tile settings. Each tile keeps one depth height across the whole
-	// quad, then the vertex shader rotates the stepped surface 30 degrees around Y
-	// and applies a small perspective projection.
-	constexpr float kDepth3DZStrength = 0.45f;
-	constexpr float kDepth3DCameraDistance = 3.0f;
-	const float constants[8]{sourceUV[0], sourceUV[1], sourceUV[2], sourceUV[3],
-		estimate.rotated ? 1.0f : 0.0f, kDepth3DZStrength, CZipDepth::NormalizedDepthSpan, kDepth3DCameraDistance};
-	m_pDeviceContext->UpdateSubresource(m_pDepth3DPreviewConstants, 0, nullptr, constants, 0, 0);
-
-	const float black[4]{0, 0, 0, 1};
-	m_pDeviceContext->ClearRenderTargetView(targetView, black);
-	D3D11_VIEWPORT viewport{FLOAT(sourceRect.left), FLOAT(sourceRect.top), FLOAT(sourceRect.Width()),
-		FLOAT(sourceRect.Height()), 0.0f, 1.0f};
-
-	const UINT stride = sizeof(DEPTH3D_VERTEX), offset = 0;
-	ID3D11ShaderResourceView* vsDepth = estimate.view;
-	ID3D11ShaderResourceView* psImage = frame.image.pShaderResource;
-	CComPtr<ID3D11RasterizerState> previousRasterizer;
-	m_pDeviceContext->RSGetState(&previousRasterizer);
-	m_pDeviceContext->RSSetState(m_pDepth3DPreviewRasterizer);
-	m_pDeviceContext->IASetInputLayout(m_pVDepth3DPreviewInputLayout);
-	m_pDeviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	m_pDeviceContext->IASetVertexBuffers(0, 1, &m_pDepth3DPreviewVertexBuffer.p, &stride, &offset);
-	m_pDeviceContext->IASetIndexBuffer(m_pDepth3DPreviewIndexBuffer, DXGI_FORMAT_R32_UINT, 0);
-	m_pDeviceContext->OMSetRenderTargets(1, &targetView.p, nullptr);
-	m_pDeviceContext->RSSetViewports(1, &viewport);
-	m_pDeviceContext->VSSetShader(m_pVS_Depth3DPreview, nullptr, 0);
-	m_pDeviceContext->PSSetShader(m_pPS_Depth3DPreview, nullptr, 0);
-	m_pDeviceContext->VSSetShaderResources(0, 1, &vsDepth);
-	m_pDeviceContext->PSSetShaderResources(1, 1, &psImage);
-	m_pDeviceContext->VSSetSamplers(0, 1, &m_pSamplerPoint.p);
-	m_pDeviceContext->PSSetSamplers(0, 1, &m_pSamplerLinear.p);
-	m_pDeviceContext->VSSetConstantBuffers(0, 1, &m_pDepth3DPreviewConstants.p);
-	m_pDeviceContext->PSSetConstantBuffers(0, 1, &m_pDepth3DPreviewConstants.p);
-	m_pDeviceContext->DrawIndexed(m_depth3DPreviewIndexCount, 0, 0);
-	m_pDeviceContext->RSSetState(previousRasterizer);
-
-	ID3D11ShaderResourceView* emptyViews[2]{};
-	m_pDeviceContext->VSSetShaderResources(0, 1, emptyViews);
-	m_pDeviceContext->PSSetShaderResources(1, 1, emptyViews);
-	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
-	return &m_depth3DPreviewTexture;
-}
-
-void CDX11VideoProcessor::DrawDepthOverlay(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME timestamp)
-{
-	m_zipDepth.PollCompleted();
-	const auto estimate = m_zipDepth.ForFrame(timestamp);
-	if (!estimate.view) return;
-	const auto tensor = m_zipDepth.TensorSize();
-	DrawDepthView(target, picture, estimate.view, tensor, CRect(0, 0, tensor.cx, tensor.cy),
-		estimate.rotated ? 270 : 0, false);
-}
-
-void CDX11VideoProcessor::DrawDepthView(ID3D11Texture2D* target, const CRect& picture,
-	ID3D11ShaderResourceView* depth, SIZE textureSize, const CRect& source, int rotation, bool inverted)
-{
-	if (textureSize.cx <= 0 || textureSize.cy <= 0 || picture.IsRectEmpty()) return;
-	if (!m_pPS_DepthOverlay) {
-		static constexpr char source[] = R"(
-Texture2D<float> Depth : register(t0);
-SamplerState Linear : register(s0);
-cbuffer Settings : register(b0) { float Inverted; float DepthSpan; };
-// Match the Simple VS signature so TEXCOORD stays in the same register.
-struct PS_INPUT {
-    float4 Pos : SV_POSITION;
-    float2 Tex : TEXCOORD;
-};
-float4 main(PS_INPUT input) : SV_TARGET {
-    const float sampleDepth = Depth.SampleLevel(Linear, input.Tex, 0);
-    const float depth = Inverted > 0.5 ? 1.0 - sampleDepth : sampleDepth;
-    const float gray = saturate(0.5 + (0.5 - depth) / DepthSpan);
-    return float4(gray, gray, gray, 1.0);
-}
-)";
-		D3D11_BLEND_DESC blend{};
-		auto& color = blend.RenderTarget[0];
-		color.BlendEnable = TRUE;
-		color.SrcBlend = D3D11_BLEND_BLEND_FACTOR;
-		color.DestBlend = D3D11_BLEND_INV_BLEND_FACTOR;
-		color.BlendOp = D3D11_BLEND_OP_ADD;
-		color.SrcBlendAlpha = D3D11_BLEND_ONE;
-		color.DestBlendAlpha = D3D11_BLEND_ZERO;
-		color.BlendOpAlpha = D3D11_BLEND_OP_ADD;
-		color.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED |
-			D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
-		CComPtr<ID3DBlob> code;
-		const D3D11_BUFFER_DESC constants{16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
-		if (FAILED(CompileShader(source, nullptr, "ps_4_0", &code)) ||
-			FAILED(m_pDevice->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(),
-				nullptr, &m_pPS_DepthOverlay)) ||
-			FAILED(m_pDevice->CreateBlendState(&blend, &m_pDepthOverlayBlendState)) ||
-			FAILED(m_pDevice->CreateBuffer(&constants, nullptr, &m_pDepthOverlayConstants))) {
-			m_depthOverlayShaderFailed = true;
-			return;
-		}
-	}
-	CComPtr<ID3D11RenderTargetView> targetView;
-	if (FAILED(m_pDevice->CreateRenderTargetView(target, nullptr, &targetView)) ||
-		FAILED(FillVertexBuffer(m_pDeviceContext, m_pVertexBuffer, textureSize.cx, textureSize.cy, source, rotation, false))) return;
-	const float settings[4]{inverted ? 1.f : 0.f,
-		inverted ? CZipDepthHistory::OutputDepthSpan : CZipDepth::NormalizedDepthSpan};
-	m_pDeviceContext->UpdateSubresource(m_pDepthOverlayConstants, 0, nullptr, settings, 0, 0);
-	D3D11_VIEWPORT viewport{FLOAT(picture.left), FLOAT(picture.top),
-		FLOAT(picture.Width()), FLOAT(picture.Height()), 0.0f, 1.0f};
-	m_pDeviceContext->RSSetState(nullptr);
-	constexpr float opacity = 0.95f;
-	const FLOAT blendFactor[]{opacity, opacity, opacity, 1.0f};
-	TextureBlt11(m_pDeviceContext, targetView, viewport, m_pVSimpleInputLayout, m_pVS_Simple,
-		m_pPS_DepthOverlay, depth, m_pSamplerLinear, m_pDepthOverlayConstants, m_pVertexBuffer,
-		m_pDepthOverlayBlendState, blendFactor);
-	m_pDeviceContext->OMSetBlendState(nullptr, nullptr, D3D11_DEFAULT_SAMPLE_MASK);
-	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
-}
-
 void CDX11VideoProcessor::DrawSubtitles(ID3D11Texture2D* pRenderTarget, const CRect* picture)
 {
 	HRESULT hr = S_OK;
@@ -4572,238 +3689,6 @@ void CDX11VideoProcessor::DrawSubtitles(ID3D11Texture2D* pRenderTarget, const CR
 	}
 }
 
-bool CDX11VideoProcessor::DlssSRSourceAllowed(const CRect* preparedRect) const
-{
-    // Use exactly the same decoded-source size thresholds as RTX VSR.
-    const UINT width = preparedRect ? preparedRect->Width() : m_srcWidth;
-    const UINT height = preparedRect ? preparedRect->Height() : m_srcHeight;
-    if (!width || !height) return false;
-    const UINT longSide = std::max(width, height);
-    const UINT shortSide = std::min(width, height);
-    switch (m_dlssSRSourceLimit) {
-    case DLSSSR_SOURCE_SD:    return longSide <= 1024 && shortSide <= 576;
-    case DLSSSR_SOURCE_720p:  return longSide <= 1280 && shortSide <= 720;
-    case DLSSSR_SOURCE_1080p: return longSide <= 2048 && shortSide <= 1088;
-    case DLSSSR_SOURCE_1440p: return longSide <= 2560 && shortSide <= 1440;
-    default: return false;
-    }
-}
-
-bool CDX11VideoProcessor::CanDlssSRUpscale(const CRect& srcRect, const CRect& dstRect, bool preparedRgb)
-{
-	return m_iVPSuperRes == SUPERRES_DLSS_SR && DlssSRSourceAllowed(preparedRgb ? &srcRect : nullptr)
-		&& m_VendorId == PCIV_NVIDIA && (preparedRgb || (m_D3D11VP.IsReady() && m_srcParams.CDepth == 8)) &&
-		(m_SampleFormat == D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE || m_iVPDeinterlacing != DEINT_Disable) &&
-		!SourceIsHDR() && !m_bVPUseRTXVideoHDR && !m_iRotation && !m_bFlip && (!m_resizePending || m_processingSize.cx > 0) &&
-		!srcRect.IsRectEmpty() &&
-		((dstRect.Width() > srcRect.Width() && dstRect.Height() > srcRect.Height()) ||
-		 (m_dlssSRDlaa && dstRect.Width() == srcRect.Width() && dstRect.Height() == srcRect.Height()));
-}
-
-Tex2D_t* CDX11VideoProcessor::PrepareDlssSR(const CRect& srcRect, const CRect& dstRect, bool afterMfg)
-{
-	if (m_dlssSRAfterMfg != afterMfg) {
-		m_dlssSR.ResetHistory();
-		m_dlssSRAfterMfg = afterMfg;
-	}
-	m_dlssSRInputStatus = nullptr;
-	if (UsesZipDepthSr()) m_zipDepth.Prepare(m_pDevice);
-	return m_dlssSR.Prepare(m_pDevice, srcRect.Width(), srcRect.Height(),
-		dstRect.Width(), dstRect.Height(), !m_pFilter->m_Sets.bWaitForExtendedStartup);
-}
-
-Tex2D_t* CDX11VideoProcessor::EvaluateDlssSR(const Tex2D_t& source, Tex2D_t& input, const CRect& sourceRect,
-                                             REFERENCE_TIME timestamp, float frameTimeMs, bool* overlayInputHandled, bool depthPrepared)
-{
-	if (FAILED(TextureCopyRect(source, input.pTexture, sourceRect, sourceRect, m_pPS_Simple, nullptr, 0, false))) {
-		m_dlssSRInputStatus = L"source conversion failed";
-		m_dlssSR.ResetHistory();
-		return nullptr;
-	}
-	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
-	ID3D11ShaderResourceView* empty = nullptr;
-	m_pDeviceContext->PSSetShaderResources(0, 1, &empty);
-	const bool sourceFrame = !m_dlssSRAfterMfg;
-	const bool overlay = sourceFrame && overlayInputHandled && !m_mfgMultiplier &&
-		!depthPrepared && BlendSourceDepthOverlay(input.pTexture, source.pShaderResource, sourceRect, timestamp);
-	ID3D11ShaderResourceView* cleanSource = depthPrepared || overlay ? source.pShaderResource.p : nullptr;
-	auto* output = m_dlssSR.Evaluate(timestamp, frameTimeMs, UsesZipDepthSr() ? &m_zipDepth : nullptr,
-		sourceFrame, cleanSource);
-	if (overlayInputHandled) *overlayInputHandled = output && overlay;
-	return output;
-}
-
-Tex2D_t* CDX11VideoProcessor::TryDlssSR(const CRect& srcRect, const CRect& dstRect, const bool second, const REFERENCE_TIME timestamp, bool* overlayInputHandled, const Tex2D_t* preparedSource)
-{
-	if (m_iVPSuperRes != SUPERRES_DLSS_SR) {
-		return nullptr;
-	}
-	if (!CanDlssSRUpscale(srcRect, dstRect, preparedSource != nullptr)) {
-        m_dlssSRInputStatus = !DlssSRSourceAllowed(preparedSource ? &srcRect : nullptr) ? L"source exceeds DLSS size threshold" :
-            m_SampleFormat != D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE && m_iVPDeinterlacing == DEINT_Disable
-            ? L"enable D3D11 deinterlacing for this source"
-            : preparedSource ? L"requires NVIDIA and an SDR upscale (or native DLAA)"
-            : L"requires NVIDIA D3D11 VP and an 8-bit SDR upscale (or native DLAA)";
-		return nullptr;
-	}
-	const CRect nativeRect(0, 0, srcRect.Width(), srcRect.Height());
-	auto* input = PrepareDlssSR(nativeRect, dstRect, false);
-	if (!input) {
-		return nullptr;
-	}
-	const float frameTimeMs = m_rtAvgTimePerFrame > 0 ? float(m_rtAvgTimePerFrame / 10000.0) : 41.7f;
-	if (preparedSource) {
-		return EvaluateDlssSR(*preparedSource, *input, nativeRect, timestamp, frameTimeMs, overlayInputHandled, true);
-	}
-	if (FAILED(m_dlssSRSource.CheckCreate(m_pDevice, m_D3D11OutputFmt, srcRect.Width(), srcRect.Height(), Tex2D_DefaultShaderRTarget)) ||
-	    FAILED(D3D11VPPass(m_dlssSRSource.pTexture, srcRect, nativeRect, second))) {
-		m_dlssSRInputStatus = L"source conversion failed";
-		return nullptr;
-	}
-	return EvaluateDlssSR(m_dlssSRSource, *input, nativeRect, timestamp, m_bDoubleFrames ? frameTimeMs / 2 : frameTimeMs, overlayInputHandled);
-}
-
-bool CDX11VideoProcessor::CanProjectJvr() const
-{
-	// The manual JVR preset describes progressive SDR full-SBS, two square eyes.
-	return m_jvrFlatView && !m_jvrShaderFailed && !m_srcRect.IsRectEmpty() && m_srcRect.Height() >= 2 &&
-		int64_t(m_srcRect.Width()) == 2LL * m_srcRect.Height() &&
-		!m_bInterlaced && m_SampleFormat == D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE &&
-		!SourceIsHDR() && !m_bVPUseRTXVideoHDR && !m_iRotation && !m_bFlip &&
-		!m_pPSHalfOUtoInterlace;
-}
-
-void CDX11VideoProcessor::ConfigureJvrProjection(const Settings_t& config)
-{
-	m_jvrEye = config.iJvrEye == 1 ? 1 : 0;
-	const int vertical = std::clamp(config.iJvrVertical, JVR_VERTICAL_MIN, JVR_VERTICAL_MAX);
-	const int reprojection = std::clamp(config.iJvrReprojection, JVR_REPROJECTION_MIN, JVR_REPROJECTION_MAX);
-	m_jvrView = jvr::MakeView(vertical, reprojection);
-}
-
-CRect CDX11VideoProcessor::ProcessingSourceRect(bool projected) const
-{
-	if (!projected) return m_srcRect;
-	const auto size = jvr::SourceFrameSize(m_srcRect.Height());
-	return CRect(0, 0, size.width, size.height);
-}
-
-CRect CDX11VideoProcessor::PictureForPlayback(bool projected) const
-{
-	if (!projected) return m_videoRect;
-	const auto size = jvr::FitFrame(m_windowRect.Width(), m_windowRect.Height());
-	const LONG left = m_windowRect.left + (m_windowRect.Width() - size.width) / 2;
-	const LONG top = m_windowRect.top + (m_windowRect.Height() - size.height) / 2;
-	return CRect(left, top, left + size.width, top + size.height);
-}
-
-HRESULT CDX11VideoProcessor::PrepareJvrFrame(const CRect& picture, bool second)
-{
-	if (m_jvrShaderFailed) return E_FAIL;
-	const Tex2D_t* source = &m_TexSrcVideo;
-	CRect sourceRect = m_srcRect;
-	if (m_D3D11VP.IsReady()) {
-		auto hr = m_jvrSource.CheckCreate(m_pDevice, m_D3D11OutputFmt, sourceRect.Width(), sourceRect.Height(),
-			Tex2D_DefaultShaderRTarget);
-		if (FAILED(hr)) return hr;
-		const CRect native(0, 0, sourceRect.Width(), sourceRect.Height());
-		hr = D3D11VPPass(m_jvrSource.pTexture, sourceRect, native, second);
-		if (FAILED(hr)) return hr;
-		source = &m_jvrSource;
-		sourceRect = native;
-	} else if (m_PSConvColorData.bEnable) {
-		const auto hr = ConvertColorPass(m_TexConvertOutput.pTexture);
-		if (FAILED(hr)) return hr;
-		source = &m_TexConvertOutput;
-		sourceRect.SetRect(0, 0, source->desc.Width, source->desc.Height);
-	}
-	const auto hr = m_jvrFrame.CheckCreate(m_pDevice, DXGI_FORMAT_B8G8R8A8_UNORM,
-		picture.Width(), picture.Height(), Tex2D_DefaultShaderRTarget);
-	if (FAILED(hr)) return hr;
-	const auto result = ProjectJvr(*source, m_jvrFrame.pTexture, sourceRect, picture);
-	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
-	return result;
-}
-
-HRESULT CDX11VideoProcessor::ProjectJvr(const Tex2D_t& source, ID3D11Texture2D* target,
-	const CRect& sourceRect, const CRect& picture)
-{
-	if (m_jvrShaderFailed || !source.pShaderResource || sourceRect.IsRectEmpty() || picture.IsRectEmpty()) {
-		return E_FAIL;
-	}
-	using Constants = std::array<float, 16>;
-	static_assert(sizeof(Constants) == 4 * 16);
-	if (!m_jvrShader) {
-		static constexpr char shader[] = R"(
-Texture2D<float4> Video : register(t0);
-SamplerState Linear : register(s0);
-cbuffer Projection : register(b0) {
-    float4 Viewport; // centre in output pixels and plane units per pixel
-    float4 Eye;      // selected eye's texture UV origin and extent
-    float4 Lens;     // half a source texel and the eye's local optical centre
-    float4 View;     // focal length, cosine and sine of pitch, vertical plane offset
-};
-
-float4 main(float4 position : SV_POSITION) : SV_TARGET {
-    float2 plane = (position.xy - Viewport.xy) * Viewport.zw;
-    plane.y += View.w;
-
-    // Inverse stereographic projection. The common normalization factor
-    // can be omitted because the source lens uses the ray's angle.
-    float3 ray = float3(plane, 1.0 - 0.25 * dot(plane, plane));
-    const float y = View.y * ray.y + View.z * ray.z;
-    const float z = View.y * ray.z - View.z * ray.y;
-    const float2 radial = float2(ray.x, y);
-    const float radius = length(radial);
-    // Extreme pitch can include the rear optical axis. Its lens azimuth is undefined.
-    if (z < 0.0 && radius < 1e-7) return float4(0, 0, 0, 1);
-    const float angle = atan2(radius, z);
-    const float2 eyeUV = Lens.zw + radial * (View.x * angle / max(radius, 1e-7));
-    if (any(eyeUV < 0.0) || any(eyeUV > 1.0)) return float4(0, 0, 0, 1);
-
-    // Keep bilinear filtering inside the selected eye even at the SBS seam.
-    const float2 uv = clamp(Eye.xy + Eye.zw * eyeUV, Eye.xy + Lens.xy,
-        Eye.xy + Eye.zw - Lens.xy);
-    return Video.SampleLevel(Linear, uv, 0);
-}
-)";
-		CComPtr<ID3DBlob> bytecode;
-		HRESULT hr = CompileShader(shader, nullptr, "ps_4_0", &bytecode);
-		if (SUCCEEDED(hr)) {
-			hr = m_pDevice->CreatePixelShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &m_jvrShader);
-		}
-		if (SUCCEEDED(hr)) {
-			const D3D11_BUFFER_DESC desc{sizeof(Constants), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
-			hr = m_pDevice->CreateBuffer(&desc, nullptr, &m_jvrConstants);
-		}
-		if (FAILED(hr)) {
-			m_jvrShader.Release();
-			m_jvrShaderFailed = true;
-			DLog(L"JVR flat view: shader initialization failed ({})", HR2Str(hr));
-			return hr;
-		}
-		m_jvrUploadedConstants = {};
-	}
-
-	constexpr jvr::Profile lens{};
-	const auto& eye = lens.eyes[m_jvrEye];
-	const float invW = 1.0f / source.desc.Width;
-	const float invH = 1.0f / source.desc.Height;
-	const float eyeWidth = 0.5f * sourceRect.Width();
-	const Constants constants{
-		picture.left + picture.Width() * 0.5f, picture.top + picture.Height() * 0.5f,
-		float(2 * jvr::PlaneHalfWidth / picture.Width()), float(2 * jvr::PlaneHalfHeight / picture.Height()),
-		(sourceRect.left + m_jvrEye * eyeWidth) * invW, sourceRect.top * invH, eyeWidth * invW, sourceRect.Height() * invH,
-		0.5f * invW, 0.5f * invH, eye.x, eye.y,
-		eye.focal, m_jvrView.cosPitch, m_jvrView.sinPitch, m_jvrView.verticalShift
-	};
-	if (constants != m_jvrUploadedConstants) {
-		m_pDeviceContext->UpdateSubresource(m_jvrConstants, 0, nullptr, constants.data(), 0, 0);
-		m_jvrUploadedConstants = constants;
-	}
-	return TextureCopyRect(source, target, sourceRect, picture, m_jvrShader, m_jvrConstants, 0, false, true);
-}
-
 HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect& srcRect, const CRect& dstRect, const bool second, const bool allowDlssSR, const REFERENCE_TIME timestamp, CTex2DRing* processingPostScale, bool* overlayInputHandled, const Tex2D_t* preparedSource)
 {
 	if (overlayInputHandled) *overlayInputHandled = false;
@@ -4817,29 +3702,10 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 	const UINT numSteps = GetPostScaleSteps();
 	auto& postScale = processingPostScale ? *processingPostScale : m_TexsPostScale;
 
-	const bool srWasActive = m_dlssSR.Active();
-	auto* srOutput = allowDlssSR ? TryDlssSR(srcRect, dstRect, second, timestamp, overlayInputHandled, preparedSource) : nullptr;
-	if (allowDlssSR && !srOutput && srWasActive) {
-		m_dlssSR.ResetHistory();
-	}
-	if (allowDlssSR && srWasActive != bool(srOutput) && m_mfgMultiplier && !MfgSourceMeetsDisplayRate()) {
-		if (m_pFilter->m_Sets.bWaitForExtendedStartup) {
-			StopMfg(false);
-		} else {
-			// Completed originals still belong to the previous visual route.
-			// Keep their deadlines and restart interpolation at this boundary.
-			ResetMfgFrameAnalysis();
-			m_mfgRepeatTiming.ClearEvidence();
-		}
-		m_mfg.ResetHistory();
-	}
-	if (srOutput) {
-		pInputTexture = srOutput;
-		rSrc.SetRect(0, 0, srOutput->desc.Width, srOutput->desc.Height);
-	}
-	else if (preparedSource) {
-		pInputTexture = preparedSource;
-		m_bVPScalingUseShaders = m_D3D11VP.IsReady();
+	const auto* editionSource = SelectEditionProcessingSource(srcRect, dstRect, second,
+		allowDlssSR, timestamp, overlayInputHandled, preparedSource, rSrc);
+	if (editionSource) {
+		pInputTexture = editionSource;
 	}
 	else if (m_D3D11VP.IsReady()) {
 		if (!(m_iSwapEffect == SWAPEFFECT_Discard && (m_VendorId == PCIV_AMDATI || m_VendorId == PCIV_INTEL))) {
@@ -4895,7 +3761,7 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 			m_bVPScalingUseShaders = preparedSource || rSrc.Width() != dstRect.Width() || rSrc.Height() != dstRect.Height();
 		}
 
-		if (preparedSource || srOutput || rSrc != dstRect || rotation != 0) {
+		if (editionSource || rSrc != dstRect || rotation != 0) {
 			hr = ResizeShaderPass(*pInputTexture, pRT, rSrc, dstRect, rotation);
 			if (preparedSource && FAILED(hr)) return hr;
 		} else {
@@ -5004,162 +3870,6 @@ void CDX11VideoProcessor::SetVideoRect(const CRect& videoRect)
 }
 
 // Work on a video-sized texture independently from the swap chain.
-CRect CDX11VideoProcessor::ProcessingRect() const
-{
-	return m_processingSize.cx > 0 ? CRect(CPoint(0, 0), m_processingSize) : PictureForPlayback(CanProjectJvr());
-}
-
-void CDX11VideoProcessor::UpdateProcessingResolution()
-{
-	const auto previous = m_processingSize;
-	if ((m_iVPSuperRes == SUPERRES_Disable && (!m_mfgMultiplier || MfgSourceMeetsDisplayRate())) || m_pPSHalfOUtoInterlace) {
-		m_processingSize = CSize(0, 0);
-		if (previous.cx > 0) {
-			m_processingTexture.Release();
-			m_processingPostScale.Release();
-			if (m_D3D11VP.IsReady() && m_bVPScaling) UpdateTexures();
-		}
-		return;
-	}
-	if (m_videoRect.IsRectEmpty() || m_srcRectWidth <= 0 || m_srcRectHeight <= 0) {
-		return;
-	}
-
-	const auto& display = m_pFilter->m_DisplayConfig;
-	const bool projected = CanProjectJvr();
-	const double ratio = projected ? double(jvr::AspectWidth) / jvr::AspectHeight : m_srcAspectRatioX && m_srcAspectRatioY
-		? double(m_srcAspectRatioX) / m_srcAspectRatioY : double(m_srcRectWidth) / m_srcRectHeight;
-	const bool rotated = m_iRotation % 180 != 0;
-	const double aspect = rotated ? 1.0 / ratio : ratio;
-	if (display.width && display.height) {
-		// Fit the display without adding letterbox bars to the inference input.
-		const auto width = std::min<double>(display.width, display.height * aspect);
-		m_processingSize = CSize(std::max(1L, LONG(std::lround(width))),
-			std::max(1L, LONG(std::lround(width / aspect))));
-	} else {
-		// Keep a window-independent canvas even without display mode information.
-		const LONG height = projected ? ProcessingSourceRect(true).Height() : rotated ? m_srcRectWidth : m_srcRectHeight;
-		m_processingSize = CSize(std::max(1L, LONG(std::lround(height * aspect))), height);
-	}
-	if (previous.cx > 0 && previous != m_processingSize && m_mfgMultiplier) {
-		StopMfg(false);
-		m_mfg.ResetHistory();
-		m_mfgAutoEpoch = m_mfgAutoLastPts = -1;
-		m_mfgInputModeKnown = false;
-	}
-	// Display mode/source changes can arrive without a SetVideoRect event.
-	// Keep the VP intermediate at the same fixed size before the next frame.
-	if (previous != m_processingSize && m_D3D11VP.IsReady() && m_bVPScaling) {
-		UpdateTexures();
-	}
-}
-
-HRESULT CDX11VideoProcessor::SetWindowRect(const CRect& windowRect)
-{
-    if (m_windowRect != windowRect || m_resizePending) m_completedGeometryTick = GetTickCount64();
-    const bool sizeChanged = windowRect.Width() != m_windowRect.Width() ||
-                             windowRect.Height() != m_windowRect.Height();
-    if (!sizeChanged) {
-        // Position changes are not swap-chain resizes. When a drag returns to
-        // the original size, discard the uncommitted resize request. Treat
-        // cancellation of a pending size as the final geometry event so the
-        // completed-frame pacing estimator also gets a clean settling window.
-        if (m_resizePending) m_resizeLastChangeTick = GetTickCount64();
-        m_resizePending = false;
-        m_windowRect = windowRect;
-        UpdateRenderRect();
-        return S_OK;
-    }
-
-    // During a continuous drag, resizing DXGI buffers and tearing down NGX on
-    // every WM_SIZE event is extremely expensive. Keep rendering the source to
-    // the last committed buffer until the final dimensions settle. This path
-    // only applies to windowed playback with MFG enabled and a running graph.
-    const bool defer = m_pDXGISwapChain1 && !m_bExclusiveScreen &&
-        (m_mfgMultiplier.load(std::memory_order_relaxed) != 0 ||
-         CompletedFramesPending() || m_completedLast) &&
-        m_pFilter->m_filterState == State_Running &&
-        windowRect.Width() > 0 && windowRect.Height() > 0;
-    if (defer) {
-        if (!m_resizePending && m_processingSize.cx == 0 && !CompletedFramesPending()) {
-            // Drain the presenter once, but retain the NGX device/session.
-            // Session::Generate already handles a genuine input-size change.
-            StopMfg(false);
-            m_mfg.ResetHistory();
-            m_mfgAutoEpoch = m_mfgAutoLastPts = -1;
-            m_mfgInputModeKnown = false;
-        }
-        m_resizePending = true;
-        m_resizeTarget = windowRect;
-        m_resizeLastChangeTick = GetTickCount64();
-        return S_OK;
-    }
-
-    m_resizePending = false;
-    if (m_mfgMultiplier.load(std::memory_order_relaxed) && m_processingSize.cx == 0) {
-        StopMfg(false);
-        m_mfg.ResetHistory();
-        m_mfgAutoEpoch = m_mfgAutoLastPts = -1;
-        m_mfgInputModeKnown = false;
-    }
-    m_windowRect = windowRect;
-    UpdateRenderRect();
-    HRESULT hr = S_OK;
-    if (m_pDXGISwapChain1 && !m_bExclusiveScreen &&
-        windowRect.Width() > 0 && windowRect.Height() > 0) {
-        if (m_processingSize.cx > 0) DiscardMfgPreparedFrame();
-        m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
-        hr = m_pDXGISwapChain1->ResizeBuffers(0,
-            static_cast<UINT>(windowRect.Width()),
-            static_cast<UINT>(windowRect.Height()), DXGI_FORMAT_UNKNOWN, 0);
-    }
-    UpdateStatsByWindow();
-    UpdatePostScaleTexures();
-    return hr;
-}
-
-HRESULT CDX11VideoProcessor::ApplyPendingWindowResize(bool settle)
-{
-    if (!m_resizePending) return S_OK;
-    // 140 ms after the LAST change, not after the first. The presenter
-    // continues to use the old DXGI buffers at source cadence meanwhile.
-    constexpr ULONGLONG settleMs = 140;
-    if (settle && m_pFilter->m_filterState == State_Running &&
-        GetTickCount64() - m_resizeLastChangeTick < settleMs) return S_FALSE;
-
-    const CRect previous = m_windowRect;
-    const CRect finalRect = m_resizeTarget;
-    m_completedGeometryTick = GetTickCount64();
-    m_resizePending = false;
-    m_windowRect = finalRect;
-    if (m_pDXGISwapChain1 && !m_bExclusiveScreen &&
-        finalRect.Width() > 0 && finalRect.Height() > 0) {
-        if (m_processingSize.cx > 0) DiscardMfgPreparedFrame();
-        m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
-        const HRESULT hr = m_pDXGISwapChain1->ResizeBuffers(0,
-            static_cast<UINT>(finalRect.Width()),
-            static_cast<UINT>(finalRect.Height()), DXGI_FORMAT_UNKNOWN, 0);
-        if (FAILED(hr)) {
-            // Do not run the renderer with mismatched viewport/buffer sizes.
-            m_windowRect = previous;
-            UpdateRenderRect();
-            m_resizePending = true;
-            m_resizeLastChangeTick = GetTickCount64();
-            DLog(L"Deferred DXGI ResizeBuffers failed: {}", HR2Str(hr));
-            return hr;
-        }
-    }
-    UpdateRenderRect();
-    UpdateStatsByWindow();
-    UpdatePostScaleTexures();
-    if (mfg::SourceCadenceTrace().Enabled()) {
-        mfg::SourceCadenceTrace().Record("window_resize_commit", GetPreciseTick(), -1, -1,
-            0, 0, 0, 0, 0, false, 0, S_OK);
-    }
-    DLog(L"Deferred DXGI resize committed: {}x{}", finalRect.Width(), finalRect.Height());
-    return S_OK;
-}
-
 HRESULT CDX11VideoProcessor::Reset(bool bDisplayModeChange)
 {
 	DLog(L"CDX11VideoProcessor::Reset({})", bDisplayModeChange);
@@ -5408,44 +4118,7 @@ HRESULT CDX11VideoProcessor::GetVPInfo(std::wstring& str)
 {
 	str = L"DirectX 11";
 	str += std::format(L"\nGraphics adapter: {}", m_strAdapterDescription);
-	if (m_processingSize.cx > 0) {
-		str += std::format(L"\nProcessing size : {}x{}; video destination {}x{}", m_processingSize.cx,
-			m_processingSize.cy, m_videoRect.Width(), m_videoRect.Height());
-	}
-	if (m_iVPSuperRes == SUPERRES_DLSS_SR) {
-		if (m_dlssSRInputStatus) {
-			str += std::format(L"\nDLSS SR        : Inactive ({}); {}x{} to {}x{}, {}-bit, VP scaling {}",
-				m_dlssSRInputStatus, m_srcRect.Width(), m_srcRect.Height(),
-				m_videoRect.Width(), m_videoRect.Height(), m_srcParams.CDepth, m_bVPScaling);
-		} else {
-			str += std::format(L"\nDLSS SR        : {}", m_dlssSR.Status(UsesZipDepthSr() ? &m_zipDepth : nullptr));
-			if (m_dlssSR.Active()) {
-				str += m_dlssSRAfterMfg ? L" (after MFG)" : L" (source frames)";
-				if (m_SampleFormat != D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE) str += L" (deinterlaced)";
-				const auto stats = m_dlssSR.GetStats();
-				if (stats.ngxGpuTimeValid) str += std::format(L"\nDLSS SR NGX GPU: {:.2f} ms", stats.ngxGpuMs);
-			}
-		}
-	}
-	if (UsesZipDepthSr() || UsesZipDepthMfg()) {
-		const auto& depth = m_zipDepth.GetCounters();
-		const auto latest = m_zipDepth.LatestPreview();
-		str += std::format(L"\nZipDepth       : {} captures, {} DirectML jobs, {} maps ({} late)"
-			L"\nZipDepth usage : {} SR evaluations, {} MFG submissions",
-			depth.captures, depth.jobs, depth.maps, depth.lateMaps, depth.srEvaluations, depth.mfgSubmissions);
-		if (const auto* precision = m_zipDepth.ModelPrecision(); *precision)
-			str += std::format(L"\nZipDepth model : {}", precision);
-		if (depth.maps)
-			str += std::format(L"\nZipDepth timing: GPU job {:.1f} ms, ready at {:.0f} ms age",
-				depth.inferenceMs, double(depth.resultAge) / 10000.0);
-		if (depth.gpuTimings.available)
-			str += std::format(L"\nZipDepth GPU   : pack {:.2f} ms, model interval {:.2f} ms, post {:.2f} ms",
-				depth.gpuTimings.packMs, depth.gpuTimings.modelMs, depth.gpuTimings.postMs);
-		if (latest.view)
-			str += std::format(L"\nZipDepth latest: {:.0f} ms PTS", double(latest.pts) / 10000.0);
-		else
-			str += std::format(L"\nZipDepth latest: {}", m_zipDepth.Status());
-	}
+	AppendEditionProcessorInfo(str);
 	str.append(L"\nVideoProcessor  : ");
 	if (m_D3D11VP.IsReady()) {
 		D3D11_VIDEO_PROCESSOR_CAPS caps;
@@ -5559,84 +4232,7 @@ HRESULT CDX11VideoProcessor::GetVPInfo(std::wstring& str)
 void CDX11VideoProcessor::Configure(const Settings_t& requested)
 {
 	Settings_t config = requested;
-	mfg::EnforceScope(config);
-	const bool jvrFlatView = m_pFilter->JvrProjectionRequested(config);
-	ApplyJvrPlaybackMode(config, jvrFlatView);
-	const int superRes = config.bDlssSR ? SUPERRES_DLSS_SR : config.iVPSuperRes;
-	const unsigned mfgMultiplier = config.bUseD3D11 ? config.iMfgMultiplier : 0;
-	const bool srWasEnabled = m_iVPSuperRes == SUPERRES_DLSS_SR;
-	const bool srChanged = srWasEnabled != config.bDlssSR ||
-		(config.bDlssSR && m_dlssSRSourceLimit != config.iDlssSRSourceLimit);
-	const bool wasUsingZipDepth = UsesZipDepthSr() || UsesZipDepthMfg();
-	const bool useZipDepth = (config.bUseZipDepthSr && config.bDlssSR) ||
-		(config.bUseZipDepthMfg && mfgMultiplier);
-	const bool overlayChanged = (wasUsingZipDepth && m_showDepthOverlay) !=
-		(useZipDepth && config.bShowDepthOverlay);
-	const unsigned processingMode = config.iMfgProcessingMode <= 1 ? config.iMfgProcessingMode : 0;
-	const bool jvrModeChanged = jvrFlatView != m_jvrFlatView;
-	if (processingMode != m_mfgProcessingMode ||
-		(m_mfgMultiplier && (srChanged || overlayChanged || jvrModeChanged) && m_pFilter->GetActive())) {
-		SwitchMfgUpscaleSlot(processingMode);
-	} else if (overlayChanged) {
-		m_dlssSR.ResetHistory();
-	}
-	if (config.bShowFeatureBadges &&
-		(!m_showFeatureStatus.load(std::memory_order_relaxed) ||
-		 m_mfgMultiplier.load(std::memory_order_relaxed) != mfgMultiplier ||
-		 m_iVPSuperRes != superRes || srChanged)) {
-		ResetFeatureStatus();
-	}
-	m_jvrFlatView = jvrFlatView;
-	ConfigureJvrProjection(config);
-	if (jvrModeChanged) {
-		m_zipDepth.StopLookahead();
-		m_zipDepth.ResetHistory();
-		if (!jvrFlatView) {
-			m_jvrSource.Release();
-			m_jvrFrame.Release();
-		}
-	}
-	m_rtVideoDelay=config.iVideoDelay*10000LL;
-	// MFG cannot remain active on an existing D3D11 instance after the
-	// user disables D3D11. Preserve the saved selection in Settings_t.
-	if (m_mfgLowMotionEnabled != config.bMfgLowMotion) {
-		if (m_mfgPendingRepeats.load(std::memory_order_relaxed) || m_mfgRepeatHold) m_mfg.ResetHistory();
-		ResetMfgFrameAnalysis();
-		m_mfgRepeatTiming.ClearEvidence();
-		m_mfgDecodedDifference = {};
-		m_mfgRepeatsBypassed = 0;
-		m_mfgLowMotionSaved = 0;
-		m_mfgLowMotionVetoes = 0;
-		m_mfgLowMotionEnabled = config.bMfgLowMotion;
-	}
-	if (m_mfgMultiplier != mfgMultiplier) {
-		// There is no MFG session to stop when enabling for the first time.
-		// NGX initialization stays lazy: QueueMfg() is entered only after a
-		// valid video frame arrives on the active DirectShow render path.
-		if (m_mfgMultiplier) {
-			if (mfgMultiplier && !m_mfg.Failed()) {
-				StopMfg(false);
-				m_mfg.ResetHistory();
-			} else {
-				StopMfg();
-			}
-		}
-		m_mfgMultiplier = mfgMultiplier;
-		m_mfgAutoEpoch = m_mfgAutoLastPts = -1;
-	}
-	SetSvdLutStrength(config.GetSvdLutStrength());
-	if (jvrModeChanged) ResetSvdLutHistory();
-	if (m_useZipDepthSr != config.bUseZipDepthSr) m_dlssSR.ResetHistory();
-	if (m_useZipDepthMfg != config.bUseZipDepthMfg || m_adaptiveMfgDepth != config.bAdaptiveMfgDepth)
-		m_mfg.ResetDepthHistory();
-	m_useZipDepthSr = config.bUseZipDepthSr;
-	m_useZipDepthMfg = config.bUseZipDepthMfg;
-	m_adaptiveMfgDepth = config.bAdaptiveMfgDepth;
-	m_showMfgMotion = config.bShowMfgMotion;
-	m_showDepthOverlay = config.bShowDepthOverlay;
-	m_depth3DPreview = config.bDepth3DPreview;
-	if (!m_showDepthOverlay || !useZipDepth) m_depthOverlayCapture.Release();
-	if (wasUsingZipDepth && !useZipDepth) m_zipDepth.Stop();
+	const auto [superRes, srChanged, jvrModeChanged] = ConfigureEdition(config);
 	bool changeWindow            = false;
 	bool changeDevice            = false;
 	bool changeVP                = false;
@@ -5942,20 +4538,7 @@ void CDX11VideoProcessor::SetStereo3dTransform(int value)
 
 void CDX11VideoProcessor::Flush()
 {
-	if (m_pFilter->m_filterState == State_Stopped) {
-		m_startupHasPicture = false;
-		m_extendedStartupPending = false;
-		m_mfgDisplayRate = {};
-	} else {
-		m_mfgDisplayRate.BreakContinuity();
-	}
-	ClearCompletedFrames(false);
-	ResetSvdLutHistory();
-	m_zipDepth.StopLookahead();
-	m_zipDepth.ResetHistory();
-	m_dlssSR.ResetHistory();
-	StopMfg(false);m_mfg.ResetHistory();
-	m_mfgAutoEpoch = m_mfgAutoLastPts = -1;
+	FlushEdition();
 	if (m_D3D11VP.IsReady()) {
 		m_D3D11VP.ResetFrameOrder();
 	}
@@ -6258,98 +4841,6 @@ void CDX11VideoProcessor::UpdateStatsPostProc()
 */
 
 
-void CDX11VideoProcessor::ResetFeatureStatus()
-{
-	std::lock_guard guard(m_featureStatusMutex);
-	m_featureStatusUntil = 0;
-	m_featureStatusLastGenerated = m_mfgGeneratedPresents.load(std::memory_order_relaxed);
-	m_featureStatusGeneratedTick = 0;
-	m_featureStatusMfgActive = false;
-}
-
-LONG CDX11VideoProcessor::DrawFeatureStatus(ID3D11Texture2D* target)
-{
-	if (!target || !m_pDevice || !m_showFeatureStatus.load(std::memory_order_relaxed)) {
-		return 0;
-	}
-
-	const auto state = m_pFilter->m_filterState;
-	if (state == State_Stopped) return 0;
-	const bool paused = state == State_Paused;
-	D3D11_TEXTURE2D_DESC desc{};
-	target->GetDesc(&desc);
-	const CSize size(static_cast<LONG>(desc.Width), static_cast<LONG>(desc.Height));
-	const ULONGLONG now = GetTickCount64();
-	bool mfgActive;
-	{
-		std::lock_guard guard(m_featureStatusMutex);
-		const auto playbackRun = m_pFilter->m_featureStatusPlaybackRun.load(std::memory_order_relaxed);
-		if (m_featureStatusSize != size || m_featureStatusPlaybackRun != playbackRun || paused) {
-			m_featureStatusSize = size;
-			m_featureStatusPlaybackRun = playbackRun;
-			m_featureStatusUntil = 0;
-		}
-		const auto generated = m_mfgGeneratedPresents.load(std::memory_order_relaxed);
-		if (generated != m_featureStatusLastGenerated) {
-			m_featureStatusLastGenerated = generated;
-			m_featureStatusGeneratedTick = now;
-		}
-		const bool mfgPresentedRecently = m_featureStatusGeneratedTick && now - m_featureStatusGeneratedTick <= 2000;
-		if (!paused) {
-			m_featureStatusMfgActive = mfgPresentedRecently &&
-				m_mfgEffectiveMultiplier.load(std::memory_order_relaxed) >= 2;
-		}
-		// A paused picture can keep the current MFG label even though no new
-		// generated frames are presented. Preroll may already have warmed it up.
-		mfgActive = (m_featureStatusMfgActive || (paused && m_mfg.InputSize().cx > 0)) &&
-			m_mfgMultiplier.load(std::memory_order_relaxed) >= 2 &&
-			!m_mfgPresentFailed.load(std::memory_order_relaxed) && !m_mfg.Failed() && !MfgSourceMeetsDisplayRate();
-		if (paused) m_featureStatusMfgActive = mfgActive;
-		if (m_featureStatusUntil && now >= m_featureStatusUntil) return 0;
-	}
-
-	const bool srActive = m_iVPSuperRes == SUPERRES_DLSS_SR && m_dlssSR.Active();
-	const auto processingRect = ProcessingRect();
-	const bool upscale = m_srcRectWidth > 0 && m_srcRectHeight > 0 &&
-		m_srcRectWidth < processingRect.Width() && m_srcRectHeight < processingRect.Height();
-	const bool vsrActive = m_iVPSuperRes != SUPERRES_DLSS_SR &&
-		m_VendorId == PCIV_NVIDIA && m_bVPScaling && m_bVPUseSuperRes && upscale;
-	const auto* text = CMpcVideoRenderer::FeatureStatusText(srActive, vsrActive, mfgActive);
-	if (!*text) return 0;
-
-	constexpr LONG margin = 12, padX = 9, padY = 5;
-	if (FAILED(m_Font3D.CreateFontBitmap(L"Consolas", m_StatsFontH, 0))) {
-		return 0;
-	}
-	SIZE textSize{};
-	m_Font3D.GetTextExtent(text, &textSize);
-	const LONG width = textSize.cx + 2 * padX;
-	const LONG height = textSize.cy + 2 * padY;
-	if (width + 2 * margin > size.cx || height + 2 * margin > size.cy) {
-		return 0;
-	}
-
-	const LONG x = margin;
-	const LONG y = margin;
-	CComPtr<ID3D11RenderTargetView> rtv;
-	const HRESULT hr = m_pDevice->CreateRenderTargetView(target, nullptr, &rtv);
-	if (FAILED(hr)) {
-		return 0;
-	}
-	const RECT panel{x, y, x + width, y + height};
-	if (SUCCEEDED(m_FeatureStatusBackground.Set(panel, size, D3DCOLOR_ARGB(170, 0, 0, 0)))) {
-		m_FeatureStatusBackground.Draw(rtv, size);
-	}
-	const HRESULT drawn = m_Font3D.Draw2DText(rtv, size, x + padX, y + padY, D3DCOLOR_XRGB(255, 255, 255), text);
-	if (!paused && SUCCEEDED(drawn)) {
-		std::lock_guard guard(m_featureStatusMutex);
-		if (!m_featureStatusUntil) {
-			m_featureStatusUntil = now + 5000;
-		}
-	}
-	return SUCCEEDED(drawn) ? height + margin : 0;
-}
-
 HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG featureOffset)
 {
 	if (m_windowRect.IsRectEmpty()) {
@@ -6473,195 +4964,11 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 		m_RenderStats.t6 * 1000 / GetPreciseTicksPerSecond());
 #endif
 
-	std::wstring mfgStats;
-	if (m_mfgMultiplier) {
-		if (MfgSourceMeetsDisplayRate()) {
-			mfgStats = L"\nMFG      : Bypassed (source meets display refresh)";
-		} else if (m_mfgPresentFailed) {
-			mfgStats = L"\nMFG      : Presenter failed";
-		} else if (m_mfg.Failed()) {
-			mfgStats = L"\nMFG      : Unavailable";
-		} else if (m_pFilter->m_filterState == State_Paused) {
-			mfgStats = L"\nMFG      : Paused";
-		} else {
-			const auto now=int64_t(GetPreciseTick());
-			const auto real=m_mfgRealPresents.load(std::memory_order_relaxed);
-			const auto generated=m_mfgGeneratedPresents.load(std::memory_order_relaxed);
-			const auto fallback=m_mfgFallbackPresents.load(std::memory_order_relaxed);
-			const auto skipped=m_mfgSkipped.load(std::memory_order_relaxed);
-			double outputFps = 0.0, skippedPerSec = 0.0;
-			{
-				std::lock_guard guard(m_mfgRateLock);
-				const double frequency=double(GetPreciseTicksPerSecond());
-				if (!m_mfgRateTick || now<m_mfgRateTick) {
-					m_mfgRateTick=now;
-					m_mfgRateReal=real;
-					m_mfgRateGenerated=generated;
-					m_mfgRateFallback=fallback;
-					m_mfgRateSkipped=skipped;
-					m_mfgRateVideoCount=m_mfgVideoCount.load(std::memory_order_relaxed);
-					m_mfgRateVideoTicks=m_mfgVideoTicks.load(std::memory_order_relaxed);
-					m_mfgRateGenerateCount=m_mfgGenerateCount.load(std::memory_order_relaxed);
-					m_mfgRateGenerateTicks=m_mfgGenerateTicks.load(std::memory_order_relaxed);
-					m_mfgRateComposeCount=m_mfgComposeCount.load(std::memory_order_relaxed);
-					m_mfgRateComposeTicks=m_mfgComposeTicks.load(std::memory_order_relaxed);
-					m_mfgRateLockRetries=m_mfgLockRetries.load(std::memory_order_relaxed);
-					m_mfgActualFps=m_mfgGeneratedFps=m_mfgSkippedPerSec=m_mfgFallbackFps=0.0;
-					m_mfgVideoWallMs=m_mfgGenerateWallMs=m_mfgComposeWallMs=0.0;
-				}
-				else if (frequency>0 && double(now-m_mfgRateTick)>=frequency) {
-					const double seconds=double(now-m_mfgRateTick)/frequency;
-					const auto realDelta=real>=m_mfgRateReal?real-m_mfgRateReal:0;
-					const auto genDelta=generated>=m_mfgRateGenerated?generated-m_mfgRateGenerated:0;
-					const auto fallbackDelta=fallback>=m_mfgRateFallback?fallback-m_mfgRateFallback:0;
-					const auto skipDelta=skipped>=m_mfgRateSkipped?skipped-m_mfgRateSkipped:0;
-					m_mfgActualFps=double(realDelta+genDelta+fallbackDelta)/seconds;
-					if (mfg::SourceCadenceTrace().Enabled()) {
-						// Window counts are stored in serial (source), phase (generated),
-						// and effective_multiplier (fallback). The unit of duration is QPC.
-						mfg::SourceCadenceTrace().Record("mfg_stats_window", now, -1, -1,
-							realDelta, unsigned(genDelta), unsigned(fallbackDelta), 0, 0, false,
-							m_mfgLostGenerated, S_OK, now - m_mfgRateTick);
-					}
-					m_mfgGeneratedFps=double(genDelta)/seconds;
-					m_mfgFallbackFps=double(fallbackDelta)/seconds;
-					m_mfgSkippedPerSec=double(skipDelta)/seconds;
-					const auto videoCount=m_mfgVideoCount.load(std::memory_order_relaxed);
-					const auto videoTicks=m_mfgVideoTicks.load(std::memory_order_relaxed);
-					const auto videoCallCount=videoCount>=m_mfgRateVideoCount?videoCount-m_mfgRateVideoCount:0;
-					const auto videoWallTicks=videoTicks>=m_mfgRateVideoTicks?videoTicks-m_mfgRateVideoTicks:0;
-					m_mfgVideoWallMs=videoCallCount?1000.0*double(videoWallTicks)/frequency/double(videoCallCount):0.0;
-					m_mfgRateVideoCount=videoCount;m_mfgRateVideoTicks=videoTicks;
-					const auto generateCount=m_mfgGenerateCount.load(std::memory_order_relaxed);
-					const auto generateTicks=m_mfgGenerateTicks.load(std::memory_order_relaxed);
-					const auto composeCount=m_mfgComposeCount.load(std::memory_order_relaxed);
-					const auto composeTicks=m_mfgComposeTicks.load(std::memory_order_relaxed);
-					const auto workCount=generateCount>=m_mfgRateGenerateCount?generateCount-m_mfgRateGenerateCount:0;
-					const auto workTicks=generateTicks>=m_mfgRateGenerateTicks?generateTicks-m_mfgRateGenerateTicks:0;
-					const auto presentCount=composeCount>=m_mfgRateComposeCount?composeCount-m_mfgRateComposeCount:0;
-					const auto presentTicks=composeTicks>=m_mfgRateComposeTicks?composeTicks-m_mfgRateComposeTicks:0;
-					m_mfgGenerateWallMs=workCount?1000.0*double(workTicks)/frequency/double(workCount):0.0;
-					m_mfgComposeWallMs=presentCount?1000.0*double(presentTicks)/frequency/double(presentCount):0.0;
-					m_mfgRateGenerateCount=generateCount;m_mfgRateGenerateTicks=generateTicks;
-					m_mfgRateComposeCount=composeCount;m_mfgRateComposeTicks=composeTicks;
-					const auto lockRetries=m_mfgLockRetries.load(std::memory_order_relaxed);
-					m_mfgLockRetriesPerSec=lockRetries>=m_mfgRateLockRetries?
-						double(lockRetries-m_mfgRateLockRetries)/seconds:0.0;
-					m_mfgRateLockRetries=lockRetries;
-					// Read DXGI's last display statistics once per rate window, never in
-					// the critical Present path. Unsupported/disjoint windows show n/a.
-					DXGI_FRAME_STATISTICS dxgi{};
-					const bool supported=m_pDXGISwapChain1 &&
-						(m_bExclusiveScreen || m_UsedSwapEffect==DXGI_SWAP_EFFECT_FLIP_DISCARD ||
-						 m_UsedSwapEffect==DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL);
-					const HRESULT statsHr=supported?m_pDXGISwapChain1->GetFrameStatistics(&dxgi):E_FAIL;
-					if(SUCCEEDED(statsHr)) {
-						if(m_mfgDxgiHasBaseline && dxgi.PresentCount>=m_mfgDxgiLastPresentCount) {
-							const double rate=double(dxgi.PresentCount-m_mfgDxgiLastPresentCount)/seconds;
-							const double displayHz=m_dRefreshPeriodMs>0.0?1000.0/m_dRefreshPeriodMs:0.0;
-							// DXGI stats can be discontinuous on mode changes / some display paths.
-							// Never report an impossible scan-out rate as a measurement.
-							m_mfgDxgiAvailable=displayHz>0.0 && rate<=displayHz*1.2+1.0;
-							if(m_mfgDxgiAvailable) m_mfgDxgiDisplayFps=rate;
-						} else m_mfgDxgiAvailable=false;
-						m_mfgDxgiLastPresentCount=dxgi.PresentCount;
-						m_mfgDxgiHasBaseline=true;
-					} else {m_mfgDxgiHasBaseline=false;m_mfgDxgiAvailable=false;}
-					m_mfgRateTick=now;
-					m_mfgRateReal=real;
-					m_mfgRateGenerated=generated;
-					m_mfgRateFallback=fallback;
-					m_mfgRateSkipped=skipped;
-				}
-				outputFps=m_mfgActualFps;
-				skippedPerSec=m_mfgSkippedPerSec;
-			}
-			const auto inputSize = m_mfg.InputSize();
-			const auto outputSize = m_mfg.GeneratedSize();
-			if (inputSize.cx && sourceFps > 0.0 && outputFps > 0.0) {
-				// This rate counts successful Presents and may differ from scan-out.
-				const auto fps = [](double value) {
-					auto text = std::format(L"{:.2f}", value);
-					while (text.back() == L'0') text.pop_back();
-					if (text.back() == L'.') text.pop_back();
-					return text;
-				};
-				mfgStats = std::format(L"\nMFG      : {}x{} {}fps -> {}x{} {}fps",
-					inputSize.cx, inputSize.cy, fps(sourceFps), outputSize.cx, outputSize.cy, fps(outputFps));
-				if (skippedPerSec >= 0.1) mfgStats += std::format(L" | {:.1f} skipped/s", skippedPerSec);
-			} else {
-				mfgStats = L"\nMFG      : Waiting for frames";
-			}
-		}
-	}
-
-	std::wstring srStats;
-	if (m_iVPSuperRes == SUPERRES_DLSS_SR) {
-		const auto stats = m_dlssSR.GetStats();
-		if (m_dlssSR.Preparing()) {
-			srStats = L"\nDLSS SR  : Preparing";
-		} else if (!stats.inputWidth) {
-			srStats = L"\nDLSS SR  : Inactive";
-			if (m_dlssSRInputStatus) srStats += std::format(L" ({})", m_dlssSRInputStatus);
-		} else if (stats.inputWidth == stats.outputWidth && stats.inputHeight == stats.outputHeight) {
-			srStats = std::format(L"\nDLAA     : {}x{}", stats.inputWidth, stats.inputHeight);
-		} else {
-			srStats = std::format(L"\nDLSS SR  : {}x{} -> {}x{}",
-				stats.inputWidth, stats.inputHeight, stats.outputWidth, stats.outputHeight);
-		}
-	}
-
-	std::wstring depthStats;
-	if (UsesZipDepthSr() || UsesZipDepthMfg()) {
-		const auto& depth = m_zipDepth.GetCounters();
-		const auto* precision = m_zipDepth.ModelPrecision();
-		if (depth.maps && *precision) {
-			depthStats = std::format(L"\nZipDepth : {}, {:.1f} maps/s", precision, depth.mapsPerSecond);
-			if (depth.lateMaps) depthStats += std::format(L", {} late", depth.lateMaps);
-			const auto now = GetTickCount64();
-			const bool srUsed = UsesZipDepthSr() &&
-				depth.srEvaluations && now - depth.lastSrUseTick <= 1000;
-			const bool mfgUsed = UsesZipDepthMfg() && depth.mfgSubmissions && now - depth.lastMfgUseTick <= 1000;
-			if (srUsed || mfgUsed) {
-				depthStats += srUsed && mfgUsed ? L" | SR + MFG" : srUsed ? L" | SR" : L" | MFG";
-			}
-			if (m_zipDepth.CoolingDown(now)) depthStats += L" | paused (late)";
-		} else {
-			depthStats = std::format(L"\nZipDepth : {}", m_zipDepth.Status());
-		}
-	}
-
-	std::wstring bufferStats;
-	CRefTime bufferStream;
-	if ((m_completedLast || CompletedFramesPending()) && SUCCEEDED(m_pFilter->StreamTime(bufferStream))) {
-		const auto time = GetCompletedBufferTime(bufferStream);
-		bufferStats = std::format(L"\nVideo buffer : {} ms ready / {} ms queued", time.ready / 10000, time.queued / 10000);
-		if (time.nonIncreasing) bufferStats += std::format(L" | {} due out of order", time.nonIncreasing);
-	}
-	const bool hasEditionStats = m_svdLut.strength || !srStats.empty() || !mfgStats.empty() ||
-		!depthStats.empty() || !bufferStats.empty();
-	const auto separator = str.size() + 1;
-	if (hasEditionStats) {
-		str += L'\n'; // Reserve a row before the layout computes the text width.
-		if (!srStats.empty() && m_dlssSR.Active() && m_dlssSRAfterMfg) {
-			str.append(mfgStats).append(srStats);
-		} else {
-			str.append(srStats).append(mfgStats);
-		}
-		str.append(depthStats);
-		if (m_svdLut.strength) str += std::format(L"\nSVDLUT   : {} ({}%)", SvdLutStatus(), m_svdLut.strength);
-		str.append(bufferStats);
-	}
+	const auto editionSeparator = AppendEditionStatistics(str, sourceFps);
 	if (UpdateStatsLayout(str)) {
 		UpdateStatsByWindow();
 	}
-	if (hasEditionStats) {
-		SIZE dash{};
-		m_Font3D.GetTextExtent(L"-", &dash);
-		const LONG right = std::min<LONG>(m_StatsRect.right - 3, m_windowRect.Width());
-		const LONG width = std::max<LONG>(0, right - m_StatsTextPoint.x);
-		str.insert(separator, dash.cx > 0 ? width / dash.cx : 0, L'-');
-	}
+	if (editionSeparator) InsertEditionStatsSeparator(str, *editionSeparator);
 
 	ID3D11RenderTargetView* pRenderTargetView = nullptr;
 	HRESULT hr = m_pDevice->CreateRenderTargetView(pRenderTarget, nullptr, &pRenderTargetView);
@@ -6835,14 +5142,5 @@ void CDX11VideoProcessor::SwitchFullScreen(bool set)
 	if (HandleHDRToggle()) {
 		InitMediaType(&m_pFilter->m_inputMT);
 		InitSwapChain(false);
-	}
-}
-
-void CDX11VideoProcessor::SetPGSSubtitles(bool bPGSSubtitles) {
-	if (bPGSSubtitles != m_bPGSSubtitles) {
-		m_bPGSSubtitles = bPGSSubtitles;
-
-		CAutoLock cRendererLock(&m_pFilter->m_RendererLock);
-		UpdateBitmapShader();
 	}
 }
