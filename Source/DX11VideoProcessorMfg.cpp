@@ -586,6 +586,7 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
         const auto lost = m_completedGroups.Add(batch, qpc, stream, GetPreciseTicksPerSecond(),
             m_rtVideoDelay, refreshHz, nativeInput, m_mfg.BankCount(), autoMode,
             DynamicSourceTimingEnabled(), repeatBridge, batchTiming);
+        m_completedStatsDrops.other += lost.generated;
         m_mfgLostGenerated += lost.generated;
         m_mfgSkipped += lost.generated;
         auto phases = m_completedGroups.TakeBufferedGroup();

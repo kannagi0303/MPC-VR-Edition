@@ -327,6 +327,19 @@ CZipDepth::Estimate CZipDepth::LatestPreview() const
     return EstimateAtOrBefore(INT64_MAX);
 }
 
+CZipDepth::CacheStats CZipDepth::GetCacheStats(int64_t playbackPts) const
+{
+    CacheStats stats;
+    stats.capacity = m_gpu.Capacity();
+    for (unsigned slot = 0; slot < stats.capacity; ++slot) {
+        const auto pts = m_resultPts[slot];
+        if (pts < 0) continue;
+        ++stats.cached;
+        if (playbackPts >= 0 && pts > playbackPts) ++stats.ahead;
+    }
+    return stats;
+}
+
 CZipDepth::Estimate CZipDepth::EstimateAtOrBefore(int64_t pts) const
 {
     Estimate estimate;

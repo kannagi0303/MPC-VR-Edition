@@ -165,14 +165,24 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 		}
 	}
 
+	const bool zipDepthEnabled = UsesZipDepthSr() || UsesZipDepthMfg();
+	const bool hasVideoBuffer = m_completedLast || CompletedFramesPending();
+	const bool running = m_pFilter->m_filterState == State_Running;
+	const auto now = GetTickCount64();
+	const bool refreshBufferStats = hasVideoBuffer &&
+		(!m_completedBufferStatsTick || now - m_completedBufferStatsTick >= 250);
+	CRefTime bufferStream;
+	const bool hasStreamTime = (refreshBufferStats || (running && (zipDepthEnabled || m_svdLut.strength))) &&
+		SUCCEEDED(m_pFilter->StreamTime(bufferStream));
+	const int64_t playbackPts = running && hasStreamTime ? REFERENCE_TIME(bufferStream) - m_rtVideoDelay : -1;
+
 	std::wstring depthStats;
-	if (UsesZipDepthSr() || UsesZipDepthMfg()) {
+	if (zipDepthEnabled) {
 		const auto& depth = m_zipDepth.GetCounters();
 		const auto* precision = m_zipDepth.ModelPrecision();
 		if (depth.maps && *precision) {
 			depthStats = std::format(L"\nZipDepth : {}, {:.1f} maps/s", precision, depth.mapsPerSecond);
 			if (depth.lateMaps) depthStats += std::format(L", {} late", depth.lateMaps);
-			const auto now = GetTickCount64();
 			const bool srUsed = UsesZipDepthSr() &&
 				depth.srEvaluations && now - depth.lastSrUseTick <= 1000;
 			const bool mfgUsed = UsesZipDepthMfg() && depth.mfgSubmissions && now - depth.lastMfgUseTick <= 1000;
@@ -183,17 +193,41 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 		} else {
 			depthStats = std::format(L"\nZipDepth : {}", m_zipDepth.Status());
 		}
+		const auto cache = m_zipDepth.GetCacheStats(playbackPts);
+		if (cache.capacity) depthStats += std::format(L" | Maps cached: {}/{}", cache.cached, cache.capacity);
+		else depthStats += L" | Maps cached: 0";
+		if (playbackPts >= 0) depthStats += std::format(L", {} ahead", cache.ahead);
 	}
 
-	std::wstring bufferStats;
-	CRefTime bufferStream;
-	if ((m_completedLast || CompletedFramesPending()) && SUCCEEDED(m_pFilter->StreamTime(bufferStream))) {
+	if (refreshBufferStats && hasStreamTime) {
 		const auto time = GetCompletedBufferTime(bufferStream);
-		bufferStats = std::format(L"\nVideo buffer : {} ms ready / {} ms queued", time.ready / 10000, time.queued / 10000);
-		if (time.nonIncreasing) bufferStats += std::format(L" | {} due out of order", time.nonIncreasing);
+		m_completedPendingMfgStats = std::count_if(m_completedBatches.begin(), m_completedBatches.end(),
+			[](const CompletedBatch& batch) { return !batch.phases.empty(); });
+		m_completedBufferStats = std::format(L"\nVideo buffer : {} ms ready / {} ms queued", time.ready / 10000, time.queued / 10000);
+		if (time.nonIncreasing) m_completedBufferStats += std::format(L" | {} due out of order", time.nonIncreasing);
+		m_completedBufferStats += std::format(L"\nBuffer frames: {} ready / {} queued", time.readyFrames, time.queuedFrames);
+		if (m_completedFence) {
+			constexpr double mib = 1024.0 * 1024.0;
+			const auto pool = GetCompletedPoolUsage(time.fence);
+			m_completedBufferStats += std::format(L"\nPool (MiB)   : {:.0f}/{:.0f} | Reusable {:.0f} | GPU held {:.0f} | Reserved {:.0f}",
+				pool.Retained() / mib, m_completedByteLimit / mib, pool.reusable / mib,
+				pool.gpuPending / mib, PendingGeneratedBytes() / mib);
+		}
+		const auto& drops = m_completedStatsDrops;
+		if (m_completedBufferStatsTick &&
+			(drops.ngxLate || drops.composeLate || drops.presentLate || drops.budget || drops.other)) {
+			m_completedBufferStats += std::format(L"\nMFG drops ({} ms): NGX {} | Compose {} | Present {} | Budget {} | Other {}",
+				now - m_completedBufferStatsTick, drops.ngxLate, drops.composeLate, drops.presentLate, drops.budget, drops.other);
+		}
+		m_completedStatsDrops = {};
+		m_completedBufferStatsTick = now;
+	}
+	const bool showBufferStats = hasVideoBuffer && m_completedBufferStatsTick && (!refreshBufferStats || hasStreamTime);
+	if (!mfgStats.empty() && showBufferStats) {
+		mfgStats += std::format(L" | Batches pending: {}", m_completedPendingMfgStats);
 	}
 	const bool hasEditionStats = m_svdLut.strength || !srStats.empty() || !mfgStats.empty() ||
-		!depthStats.empty() || !bufferStats.empty();
+		!depthStats.empty() || showBufferStats;
 	const auto separator = str.size() + 1;
 	if (hasEditionStats) {
 		str += L'\n'; // Reserve a row before the layout computes the text width.
@@ -203,8 +237,19 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 			str.append(srStats).append(mfgStats);
 		}
 		str.append(depthStats);
-		if (m_svdLut.strength) str += std::format(L"\nSVDLUT   : {} ({}%)", SvdLutStatus(), m_svdLut.strength);
-		str.append(bufferStats);
+		if (m_svdLut.strength) {
+			size_t ready = 0;
+			size_t ahead = 0;
+			for (const auto& scene : m_svdLut.scenes) {
+				if (!scene.view) continue;
+				++ready;
+				if (playbackPts >= 0 && scene.start > playbackPts) ++ahead;
+			}
+			str += std::format(L"\nSVDLUT   : {} ({}%) | Scenes ready: {}/{}",
+				SvdLutStatus(), m_svdLut.strength, ready, m_svdLut.scenes.size());
+			if (playbackPts >= 0) str += std::format(L", {} ahead", ahead);
+		}
+		if (showBufferStats) str.append(m_completedBufferStats);
 	}
 	if (hasEditionStats) return separator;
 	return {};

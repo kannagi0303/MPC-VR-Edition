@@ -16,6 +16,11 @@ public:
         int64_t pts = -1;
         bool rotated = false;
     };
+    struct CacheStats {
+        unsigned cached = 0;
+        unsigned ahead = 0;
+        unsigned capacity = 0;
+    };
     struct Counters {
         uint64_t captures = 0;
         uint64_t jobs = 0;
@@ -45,6 +50,7 @@ public:
     void PollCompleted();
     Estimate ForFrame(int64_t pts) const;
     Estimate LatestPreview() const;
+    CacheStats GetCacheStats(int64_t playbackPts) const;
     const Counters& GetCounters() const { return m_counters; }
     void RecordSrEvaluation() {
         ++m_counters.srEvaluations;

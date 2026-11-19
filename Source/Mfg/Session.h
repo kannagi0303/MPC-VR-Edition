@@ -5,6 +5,7 @@
 #include <wrl/client.h>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -97,6 +98,8 @@ public:
     // enqueued. The producer waits for this fence before reusing its outputs.
     void MarkConsumed(uint64_t serial);
     bool AsyncProducer() const;
+    std::optional<uint64_t> ReusableNextBankSerial(bool requirePresenterReadComplete) const;
+    bool GenerationPending(uint64_t serial) const;
     uint64_t BusyFallbacks() const;
     unsigned BankCount() const;
     // Current runtime ceiling, which can decrease after an NGX rejection.

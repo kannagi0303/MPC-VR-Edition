@@ -3,8 +3,8 @@
 #include "Helper.h"
 #include "DX11VideoProcessor.h"
 #include "VideoRenderer.h"
-#include "Mfg/CadenceTrace.h"
 #include "Times.h"
+#include "Mfg/CadenceTrace.h"
 
 namespace {
 constexpr uint64_t MiB = 1024ull * 1024;
@@ -40,42 +40,86 @@ bool CDX11VideoProcessor::LegacyFramesPending()
         (m_mfgPreparedFrame || m_mfgQueue.PendingOriginals() || m_mfgLiveFlowGroups.PendingOriginals());
 }
 
-bool CDX11VideoProcessor::CanProduceCompletedFrame(REFERENCE_TIME due, std::optional<uint64_t>& deferredFrameFence)
+const char* CDX11VideoProcessor::CompletedAdmissionBlock(REFERENCE_TIME due, std::optional<uint64_t>& deferredFrameFence)
 {
     UpdateProcessingResolution();
-    // Keep another generation in flight while the front batch waits for the GPU.
-    // After-MFG upscale uses its own temporal history and a single-batch path.
-    const size_t batchLimit = UpscaleAt(UpscaleSlot::BeforeMfg) && m_mfg.AsyncProducer() ? 2 : 1;
-    if (m_completedBatches.size() >= batchLimit || m_completedFrames.size() >= 256) return false;
     CRefTime stream;
-    if (FAILED(m_pFilter->StreamTime(stream))) return false;
+    if (FAILED(m_pFilter->StreamTime(stream))) return "completed_wait_clock";
+    const auto completed = m_completedFence ? m_completedFence->GetCompletedValue() : 0;
+    if (m_completedFence) RefreshCompletedMemoryBudget(completed);
+    if (m_completedFrames.size() >= 256) return "completed_wait_queue_limit";
     constexpr REFERENCE_TIME startupLead = UNITS / 4;
     const auto maxLead = m_extendedStartupPending ? startupLead : CompletedLead;
-    if (due + m_rtVideoDelay - REFERENCE_TIME(stream) > maxLead) return false;
-    if (m_completedFrames.empty()) return true;
-    const auto& front = m_completedFrames.front();
-    const auto remaining = front.due - REFERENCE_TIME(stream);
-    if (remaining < CompletedSubmitLead() + 20'000) {
-        // Give one queue head priority per input sample. After it leaves,
-        // allow work in the submit margin while the next head's PTS is still ahead.
-        if (!deferredFrameFence) deferredFrameFence = front.fence;
-        if (front.fence == *deferredFrameFence || remaining <= 0) return false;
+    if (due + m_rtVideoDelay - REFERENCE_TIME(stream) > maxLead) return "completed_wait_lookahead";
+    const bool hasCompletedFrame = !m_completedFrames.empty();
+    if (!hasCompletedFrame && m_completedBatches.empty()) return nullptr;
+    const auto margin = CompletedSubmitLead() + 20'000;
+    if (hasCompletedFrame) {
+        const auto& front = m_completedFrames.front();
+        const auto remaining = front.due - REFERENCE_TIME(stream);
+        if (remaining < margin) {
+            // Give one queue head priority per input sample. After it leaves,
+            // allow work in the submit margin while the next head's PTS is still ahead.
+            if (!deferredFrameFence) deferredFrameFence = front.fence;
+            if (front.fence == *deferredFrameFence || remaining <= 0) return "completed_wait_present_deadline";
+        }
     }
-    const auto completed = m_completedFence->GetCompletedValue();
-    if (completed != UINT64_MAX && m_completedFenceValue - completed > 8) return false;
-    uint64_t queued = 0;
-    for (const auto& frame : m_completedFrames) queued += TextureBytes(frame.image.desc);
-    for (const auto& batch : m_completedBatches) queued += TextureBytes(batch.target.image.desc);
-    if (m_completedLast) queued += TextureBytes(m_completedLast->image.desc);
-    const auto multiplier = (std::clamp)(m_mfgEffectiveMultiplier.load(std::memory_order_relaxed), 1u, 4u);
-    auto nextDesc = m_completedFrames.back().image.desc;
+    if (completed == UINT64_MAX) return "completed_wait_device_removed";
+    if (m_completedFenceValue - completed > 8) return "completed_wait_gpu_fence";
+    const auto committed = GetCompletedPoolUsage(completed).Committed();
+    auto nextDesc = (hasCompletedFrame ? m_completedFrames.back() : m_completedBatches.back().target).image.desc;
     if (m_processingSize.cx > 0) {
         nextDesc.Width = m_processingSize.cx;
         nextDesc.Height = m_processingSize.cy;
     }
     const auto bytes = TextureBytes(nextDesc);
+    if (!m_completedBatches.empty()) {
+        if (const auto block = CompletedOverlapBlock(stream, margin, completed, committed, bytes)) return block;
+        auto& trace = mfg::SourceCadenceTrace();
+        if (trace.Enabled()) {
+            trace.Record("completed_mfg_overlap_admit", GetPreciseTick(), due, stream,
+                m_completedBatches.front().phases.front().serial, 0, 0, 0, 0, false, m_mfgLostGenerated, S_OK);
+        }
+        return nullptr;
+    }
+    const auto multiplier = (std::clamp)(m_mfgEffectiveMultiplier.load(std::memory_order_relaxed), 1u, 4u);
     const auto desired = (std::min)(bytes * multiplier, m_completedByteLimit / 3);
-    return queued + (std::max)(bytes, desired) <= m_completedByteLimit;
+    return committed + (std::max)(bytes, desired) <= m_completedByteLimit ? nullptr : "completed_wait_budget";
+}
+
+const char* CDX11VideoProcessor::CompletedOverlapBlock(REFERENCE_TIME stream, REFERENCE_TIME margin, uint64_t completed,
+                                                       uint64_t committed, uint64_t nextFrameBytes) const
+{
+    if (!m_completedBudgetKnown) return "completed_wait_budget_unknown";
+    if (m_extendedStartupPending || CompletedGeometryChanging() || !m_mfgMultiplier || m_mfgOriginalPrime)
+        return "completed_wait_batch";
+    const bool beforeMfgSecondBatch = m_completedBatches.size() == 1 &&
+        UpscaleAt(UpscaleSlot::BeforeMfg) && m_mfg.AsyncProducer();
+    const size_t reservedBanks = beforeMfgSecondBatch ? 0 : 1;
+    if (m_completedBatches.size() + reservedBanks >= m_mfg.BankCount()) return "completed_wait_mfg_slots";
+    const auto& phases = m_completedBatches.front().phases;
+    if (phases.empty()) return "completed_wait_compose";
+    // Keep the two-batch before-MFG path available even while the previous
+    // batch is ready to compose. Keep the stricter deadline and fence checks
+    // for other overlap cases.
+    if (!beforeMfgSecondBatch) {
+        if (m_completedFrames.empty()) return "completed_wait_batch";
+        const auto& frame = m_completedFrames.front();
+        if (frame.fence > completed) return "completed_wait_gpu_fence";
+        if (frame.due - stream <= margin) return "completed_wait_present_deadline";
+        if (phases.front().index == mfg::MaxGenerated || !m_mfg.GenerationPending(phases.front().serial))
+            return "completed_wait_compose";
+        if (phases.front().presentationTime - stream <= margin) return "completed_wait_mfg_deadline";
+    }
+    const auto bank = m_mfg.ReusableNextBankSerial(!beforeMfgSecondBatch);
+    if (!bank) return "completed_wait_mfg_bank";
+
+    for (const auto& batch : m_completedBatches) {
+        if (batch.phases.empty()) return "completed_wait_compose";
+        if (batch.phases.front().serial == *bank) return "completed_wait_mfg_bank";
+    }
+    const auto reserved = PendingGeneratedBytes() + nextFrameBytes * m_mfg.MaxAvailableMultiplier();
+    return committed + reserved <= m_completedByteLimit ? nullptr : "completed_wait_budget";
 }
 
 HRESULT CDX11VideoProcessor::RenderCompletedSample(IMediaSample* sample)
@@ -103,9 +147,9 @@ HRESULT CDX11VideoProcessor::RenderCompletedSample(IMediaSample* sample)
     return result;
 }
 
-bool CDX11VideoProcessor::PrepareCompletedTarget()
+HRESULT CDX11VideoProcessor::PrepareCompletedTarget()
 {
-    if (!CanBufferCompletedSample()) return false;
+    if (!CanBufferCompletedSample()) return E_FAIL;
     const bool videoOnly = m_processingSize.cx > 0;
     if (!videoOnly) ApplyPendingWindowResize();
     if (!m_completedFence) {
@@ -113,7 +157,7 @@ bool CDX11VideoProcessor::PrepareCompletedTarget()
         CComQIPtr<ID3D11DeviceContext4> context(m_pDeviceContext);
         if (!device || !context || FAILED(device->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_completedFence)))) {
             m_completedFailed = true;
-            return false;
+            return E_FAIL;
         }
         m_completedContext = context;
         CComQIPtr<IDXGIDevice> dxgi(m_pDevice);
@@ -127,11 +171,13 @@ bool CDX11VideoProcessor::PrepareCompletedTarget()
         target.picture = ProcessingRect();
         desc = CreateTex2DDesc(m_SwapChainFmt, target.picture.Width(), target.picture.Height(),
                                Tex2D_DefaultShaderRTarget);
-        if (FAILED(m_processingPostScale.CheckCreate(m_pDevice, m_InternalTexFmt,
-                desc.Width, desc.Height, GetPostScaleSteps()))) return false;
+        const auto hr = m_processingPostScale.CheckCreate(m_pDevice, m_InternalTexFmt,
+            desc.Width, desc.Height, GetPostScaleSteps());
+        if (FAILED(hr)) return hr;
     } else {
         CComPtr<ID3D11Texture2D> back;
-        if (FAILED(m_pDXGISwapChain1->GetBuffer(0, IID_PPV_ARGS(&back)))) return false;
+        const auto hr = m_pDXGISwapChain1->GetBuffer(0, IID_PPV_ARGS(&back));
+        if (FAILED(hr)) return hr;
         back->GetDesc(&desc);
         target.picture = PictureForPlayback(CanProjectJvr());
         const CRect bounds(0, 0, desc.Width, desc.Height);
@@ -144,55 +190,96 @@ bool CDX11VideoProcessor::PrepareCompletedTarget()
                                   (std::max)(1L, LONG(std::lround(target.picture.Height() * scale))));
         }
     }
-    if (!AcquireCompletedTarget(desc, target)) return false;
+    const auto acquired = AcquireCompletedTarget(desc, target);
+    if (acquired != S_OK) return acquired;
     try {
         m_completedPresenter.Start([this](int64_t& deadline) { return NextCompletedFrame(deadline); },
                                    [this] { return PresentCompletedFrame(); });
     } catch (...) {
         m_completedFailed = true;
-        return false;
+        return E_FAIL;
     }
     m_completedTarget.emplace(std::move(target));
-    return true;
+    return S_OK;
 }
 
-bool CDX11VideoProcessor::AcquireCompletedTarget(const D3D11_TEXTURE2D_DESC& desc, CompletedFrame& target)
+CDX11VideoProcessor::CompletedPoolUsage CDX11VideoProcessor::GetCompletedPoolUsage(uint64_t completed) const
+{
+    CompletedPoolUsage usage;
+    for (const auto& frame : m_completedFrames) usage.active += TextureBytes(frame.image.desc);
+    for (const auto& batch : m_completedBatches) usage.active += TextureBytes(batch.target.image.desc);
+    if (m_completedLast) usage.active += TextureBytes(m_completedLast->image.desc);
+    if (m_completedTarget) usage.active += TextureBytes(m_completedTarget->image.desc);
+    for (const auto& frame : m_completedFree) {
+        auto& bytes = completed != UINT64_MAX && frame.fence <= completed ? usage.reusable : usage.gpuPending;
+        bytes += TextureBytes(frame.image.desc);
+    }
+    return usage;
+}
+
+uint64_t CDX11VideoProcessor::PendingGeneratedBytes() const
+{
+    uint64_t reserved = 0;
+    for (const auto& batch : m_completedBatches) {
+        // The final phase's original target is already included in active usage.
+        if (!batch.phases.empty()) reserved += TextureBytes(batch.target.image.desc) * (batch.phases.size() - 1);
+    }
+    return reserved;
+}
+
+void CDX11VideoProcessor::RefreshCompletedMemoryBudget(uint64_t completed)
+{
+    const auto tick = GetTickCount64();
+    if (completed == UINT64_MAX || (m_completedBudgetTick && tick - m_completedBudgetTick < 250)) return;
+    m_completedBudgetTick = tick;
+    m_completedByteLimit = 256 * MiB;
+    auto& memory = m_completedMemoryInfo;
+    m_completedBudgetKnown = m_completedAdapter &&
+        SUCCEEDED(m_completedAdapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memory));
+    if (!m_completedBudgetKnown) return;
+
+    auto allocated = GetCompletedPoolUsage(completed).Retained();
+    constexpr uint64_t reserve = 256 * MiB;
+    const auto available = memory.Budget > memory.CurrentUsage ? memory.Budget - memory.CurrentUsage : 0;
+    const auto headroom = available > reserve ? available - reserve : 0;
+    const auto usable = memory.Budget > reserve ? memory.Budget - reserve : 0;
+    const auto pressure = memory.CurrentUsage > usable ? memory.CurrentUsage - usable : 0;
+    m_completedByteLimit = (std::min)({4096 * MiB, memory.Budget / 2,
+        allocated - (std::min)(allocated, pressure) + headroom / 2});
+    for (auto it = m_completedFree.begin(); allocated > m_completedByteLimit && it != m_completedFree.end();) {
+        if (it->fence > completed) {
+            ++it;
+            continue;
+        }
+        allocated -= TextureBytes(it->image.desc);
+        it = m_completedFree.erase(it);
+    }
+}
+
+HRESULT CDX11VideoProcessor::AcquireCompletedTarget(const D3D11_TEXTURE2D_DESC& desc, CompletedFrame& target)
 {
     const auto bytes = TextureBytes(desc);
     const auto completed = m_completedFence->GetCompletedValue();
-    if (completed == UINT64_MAX) return false;
-    uint64_t inUse = 0;
-    for (const auto& frame : m_completedFrames) inUse += TextureBytes(frame.image.desc);
-    for (const auto& batch : m_completedBatches) inUse += TextureBytes(batch.target.image.desc);
-    if (m_completedLast) inUse += TextureBytes(m_completedLast->image.desc);
-    if (m_completedTarget) inUse += TextureBytes(m_completedTarget->image.desc);
-    const auto tick = GetTickCount64();
-    if (!m_completedBudgetTick || tick - m_completedBudgetTick >= 250) {
-        m_completedBudgetTick = tick;
-        m_completedByteLimit = 256 * MiB;
-        DXGI_QUERY_VIDEO_MEMORY_INFO memory{};
-        if (m_completedAdapter && SUCCEEDED(m_completedAdapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memory))) {
-            auto allocated = inUse;
-            for (const auto& frame : m_completedFree) allocated += TextureBytes(frame.image.desc);
-            const auto headroom = memory.Budget > memory.CurrentUsage + 256 * MiB
-                ? memory.Budget - memory.CurrentUsage - 256 * MiB : 0;
-            m_completedByteLimit = (std::min)({4096 * MiB, memory.Budget / 2, allocated + headroom / 2});
-        }
-    }
-    if (inUse + bytes > m_completedByteLimit && (m_completedTarget || !m_completedBatches.empty())) return false;
+    if (completed == UINT64_MAX) return DXGI_ERROR_DEVICE_REMOVED;
+    RefreshCompletedMemoryBudget(completed);
+    const auto committed = GetCompletedPoolUsage(completed).Committed();
+    if (committed + bytes > m_completedByteLimit && (m_completedTarget || !m_completedBatches.empty())) return S_FALSE;
+    // One output costs one slot. Matching reclaimable textures are moved, and
+    // incompatible reclaimable textures are released before allocating another.
     for (auto it = m_completedFree.begin(); it != m_completedFree.end();) {
         const auto& old = it->image.desc;
         if (old.Width == desc.Width && old.Height == desc.Height && old.Format == desc.Format && it->fence <= completed) {
             target.image = std::move(it->image);
             m_completedFree.erase(it);
-            return true;
+            return S_OK;
         }
         // Keep in-flight surfaces available for a later frame, after the GPU
         // has finished reading them. Discarding them forces extra allocations.
         if (it->fence > completed) ++it;
         else it = m_completedFree.erase(it);
     }
-    return SUCCEEDED(target.image.Create(m_pDevice, desc.Format, desc.Width, desc.Height, Tex2D_DefaultShaderRTarget));
+    const auto hr = target.image.Create(m_pDevice, desc.Format, desc.Width, desc.Height, Tex2D_DefaultShaderRTarget);
+    return SUCCEEDED(hr) ? S_OK : hr;
 }
 
 void CDX11VideoProcessor::RecycleCompletedFrame(CompletedFrame&& frame)
@@ -260,21 +347,30 @@ bool CDX11VideoProcessor::PrepareCompletedBatch(REFERENCE_TIME stream)
         const auto surface = m_mfg.Frame(phase.serial, phase.index, original.timestamp);
         CompletedFrame target;
         const char* drop = nullptr;
+        auto* dropCount = &m_completedStatsDrops.other;
+        HRESULT result = S_FALSE;
         if (phase.presentationTime <= stream) {
             drop = surface.pending ? "completed_drop_ngx_late" : "completed_drop_compose_late";
+            dropCount = surface.pending ? &m_completedStatsDrops.ngxLate : &m_completedStatsDrops.composeLate;
         } else if (!surface.texture) {
             drop = "completed_drop_surface";
         } else if (!m_completedFrames.empty() && phase.presentationTime <= m_completedFrames.back().due) {
             drop = "completed_drop_overlap";
-        } else if (!AcquireCompletedTarget(batch.target.image.desc, target)) {
-            drop = "completed_drop_texture";
+        } else {
+            result = AcquireCompletedTarget(batch.target.image.desc, target);
+            if (result == S_FALSE) {
+                drop = "completed_drop_budget";
+                dropCount = &m_completedStatsDrops.budget;
+            }
+            else if (FAILED(result)) drop = "completed_drop_texture";
         }
         if (drop) {
+            ++*dropCount;
             ++m_mfgLostGenerated;
             ++m_mfgSkipped;
             if (mfg::SourceCadenceTrace().Enabled()) {
                 mfg::SourceCadenceTrace().Record(drop, GetPreciseTick(), phase.timestamp, stream,
-                    phase.serial, phase.index, 0, 0, 0, false, m_mfgLostGenerated, S_FALSE);
+                    phase.serial, phase.index, 0, 0, 0, false, m_mfgLostGenerated, result);
             }
             continue;
         }
@@ -290,6 +386,7 @@ bool CDX11VideoProcessor::PrepareCompletedBatch(REFERENCE_TIME stream)
         if (FAILED(RenderMfgVideo(surface, phase.nativeInput, target.image.pTexture, phase.timestamp,
                                   picture, batch.videoOnlyInput, previousFormat, projected)) ||
             !QueueCompletedFrame(std::move(target))) {
+            ++m_completedStatsDrops.other;
             ++m_mfgLostGenerated;
             ++m_mfgSkipped;
         }
@@ -374,9 +471,15 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
     if (!m_pFilter->m_RendererLock.TryLock()) return false;
     struct Unlock { CCritSec& lock; ~Unlock() { lock.Unlock(); } } unlock{m_pFilter->m_RendererLock};
     if (m_pFilter->m_filterState != State_Running || m_pFilter->m_bFlushing || !m_pDXGISwapChain1) return true;
+    auto& trace = mfg::SourceCadenceTrace();
+    const bool tracing = trace.Enabled();
+    const auto beforeClock = tracing ? GetPreciseTick() : 0;
     CRefTime stream;
     if (FAILED(m_pFilter->StreamTime(stream))) return false;
-    if (m_completedFrames.empty() || m_completedFrames.front().due > REFERENCE_TIME(stream) + CompletedSubmitLead())
+    const auto clockQpc = tracing ? (beforeClock + (GetPreciseTick() - beforeClock) / 2) : 0;
+    if (m_completedFrames.empty()) return m_completedBatches.empty() || PrepareCompletedBatch(stream);
+    const auto submitLead = CompletedSubmitLead();
+    if (m_completedFrames.front().due > REFERENCE_TIME(stream) + submitLead)
         return m_completedBatches.empty() || PrepareCompletedBatch(stream);
     const auto completed = m_completedFence->GetCompletedValue();
     if (completed == UINT64_MAX) {
@@ -384,11 +487,13 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
         m_completedFailed = true;
         return true;
     }
+    RefreshCompletedMemoryBudget(completed);
     if (completed < m_completedFrames.front().fence) return false;
     auto frame = std::move(m_completedFrames.front());
     m_completedFrames.pop_front();
     if (frame.phase != mfg::MaxGenerated && !m_completedFrames.empty() &&
         m_completedFrames.front().due <= REFERENCE_TIME(stream)) {
+        ++m_completedStatsDrops.presentLate;
         ++m_mfgLostGenerated;
         ++m_mfgSkipped;
         if (mfg::SourceCadenceTrace().Enabled()) {
@@ -398,27 +503,47 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
         RecycleCompletedFrame(std::move(frame));
         return true;
     }
-    m_RenderStats.syncoffset = REFERENCE_TIME(stream) - frame.due;
+    const auto lateness = REFERENCE_TIME(stream) - frame.due;
+    m_RenderStats.syncoffset = lateness;
     const auto refresh = m_dRefreshPeriodMs > 0.0 ? 1000.0 / m_dRefreshPeriodMs : 0.0;
-    if (CompletedGeometryChanging()) {
+    const bool geometryChanging = CompletedGeometryChanging();
+    if (geometryChanging) {
         // Resize/compositor lateness is transient and must not consume the
         // steady-state batch-composition window after the user stops resizing.
         m_completedDisplayPacing.Reset();
-    } else {
-        m_completedDisplayPacing.Observe(m_RenderStats.syncoffset / 10'000.0, refresh);
     }
     const auto started = GetPreciseTick();
     auto hr = PresentCompletedVideo(frame, true);
     if (hr == DXGI_ERROR_INVALID_CALL && m_pFilter->m_bIsD3DFullscreen && SUCCEEDED(InitSwapChain(false))) {
+        frame.presentRetried = true;
         hr = PresentCompletedVideo(frame, true);
     }
-    m_RenderStats.presentticks = GetPreciseTick() - started;
-    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+    const auto finished = GetPreciseTick();
+    m_RenderStats.presentticks = finished - started;
+    const bool busy = hr == DXGI_ERROR_WAS_STILL_DRAWING;
+    // Train on successful first attempts. DXGI retries can shift the observed
+    // lateness and shrink the batch composition window after a transient stall.
+    if (hr == S_OK && !frame.presentRetried && !geometryChanging) {
+        m_completedDisplayPacing.Observe(lateness / 10'000.0, refresh);
+    }
+    if (tracing && (!busy || !frame.presentRetried)) {
+        const auto due = int64_t(clockQpc) + int64_t((frame.due - REFERENCE_TIME(stream)) * GetPreciseTicksPerSecond() / UNITS);
+        const mfg::CadenceTrace::CompletedQueue queue{
+            m_completedFrames.size() + (busy ? 1u : 0u),
+            m_completedBatches.size(),
+            m_completedFrames.empty() ? (busy ? frame.due : -1) : m_completedFrames.back().due,
+            submitLead / 10'000.0, m_completedDisplayPacing.LeadMs(), m_completedDisplayPacing.Samples()
+        };
+        trace.Record(busy ? "completed_present_busy" : "completed_present", finished, frame.pts, stream,
+            frame.serial, frame.phase, 0, 0, due, true, m_mfgLostGenerated, hr, m_RenderStats.presentticks, frame.due, &queue);
+    }
+    if (busy) {
         // Present was deliberately non-blocking. Keep ownership of this frame
         // and release RendererLock so the source/producer can make progress.
         // The presentation worker retries after ~1 ms. Generated frames may
         // still be discarded later if they truly miss their display slot; an
         // original frame is never discarded by this retry path.
+        frame.presentRetried = true;
         m_completedFrames.push_front(std::move(frame));
         return false;
     }
@@ -433,12 +558,6 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
         } else if (m_mfgMultiplier.load(std::memory_order_relaxed) >= 2) {
             ++m_mfgFallbackPresents;
         }
-    }
-    if (mfg::SourceCadenceTrace().Enabled()) {
-        const auto now = int64_t(GetPreciseTick());
-        const auto due = now + int64_t((frame.due - REFERENCE_TIME(stream)) * GetPreciseTicksPerSecond() / UNITS);
-        mfg::SourceCadenceTrace().Record("completed_present", now, frame.pts, stream,
-            frame.serial, frame.phase, 0, 0, due, true, m_mfgLostGenerated, hr, m_RenderStats.presentticks);
     }
     const auto readFence = ++m_completedFenceValue;
     if (SUCCEEDED(m_completedContext->Signal(m_completedFence, readFence)) && SUCCEEDED(hr)) {
@@ -552,6 +671,16 @@ HRESULT CDX11VideoProcessor::PresentCompletedVideo(const CompletedFrame& frame, 
 
 void CDX11VideoProcessor::ClearCompletedFrames(bool release)
 {
+    auto& trace = mfg::SourceCadenceTrace();
+    if (trace.Enabled() && CompletedFramesPending()) {
+        const mfg::CadenceTrace::CompletedQueue queue{
+            m_completedFrames.size(), m_completedBatches.size(),
+            m_completedFrames.empty() ? -1 : m_completedFrames.back().due,
+            m_completedDisplayPacing.LeadMs(), 0, m_completedDisplayPacing.Samples()
+        };
+        trace.Record("completed_clear", GetPreciseTick(), -1, -1, 0, 0, 0, 0, 0,
+            false, m_mfgLostGenerated, S_OK, 0, -1, &queue);
+    }
     if (release) m_completedPresenter.Stop();
     m_completedFrames.clear();
     m_completedFree.clear();
@@ -560,6 +689,10 @@ void CDX11VideoProcessor::ClearCompletedFrames(bool release)
     m_completedTarget.reset();
     m_completedGroups.Clear();
     m_completedDisplayPacing.Reset();
+    m_completedBufferStatsTick = 0;
+    m_completedBufferStats.clear();
+    m_completedPendingMfgStats = 0;
+    m_completedStatsDrops = {};
     m_completedPresenter.Wake();
     if (release) {
         m_completedResizeTexture.Release();
@@ -567,6 +700,8 @@ void CDX11VideoProcessor::ClearCompletedFrames(bool release)
         m_completedFence.Release();
         m_completedAdapter.Release();
         m_completedFenceValue = m_completedByteLimit = m_completedBudgetTick = 0;
+        m_completedBudgetKnown = false;
+        m_completedMemoryInfo = {};
         m_completedFailed = false;
     }
 }
@@ -574,17 +709,21 @@ void CDX11VideoProcessor::ClearCompletedFrames(bool release)
 CDX11VideoProcessor::CompletedBufferTime CDX11VideoProcessor::GetCompletedBufferTime(REFERENCE_TIME stream) const
 {
     CompletedBufferTime time;
-    if (!m_completedFence || m_completedFrames.empty()) return time;
-    const auto fence = m_completedFence->GetCompletedValue();
-    if (fence == UINT64_MAX) return time;
+    time.queuedFrames = m_completedFrames.size();
+    if (!m_completedFence) return time;
+    time.fence = m_completedFence->GetCompletedValue();
+    if (time.fence == UINT64_MAX) return time;
     bool ready = true;
     std::optional<REFERENCE_TIME> previousDue;
     for (const auto& frame : m_completedFrames) {
         time.queued = (std::max)(time.queued, frame.due - stream);
         const bool increasing = !previousDue || frame.due > *previousDue;
         if (!increasing) ++time.nonIncreasing;
-        ready = ready && increasing && frame.fence <= fence;
-        if (ready) time.ready = (std::max)(time.ready, frame.due - stream);
+        ready = ready && increasing && frame.fence <= time.fence;
+        if (ready) {
+            ++time.readyFrames;
+            time.ready = (std::max)(time.ready, frame.due - stream);
+        }
         previousDue = frame.due;
     }
     return time;
@@ -595,29 +734,20 @@ std::wstring CDX11VideoProcessor::CompletedBufferInfo()
     CRefTime stream;
     if (!m_completedFence || FAILED(m_pFilter->StreamTime(stream))) return {};
 
-    uint64_t bytes = 0;
     unsigned width = 0, height = 0;
-    const auto add = [&](const CompletedFrame& frame) {
-        bytes += TextureBytes(frame.image.desc);
-    };
-    for (const auto& frame : m_completedFrames) add(frame);
-    for (const auto& batch : m_completedBatches) add(batch.target);
-    for (const auto& frame : m_completedFree) add(frame);
-    if (m_completedTarget) add(*m_completedTarget);
-    if (m_completedLast) add(*m_completedLast);
     if (!m_completedFrames.empty()) {
         width = m_completedFrames.back().image.desc.Width;
         height = m_completedFrames.back().image.desc.Height;
     }
     const auto time = GetCompletedBufferTime(stream);
+    const auto pool = GetCompletedPoolUsage(time.fence);
     auto info = std::format(L"\nCompleted video buffer: {} ms, {} queued, {}x{}, {:.1f} MiB estimated pool, {:.1f} MiB pool limit, {} ms queued ahead",
-        time.ready / 10000, m_completedFrames.size(), width, height, double(bytes) / MiB,
+        time.ready / 10000, m_completedFrames.size(), width, height, double(pool.Retained()) / MiB,
         double(m_completedByteLimit) / MiB, time.queued / 10000);
     if (time.nonIncreasing) info += std::format(L", {} deadline reversals or ties", time.nonIncreasing);
-    DXGI_QUERY_VIDEO_MEMORY_INFO memory{};
-    if (m_completedAdapter && SUCCEEDED(m_completedAdapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memory))) {
+    if (m_completedBudgetKnown) {
         info += std::format(L", {:.1f} MiB process local usage, {:.1f} MiB process local budget",
-            double(memory.CurrentUsage) / MiB, double(memory.Budget) / MiB);
+            double(m_completedMemoryInfo.CurrentUsage) / MiB, double(m_completedMemoryInfo.Budget) / MiB);
     }
     return info;
 }

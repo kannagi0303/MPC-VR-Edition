@@ -24,6 +24,8 @@
 #include "PropPage.h"
 #include "JvrProjection.h"
 #include "Edition/SettingsRegistry.h"
+#include "Times.h"
+#include "Mfg/CadenceTrace.h"
 #include <FilterInterfaces.h>
 
 void CVRMainPPage::UpdateJvrViewLabels()
@@ -117,11 +119,15 @@ void CVRMainPPage::EnableEditionControls()
 
 void CVRMainPPage::RestorePreviewSettings()
 {
+	auto& trace = mfg::SourceCadenceTrace();
+	const auto started = trace.Enabled() ? GetPreciseTick() : 0;
 	Settings_t live;
 	m_pVideoRenderer->GetSettings(live);
-	if (live.iSDRDisplayNits != m_oldSDRDisplayNits || live.bJvrFlatView != m_oldJvrFlatView ||
+	const bool restoreSettings = live.iSDRDisplayNits != m_oldSDRDisplayNits || live.bJvrFlatView != m_oldJvrFlatView ||
 		live.iJvrVertical != m_oldJvrVertical || live.iJvrReprojection != m_oldJvrReprojection ||
-		live.iJvrEye != m_oldJvrEye) {
+		live.iJvrEye != m_oldJvrEye;
+	const bool restoreSvdLut = m_svdLutPreviewed;
+	if (restoreSettings) {
 		// Roll back the fields that can be previewed before Apply.
 		live.iSDRDisplayNits = m_oldSDRDisplayNits;
 		live.bJvrFlatView = m_oldJvrFlatView;
@@ -134,6 +140,11 @@ void CVRMainPPage::RestorePreviewSettings()
 	if (m_svdLutPreviewed) {
 		PreviewSvdLutStrength(m_oldSvdLutStrength);
 		m_svdLutPreviewed = false;
+	}
+	if (trace.Enabled()) {
+		const auto finished = GetPreciseTick();
+		trace.Record(restoreSettings || restoreSvdLut ? "property_page_close_restore" : "property_page_close_unchanged",
+			finished, -1, -1, 0, 0, 0, 0, 0, false, 0, S_OK, finished - started);
 	}
 }
 

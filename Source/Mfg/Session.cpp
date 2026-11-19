@@ -849,6 +849,31 @@ void Session::MarkConsumed(uint64_t serial) {
     }
 }
 bool Session::AsyncProducer() const {return impl_ ? impl_->asyncProducer : AsyncProducerEnabled();}
+std::optional<uint64_t> Session::ReusableNextBankSerial(bool requirePresenterReadComplete) const {
+    if (!impl_ || failed_ || !impl_->asyncProducer) return {};
+    const auto& bank = impl_->banks[impl_->serial % impl_->activeBanks];
+    const auto generated = impl_->fence->GetCompletedValue();
+    if (generated == UINT64_MAX || !bank.timeline.ProducerReady(generated)) return {};
+    // SubmitBank orders new writes after prior D3D11 reads on the GPU.
+    if (requirePresenterReadComplete) {
+        const auto sampled = impl_->presentFence->GetCompletedValue();
+        if (sampled == UINT64_MAX || sampled < bank.timeline.PresenterFenceValue()) return {};
+    }
+    return bank.serial;
+}
+
+bool Session::GenerationPending(uint64_t serial) const {
+    if (!impl_ || failed_) return false;
+    const auto completed = impl_->fence->GetCompletedValue();
+    if (completed == UINT64_MAX) return false;
+    for (unsigned i = 0; i < impl_->activeBanks; ++i) {
+        const auto& bank = impl_->banks[i];
+        if (bank.serial == serial)
+            return bank.valid && !bank.timeline.ProducerReady(completed);
+    }
+    return false;
+}
+
 uint64_t Session::BusyFallbacks() const {return impl_ ? impl_->busyFallbacks : 0;}
 unsigned Session::BankCount() const {return impl_?impl_->activeBanks:2u;}
 unsigned Session::MaxAvailableMultiplier() const {

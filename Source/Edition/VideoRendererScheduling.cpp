@@ -23,6 +23,9 @@
 #include "VideoRenderer.h"
 #include "DLSS/DecodedFrameLookahead.h"
 #include "Mfg/AvcPresentationClock.h"
+#include "Times.h"
+#include "Mfg/CadenceTrace.h"
+#include <cstring>
 
 // A note on the thread itself, for whoever looks at a frozen player from outside.
 //
@@ -329,7 +332,27 @@ std::optional<HRESULT> CMpcVideoRenderer::ReceiveCompletedSample(IMediaSample* s
 	const bool discontinuity = sample->IsDiscontinuity() == S_OK;
 	std::optional<uint64_t> epoch;
 	std::optional<uint64_t> deferredFrameFence;
+	struct WaitTrace {
+		REFERENCE_TIME pts;
+		const char* reason = nullptr;
+		uint64_t since = 0;
+		uint64_t admitted = 0;
+		void End(uint64_t now) const {
+			mfg::SourceCadenceTrace().Record(reason, now, pts, -1, 0, 0, 0, 0, 0, false, 0, S_FALSE, now - since);
+		}
+		void Wait(const char* next) {
+			if ((reason && std::strcmp(reason, next) == 0) || !mfg::SourceCadenceTrace().Enabled()) return;
+			const auto now = GetPreciseTick();
+			if (reason) End(now);
+			reason = next;
+			since = now;
+		}
+		~WaitTrace() {
+			if (reason) End(admitted ? admitted : GetPreciseTick());
+		}
+	} waitTrace{valid ? pts : -1};
 	for (;;) {
+		const char* block;
 		{
 			CAutoLock state(&m_InterfaceLock);
 			CAutoLock render(&m_RendererLock);
@@ -342,11 +365,16 @@ std::optional<HRESULT> CMpcVideoRenderer::ReceiveCompletedSample(IMediaSample* s
 			if (m_State != State_Running || !m_bStreaming) {
 				deferredFrameFence.reset();
 				if (!pending) return {};
+				block = "completed_wait_state";
 			} else if (!valid || m_completedSegmentRate != 1.0 || !dx11->CanBufferCompletedSample()) {
 				if (!pending) return {};
-			} else if ((!discontinuity || !pending) && !dx11->LegacyFramesPending() &&
-			           dx11->CanProduceCompletedFrame(pts, deferredFrameFence)) {
-				if (dx11->PrepareCompletedTarget()) {
+				block = "completed_wait_drain";
+			} else if ((discontinuity && pending) || dx11->LegacyFramesPending()) {
+				block = "completed_wait_drain";
+			} else if (!(block = dx11->CompletedAdmissionBlock(pts, deferredFrameFence))) {
+				const auto acquired = dx11->PrepareCompletedTarget();
+				if (acquired == S_OK) {
+					if (waitTrace.reason) waitTrace.admitted = GetPreciseTick();
 					m_schedulingCompletedSample = true;
 					const auto prepared = PrepareReceive(sample);
 					m_schedulingCompletedSample = false;
@@ -361,8 +389,10 @@ std::optional<HRESULT> CMpcVideoRenderer::ReceiveCompletedSample(IMediaSample* s
 					return hr;
 				}
 				if (!pending) return {};
+				block = acquired == S_FALSE ? "completed_wait_budget" : "completed_wait_prepare_failed";
 			}
 		}
+		waitTrace.Wait(block);
 		// Capacity and timeline waits must allow the presenter and BeginFlush through.
 		Sleep(2);
 	}

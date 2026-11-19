@@ -158,6 +158,7 @@
         bool mfg = false;
         bool videoOnly = false;
         bool projected = false;
+        bool presentRetried = false;
     };
     struct CompletedBatch {
         CompletedFrame target;
@@ -179,14 +180,34 @@
     CComPtr<IDXGIAdapter3> m_completedAdapter;
     uint64_t m_completedFenceValue = 0, m_completedByteLimit = 0;
     ULONGLONG m_completedBudgetTick = 0;
+    ULONGLONG m_completedBufferStatsTick = 0;
+    std::wstring m_completedBufferStats;
+    size_t m_completedPendingMfgStats = 0;
+    struct CompletedStatsDrops {
+        unsigned ngxLate = 0, composeLate = 0, presentLate = 0, budget = 0, other = 0;
+    } m_completedStatsDrops;
+    DXGI_QUERY_VIDEO_MEMORY_INFO m_completedMemoryInfo{};
+    bool m_completedBudgetKnown = false;
     bool m_completingSample = false, m_completedFailed = false;
     bool CanBufferCompletedSample() const;
     bool CompletedFramesPending() const;
     bool LegacyFramesPending();
-    bool CanProduceCompletedFrame(REFERENCE_TIME due, std::optional<uint64_t>& deferredFrameFence);
+    const char* CompletedAdmissionBlock(REFERENCE_TIME due, std::optional<uint64_t>& deferredFrameFence);
+    const char* CompletedOverlapBlock(REFERENCE_TIME stream, REFERENCE_TIME margin, uint64_t completed,
+                                      uint64_t committed, uint64_t nextFrameBytes) const;
+    struct CompletedPoolUsage {
+        uint64_t active = 0;
+        uint64_t gpuPending = 0;
+        uint64_t reusable = 0;
+        uint64_t Committed() const { return active + gpuPending; }
+        uint64_t Retained() const { return Committed() + reusable; }
+    };
+    CompletedPoolUsage GetCompletedPoolUsage(uint64_t completed) const;
+    uint64_t PendingGeneratedBytes() const;
+    void RefreshCompletedMemoryBudget(uint64_t completed);
     HRESULT RenderCompletedSample(IMediaSample* sample);
-    bool PrepareCompletedTarget();
-    bool AcquireCompletedTarget(const D3D11_TEXTURE2D_DESC& desc, CompletedFrame& target);
+    HRESULT PrepareCompletedTarget();
+    HRESULT AcquireCompletedTarget(const D3D11_TEXTURE2D_DESC& desc, CompletedFrame& target);
     void RecycleCompletedFrame(CompletedFrame&& frame);
     bool QueueCompletedFrame(CompletedFrame&& frame);
     bool PrepareCompletedBatch(REFERENCE_TIME stream);
@@ -203,6 +224,9 @@
     struct CompletedBufferTime {
         REFERENCE_TIME ready = 0;
         REFERENCE_TIME queued = 0;
+        size_t readyFrames = 0;
+        size_t queuedFrames = 0;
+        uint64_t fence = UINT64_MAX;
         unsigned nonIncreasing = 0;
     };
     CompletedBufferTime GetCompletedBufferTime(REFERENCE_TIME stream) const;
