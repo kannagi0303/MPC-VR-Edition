@@ -15,6 +15,7 @@
 #define IDC_MFG_PROCESSING_MODE        5011
 #define IDC_MFG_FEATURE_BADGES        5012
 #define IDC_DLSS_SR_SOURCE_LIMIT      5013
+#define IDC_EDITION_STATS_DETAILS     5014
 #define IDC_MFG_LOW_MOTION                5020
 #define IDC_USE_ZIPDEPTH_MFG              5021
 #define IDC_USE_ZIPDEPTH_SR               5024

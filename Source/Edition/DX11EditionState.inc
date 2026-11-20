@@ -131,6 +131,12 @@
     CRect m_resizeTarget;
     ULONGLONG m_resizeLastChangeTick = 0;
     ULONGLONG m_completedGeometryTick = 0;
+    HANDLE m_completedPresentWaitable = nullptr;
+    bool m_completedPresentPermit = false;
+    HRESULT CreateEditionWindowedSwapChain(DXGI_SWAP_CHAIN_DESC1& desc);
+    bool TryCompletedPresentPermit();
+    void InvalidateCompletedBackBuffer(bool externalPresent = false);
+    UINT EditionSwapChainFlags() const;
     HRESULT ApplyPendingWindowResize(bool settle = true);
     void DiscardMfgPreparedFrame();
     void UpdateProcessingResolution();
@@ -149,11 +155,12 @@
     HRESULT FinishMfgPresent(ID3D11Texture2D* preparedVideo, REFERENCE_TIME timestamp, uint64_t serial,
                              bool completed = false, const CRect* pictureOverride = nullptr,
                              bool svdLutHandled = false);
+    void DrawMfgPresentOverlays(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME timestamp, uint64_t serial);
     struct CompletedFrame {
         Tex2D_t image;
         CRect picture;
         REFERENCE_TIME pts = 0, end = 0, due = 0;
-        uint64_t serial = 0, fence = 0;
+        uint64_t serial = 0, fence = 0, backBufferReadFence = 0;
         unsigned phase = mfg::MaxGenerated;
         bool mfg = false;
         bool videoOnly = false;
@@ -166,11 +173,18 @@
         bool videoOnlyInput = false;
     };
     static constexpr REFERENCE_TIME CompletedLead = 2 * UNITS;
+    static constexpr REFERENCE_TIME CompletedStartupLead = UNITS / 4;
     framegen::PresentationThread m_completedPresenter;
     bool m_fastShutdown = false;
     mfg::LiveFlowGroups m_completedGroups;
     mfg::DisplaySubmitPacing m_completedDisplayPacing;
     std::deque<CompletedFrame> m_completedFrames;
+    struct CompletedBackBuffer {
+        uint64_t frameFence = 0;
+        CRect picture = CRect(0, 0, 0, 0);
+        bool drawn = false;
+    };
+    CompletedBackBuffer m_completedBackBuffer;
     std::vector<CompletedFrame> m_completedFree;
     std::optional<CompletedFrame> m_completedLast;
     std::optional<CompletedFrame> m_completedTarget;
@@ -181,11 +195,48 @@
     uint64_t m_completedFenceValue = 0, m_completedByteLimit = 0;
     ULONGLONG m_completedBudgetTick = 0;
     ULONGLONG m_completedBufferStatsTick = 0;
+	bool m_showEditionDetails = false;
+	unsigned m_editionStatisticsRun = 0;
+	unsigned m_editionOriginalDropsBase = 0;
+	std::optional<unsigned> m_completedBufferPercent;
+	edition::BufferLowWatermark m_completedBufferLow;
+	edition::PreDrawWindow m_completedPreDraw;
+	struct VsrStatistics {
+		CSize input{0, 0}, output{0, 0};
+		ULONGLONG tick = 0;
+		bool afterMfg = false;
+	} m_editionVsr;
+	void RecordEditionVsr(const CRect& input, const CRect& output, bool afterMfg);
     std::wstring m_completedBufferStats;
-    size_t m_completedPendingMfgStats = 0;
     struct CompletedStatsDrops {
         unsigned ngxLate = 0, composeLate = 0, presentLate = 0, budget = 0, other = 0;
     } m_completedStatsDrops;
+    struct CompletedCadence {
+        struct Range {
+            int64_t low = INT64_MAX, high = INT64_MIN;
+            void Add(int64_t value) {
+                low = (std::min)(low, value);
+                high = (std::max)(high, value);
+            }
+        };
+        unsigned playbackRun = 0;
+        uint64_t lastTick = 0;
+        REFERENCE_TIME lastPts = 0, lastDue = 0;
+        Range submit, media, due;
+        void Observe(unsigned run, uint64_t tick, REFERENCE_TIME pts, REFERENCE_TIME deadline) {
+            if (playbackRun != run) *this = {};
+            if (lastTick && tick > lastTick) {
+                submit.Add(int64_t(tick - lastTick));
+                media.Add(pts - lastPts);
+                due.Add(deadline - lastDue);
+            }
+            playbackRun = run;
+            lastTick = tick;
+            lastPts = pts;
+            lastDue = deadline;
+        }
+        void ClearWindow() { submit = {}; media = {}; due = {}; }
+    } m_completedCadence;
     DXGI_QUERY_VIDEO_MEMORY_INFO m_completedMemoryInfo{};
     bool m_completedBudgetKnown = false;
     bool m_completingSample = false, m_completedFailed = false;
@@ -214,12 +265,16 @@
     bool NextCompletedFrame(int64_t& deadline);
     bool PresentCompletedFrame();
     REFERENCE_TIME CompletedSubmitLead();
+    REFERENCE_TIME CompletedBackBufferLead(const CompletedFrame& frame, REFERENCE_TIME submitLead) const;
+    bool PrepareCompletedBackBuffer(CompletedFrame& frame);
     bool CompletedGeometryChanging() const;
+    HRESULT DrawCompletedBackBuffer(const CompletedFrame& frame, ID3D11Texture2D* target,
+                                    const CRect& picture, bool geometryChanging, bool scheduled);
     HRESULT DrawCompletedVideo(const CompletedFrame& frame, ID3D11Texture2D* target, const CRect& picture,
                                bool geometryChanging = false, const CRect* targetBounds = nullptr);
 	const Tex2D_t* PrepareDepth3DPreview(const CompletedFrame& frame, const CRect& sourceRect);
 	bool EnsureDepth3DMeshResources();
-    HRESULT PresentCompletedVideo(const CompletedFrame& frame, bool scheduled = false);
+    HRESULT PresentCompletedVideo(const CompletedFrame& frame, bool scheduled = false, uint64_t* preparedReadFence = nullptr);
     void ClearCompletedFrames(bool release);
     struct CompletedBufferTime {
         REFERENCE_TIME ready = 0;

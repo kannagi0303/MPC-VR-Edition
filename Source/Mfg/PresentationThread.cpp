@@ -55,6 +55,20 @@ void PresentationThread::Run() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     LARGE_INTEGER frequency{};
     QueryPerformanceFrequency(&frequency);
+    const auto waitForSchedule = [this](std::int64_t delay100ns) {
+        LARGE_INTEGER due{};
+        due.QuadPart = -(std::max)(std::int64_t{1}, delay100ns);
+        if (!SetWaitableTimer(timer_, &due, 0, nullptr, nullptr, FALSE)) {
+            failed_ = true;
+            return false;
+        }
+        HANDLE handles[] = {wake_, timer_};
+        if (WaitForMultipleObjects(2, handles, FALSE, INFINITE) == WAIT_FAILED) {
+            failed_ = true;
+            return false;
+        }
+        return true;
+    };
     while (!quit_) {
         std::int64_t deadline = 0;
         bool scheduled = false;
@@ -68,11 +82,8 @@ void PresentationThread::Run() {
         LARGE_INTEGER now{};
         QueryPerformanceCounter(&now);
         if (deadline > now.QuadPart) {
-            LARGE_INTEGER due{};
-            due.QuadPart = -(std::max)(std::int64_t{1}, (deadline - now.QuadPart) * 10'000'000 / frequency.QuadPart);
-            if(!SetWaitableTimer(timer_, &due, 0, nullptr, nullptr, FALSE)){failed_=true;return;}
-            HANDLE handles[] = {wake_, timer_};
-            WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+            const auto delay100ns = (deadline - now.QuadPart) * 10'000'000 / frequency.QuadPart;
+            if (!waitForSchedule(delay100ns)) return;
             continue; // re-read the schedule: it may have changed, or the timer fired slightly early
         }
         bool presented = true;
@@ -81,7 +92,10 @@ void PresentationThread::Run() {
         } catch (...) {failed_=true;return;}
         if (!presented) {
             retries_.fetch_add(1, std::memory_order_relaxed);
-            WaitForSingleObject(wake_, 1);
+            // A normal millisecond timeout uses the system clock resolution.
+            // Keep busy retries on the same timer as presentation deadlines.
+            constexpr std::int64_t retryDelay100ns = 10'000;
+            if (!waitForSchedule(retryDelay100ns)) return;
         }
     }
 }

@@ -585,7 +585,7 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
         }
         const auto lost = m_completedGroups.Add(batch, qpc, stream, GetPreciseTicksPerSecond(),
             m_rtVideoDelay, refreshHz, nativeInput, m_mfg.BankCount(), autoMode,
-            DynamicSourceTimingEnabled(), repeatBridge, batchTiming);
+            DynamicSourceTimingEnabled(), repeatBridge, batchTiming, mfg::LiveFlowGroups::DeadlineMode::StreamTime);
         m_completedStatsDrops.other += lost.generated;
         m_mfgLostGenerated += lost.generated;
         m_mfgSkipped += lost.generated;
@@ -832,6 +832,7 @@ bool CDX11VideoProcessor::PresentMfg() {
     if(composeEnd>composeStart)m_mfgComposeTicks.fetch_add(uint64_t(composeEnd-composeStart),std::memory_order_relaxed);
     m_mfgComposeCount.fetch_add(1,std::memory_order_relaxed);
     if(FAILED(presentHr)) {
+        if(frame->index==mfg::MaxGenerated) ++m_mfgLostReal;
         std::lock_guard guard(m_mfgQueueLock);m_mfgQueue.Clear();m_mfgLiveFlowGroups.Clear();
         m_mfgPresentFailed=true;
     } else if(presentHr==S_OK) {
@@ -895,6 +896,7 @@ HRESULT CDX11VideoProcessor::RenderMfgVideo(const mfg::FrameSurface& surface, bo
         }
         const auto processingRect = m_processingSize.cx > 0 ? ProcessingRect() : targetPicture;
         if(m_mfgLastPostVsrInput && m_mfgPostVsrReady && !m_mfgPostVsrBroken) {
+            auto vsrDestination = targetPicture;
             ID3D11Texture2D* vpInput=surface.texture;
             if(texture.desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM) {
                 // NGX-generated frames are RGBA, while real snapshots are
@@ -914,6 +916,7 @@ HRESULT CDX11VideoProcessor::RenderMfgVideo(const mfg::FrameSurface& surface, bo
                 m_pDeviceContext->OMSetRenderTargets(0,nullptr,nullptr);
                 if (m_processingSize.cx > 0 && SUCCEEDED(m_processingTexture.CheckCreate(m_pDevice, presentDesc.Format,
                     processingRect.Width(), processingRect.Height(), Tex2D_DefaultShaderRTarget))) {
+                    vsrDestination = processingRect;
                     hr = m_mfgPostVsrVP.ProcessExternal(vpInput, 0, m_processingTexture.pTexture, sourceRect, processingRect);
                     if (SUCCEEDED(hr)) {
                         hr = ResizeShaderPass(m_processingTexture, target, processingRect, targetPicture, 0);
@@ -923,6 +926,7 @@ HRESULT CDX11VideoProcessor::RenderMfgVideo(const mfg::FrameSurface& surface, bo
                 }
             }
             if(SUCCEEDED(hr)) {
+                RecordEditionVsr(sourceRect, vsrDestination, true);
                 ++m_mfgPostVsrProcessed;
                 return hr;
             }
@@ -952,8 +956,35 @@ HRESULT CDX11VideoProcessor::RenderMfgVideo(const mfg::FrameSurface& surface, bo
     return TextureCopyRect(texture,target,sourceRect,displayRect,m_pPS_Simple,nullptr,0,false,needsUpscale);
 }
 
+void CDX11VideoProcessor::DrawMfgPresentOverlays(ID3D11Texture2D* target, const CRect& picture,
+    REFERENCE_TIME timestamp, uint64_t serial)
+{
+    if (DepthOverlayEnabled()) {
+        const auto depth = m_mfg.OverlayDepth(serial, timestamp);
+        if (depth.view) {
+            DrawDepthView(target, picture, depth.view, depth.size, CRect(depth.picture), 0, true);
+            m_mfg.MarkConsumed(serial);
+        } else if (!UsesZipDepthMfg()) {
+            DrawDepthOverlay(target, picture, timestamp);
+        }
+    }
+    if (m_showMfgMotion) DrawMfgMotion(target, serial, timestamp, picture);
+    const auto saved=m_rtStart;m_rtStart=timestamp;
+    DrawSubtitles(target, &picture);m_rtStart=saved;
+    if(m_bAlphaBitmapEnable) {
+        D3D11_TEXTURE2D_DESC desc{};target->GetDesc(&desc);
+        D3D11_VIEWPORT viewport{m_AlphaBitmapNRectDest.left*desc.Width,m_AlphaBitmapNRectDest.top*desc.Height,
+            (m_AlphaBitmapNRectDest.right-m_AlphaBitmapNRectDest.left)*desc.Width,
+            (m_AlphaBitmapNRectDest.bottom-m_AlphaBitmapNRectDest.top)*desc.Height,0,1};
+        AlphaBlt(m_TexAlphaBitmap.pShaderResource,target,m_pAlphaBitmapVertex,&viewport,m_pSamplerLinear);
+    }
+    const LONG featureOffset = DrawFeatureStatus(target);
+    if (m_bShowStats) DrawStats(target, featureOffset);
+}
+
 HRESULT CDX11VideoProcessor::FinishMfgPresent(ID3D11Texture2D* preparedVideo,REFERENCE_TIME timestamp,uint64_t serial,
     bool completed, const CRect* pictureOverride, bool svdLutHandled) {
+    InvalidateCompletedBackBuffer();
     const auto picture = pictureOverride ? *pictureOverride : PictureForPlayback(CanProjectJvr());
     const bool trace = completed && mfg::SourceCadenceTrace().Enabled();
     const auto started = trace ? GetPreciseTick() : 0;
@@ -969,27 +1000,7 @@ HRESULT CDX11VideoProcessor::FinishMfgPresent(ID3D11Texture2D* preparedVideo,REF
         m_pDeviceContext->CopyResource(back,preparedVideo);
     }
     if (!svdLutHandled) DrawSvdLut(back, picture, timestamp);
-    if (DepthOverlayEnabled()) {
-        const auto depth = m_mfg.OverlayDepth(serial, timestamp);
-        if (depth.view) {
-            DrawDepthView(back, picture, depth.view, depth.size, CRect(depth.picture), 0, true);
-            m_mfg.MarkConsumed(serial);
-        } else if (!UsesZipDepthMfg()) {
-            DrawDepthOverlay(back, picture, timestamp);
-        }
-    }
-    if (m_showMfgMotion) DrawMfgMotion(back, serial, timestamp, picture);
-    const auto saved=m_rtStart;m_rtStart=timestamp;
-    DrawSubtitles(back, &picture);m_rtStart=saved;
-    if(m_bAlphaBitmapEnable) {
-        D3D11_TEXTURE2D_DESC desc{};back->GetDesc(&desc);
-        D3D11_VIEWPORT viewport{m_AlphaBitmapNRectDest.left*desc.Width,m_AlphaBitmapNRectDest.top*desc.Height,
-            (m_AlphaBitmapNRectDest.right-m_AlphaBitmapNRectDest.left)*desc.Width,
-            (m_AlphaBitmapNRectDest.bottom-m_AlphaBitmapNRectDest.top)*desc.Height,0,1};
-        AlphaBlt(m_TexAlphaBitmap.pShaderResource,back,m_pAlphaBitmapVertex,&viewport,m_pSamplerLinear);
-    }
-    const LONG featureOffset = DrawFeatureStatus(back);
-    if (m_bShowStats) DrawStats(back, featureOffset);
+    DrawMfgPresentOverlays(back, picture, timestamp, serial);
     if (trace) {
         const auto finished = GetPreciseTick();
         mfg::SourceCadenceTrace().Record("completed_osd", finished, timestamp, -1,
@@ -1008,6 +1019,7 @@ HRESULT CDX11VideoProcessor::FinishMfgPresent(ID3D11Texture2D* preparedVideo,REF
     g_bPresent=true;
     hr = m_pDXGISwapChain1->Present(1u, presentFlags);
     g_bPresent=false;
+    if (hr == S_OK) m_completedPresentPermit = false;
     if (trace) {
         const auto finished = GetPreciseTick();
         mfg::SourceCadenceTrace().Record("completed_swap", finished, timestamp, -1,

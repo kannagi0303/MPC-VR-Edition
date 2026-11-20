@@ -103,6 +103,7 @@
 	bool bShowFeatureBadges = true; // show DLSS SR, VSR and MFG status on the video
 	BYTE svdLutStrength = 0; // Reuses the retired processing-resolution slot.
 	bool reservedDlssSRValidateMotion = {}; // Legacy Settings_t slot.
+	bool bShowEditionDetails = false; // Uses the alignment byte before iDlssSRSourceLimit.
     int iDlssSRSourceLimit = DLSSSR_SOURCE_Disable; // Appended: preserve the existing settings layout.
 	// Reserved legacy A/B slot, kept for Settings_t layout/preset compatibility.
 	// No GUI or runtime toggle; normalization always forces true.
@@ -141,6 +142,7 @@
 		iMfgProcessingMode = 0;
 		bWaitForExtendedStartup = false;
 		bShowFeatureBadges = true;
+		bShowEditionDetails = false;
         iDlssSRSourceLimit = DLSSSR_SOURCE_Disable;
 		bDlssSRTemporalHistory = true;
 		SetSvdLutStrength(0);

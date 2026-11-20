@@ -114,6 +114,7 @@ void ReadSettings(CRegKey& key, Settings_t& sets)
 	if (ERROR_SUCCESS == key.QueryDWORDValue(L"ShowFeatureBadges", dw)) {
 		sets.bShowFeatureBadges = dw != 0;
 	}
+	sets.bShowEditionDetails = key.QueryDWORDValue(L"ShowEditionDetails", dw) == ERROR_SUCCESS && dw != 0;
 #ifdef _WIN64
 	// The DLSS 5 NR snippet is x64 only.
 	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNR, dw)) {
@@ -290,6 +291,7 @@ void WriteSettings(CRegKey& key, const Settings_t& sets)
 	key.SetDWORDValue(L"JvrReprojection", sets.iJvrReprojection);
 	key.SetDWORDValue(L"JvrEye", sets.iJvrEye);
 	key.SetDWORDValue(L"ShowFeatureBadges", sets.bShowFeatureBadges);
+	key.SetDWORDValue(L"ShowEditionDetails", sets.bShowEditionDetails);
 #ifdef _WIN64
 	key.SetDWORDValue(OPT_DlssNR,              sets.bDlssNR);
 	key.SetDWORDValue(OPT_DlssNRStyle,         sets.iDlssNRStyle);

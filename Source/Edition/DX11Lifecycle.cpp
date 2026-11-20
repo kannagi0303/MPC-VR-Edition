@@ -36,6 +36,9 @@ void CDX11VideoProcessor::ApplyJvrPlaybackMode(Settings_t& config, bool projectJ
 
 CDX11VideoProcessor::EditionConfiguration CDX11VideoProcessor::ConfigureEdition(Settings_t& config)
 {
+	InvalidateCompletedBackBuffer();
+	if (m_showEditionDetails != config.bShowEditionDetails) m_completedBufferStats.clear();
+	m_showEditionDetails = config.bShowEditionDetails;
 	mfg::EnforceScope(config);
 	const bool jvrFlatView = m_pFilter->JvrProjectionRequested(config);
 	ApplyJvrPlaybackMode(config, jvrFlatView);
@@ -44,6 +47,7 @@ CDX11VideoProcessor::EditionConfiguration CDX11VideoProcessor::ConfigureEdition(
 	const bool srWasEnabled = m_iVPSuperRes == SUPERRES_DLSS_SR;
 	const bool srChanged = srWasEnabled != config.bDlssSR ||
 		(config.bDlssSR && m_dlssSRSourceLimit != config.iDlssSRSourceLimit);
+	if (m_iVPSuperRes != superRes) m_editionVsr = {};
 	const bool wasUsingZipDepth = UsesZipDepthSr() || UsesZipDepthMfg();
 	const bool useZipDepth = (config.bUseZipDepthSr && config.bDlssSR) ||
 		(config.bUseZipDepthMfg && mfgMultiplier);
@@ -119,6 +123,8 @@ CDX11VideoProcessor::EditionConfiguration CDX11VideoProcessor::ConfigureEdition(
 
 void CDX11VideoProcessor::ResetEditionVideoProcessor()
 {
+	m_editionVsr = {};
+	m_editionOriginalDropsBase = m_mfgLostReal.load(std::memory_order_relaxed);
 	m_zipDepth.ResetHistory();
 	m_dlssSRAfterMfg = false;
 	m_dlssSR.Reset();
@@ -186,6 +192,7 @@ void CDX11VideoProcessor::FlushEdition()
 void CDX11VideoProcessor::InitializeEdition(Settings_t& config)
 {
 	mfg::EnforceScope(config);
+	m_showEditionDetails = config.bShowEditionDetails;
 	m_jvrFlatView = m_pFilter->JvrProjectionRequested(config);
 	ApplyJvrPlaybackMode(config, m_jvrFlatView);
 	ConfigureJvrProjection(config);

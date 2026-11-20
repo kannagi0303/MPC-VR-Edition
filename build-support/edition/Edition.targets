@@ -96,6 +96,7 @@
     <ClCompile Include="Edition\DX11SubtitleCompatibility.cpp" />
     <ClCompile Include="Edition\VideoProcessorStatistics.cpp" />
     <ClInclude Include="Edition\DX11Dependencies.h" />
+    <ClInclude Include="Edition\StatisticsFormat.h" />
     <ClCompile Include="Edition\RendererWindow.cpp" />
   </ItemGroup>
 </Project>

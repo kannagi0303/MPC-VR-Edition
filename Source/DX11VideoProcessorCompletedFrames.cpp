@@ -48,8 +48,7 @@ const char* CDX11VideoProcessor::CompletedAdmissionBlock(REFERENCE_TIME due, std
     const auto completed = m_completedFence ? m_completedFence->GetCompletedValue() : 0;
     if (m_completedFence) RefreshCompletedMemoryBudget(completed);
     if (m_completedFrames.size() >= 256) return "completed_wait_queue_limit";
-    constexpr REFERENCE_TIME startupLead = UNITS / 4;
-    const auto maxLead = m_extendedStartupPending ? startupLead : CompletedLead;
+    const auto maxLead = m_extendedStartupPending ? CompletedStartupLead : CompletedLead;
     if (due + m_rtVideoDelay - REFERENCE_TIME(stream) > maxLead) return "completed_wait_lookahead";
     const bool hasCompletedFrame = !m_completedFrames.empty();
     if (!hasCompletedFrame && m_completedBatches.empty()) return nullptr;
@@ -284,6 +283,7 @@ HRESULT CDX11VideoProcessor::AcquireCompletedTarget(const D3D11_TEXTURE2D_DESC& 
 
 void CDX11VideoProcessor::RecycleCompletedFrame(CompletedFrame&& frame)
 {
+    frame.fence = (std::max)(frame.fence, frame.backBufferReadFence);
     if (m_completedFree.size() < 4 && TextureBytes(frame.image.desc) * 4 < m_completedByteLimit)
         m_completedFree.push_back(std::move(frame));
 }
@@ -328,9 +328,11 @@ bool CDX11VideoProcessor::PrepareCompletedBatch(REFERENCE_TIME stream)
         return true;
     }
     const auto& original = batch.phases.back();
-    const auto& first = batch.phases.front();
-    if (first.index != mfg::MaxGenerated && first.presentationTime > stream &&
-        m_mfg.Frame(first.serial, first.index, original.timestamp).pending) return false;
+    const auto future = std::find_if(batch.phases.begin(), batch.phases.end(), [&](const auto& phase) {
+        return phase.index != mfg::MaxGenerated && phase.presentationTime > stream;
+    });
+    if (future != batch.phases.end() && original.presentationTime - stream > CompletedSubmitLead() &&
+        m_mfg.Frame(future->serial, future->index, original.timestamp).pending) return false;
     const auto started = GetPreciseTick();
     // Use the geometry and input layout recorded for this batch.
     const auto picture = batch.target.picture;
@@ -349,9 +351,12 @@ bool CDX11VideoProcessor::PrepareCompletedBatch(REFERENCE_TIME stream)
         const char* drop = nullptr;
         auto* dropCount = &m_completedStatsDrops.other;
         HRESULT result = S_FALSE;
-        if (phase.presentationTime <= stream) {
-            drop = surface.pending ? "completed_drop_ngx_late" : "completed_drop_compose_late";
-            dropCount = surface.pending ? &m_completedStatsDrops.ngxLate : &m_completedStatsDrops.composeLate;
+        if (surface.pending) {
+            drop = phase.presentationTime <= stream ? "completed_drop_ngx_late" : "completed_drop_ngx_original_due";
+            dropCount = &m_completedStatsDrops.ngxLate;
+        } else if (phase.presentationTime <= stream) {
+            drop = "completed_drop_compose_late";
+            dropCount = &m_completedStatsDrops.composeLate;
         } else if (!surface.texture) {
             drop = "completed_drop_surface";
         } else if (!m_completedFrames.empty() && phase.presentationTime <= m_completedFrames.back().due) {
@@ -439,7 +444,9 @@ bool CDX11VideoProcessor::NextCompletedFrame(int64_t& deadline)
     }
     CRefTime stream;
     if (FAILED(m_pFilter->StreamTime(stream))) return false;
-    const auto delta = m_completedFrames.front().due - REFERENCE_TIME(stream) - CompletedSubmitLead();
+    const auto& frame = m_completedFrames.front();
+    const auto lead = CompletedBackBufferLead(frame, CompletedSubmitLead());
+    const auto delta = frame.due - REFERENCE_TIME(stream) - lead;
     deadline += int64_t((std::clamp)(delta, REFERENCE_TIME(0), REFERENCE_TIME(200'000)) * GetPreciseTicksPerSecond() / UNITS);
     return true;
 }
@@ -458,6 +465,45 @@ REFERENCE_TIME CDX11VideoProcessor::CompletedSubmitLead()
         m_completedDisplayPacing.Reset();
     }
     return REFERENCE_TIME(m_completedDisplayPacing.Start(refresh) * 10'000);
+}
+
+REFERENCE_TIME CDX11VideoProcessor::CompletedBackBufferLead(const CompletedFrame& frame, REFERENCE_TIME submitLead) const
+{
+    if (!m_completedPresentWaitable || !m_completedLast || !frame.mfg || !m_mfgMultiplier ||
+        m_completedBackBuffer.frameFence == frame.fence || m_bVBlankBeforePresent || CompletedGeometryChanging()) {
+        return submitLead;
+    }
+    if (m_dRefreshPeriodMs >= 1.0 && m_dRefreshPeriodMs <= 1000.0) {
+        return (std::max)(submitLead, REFERENCE_TIME(m_dRefreshPeriodMs * (UNITS / 1000)));
+    }
+    return submitLead;
+}
+
+bool CDX11VideoProcessor::PrepareCompletedBackBuffer(CompletedFrame& frame)
+{
+    const auto completed = m_completedFence->GetCompletedValue();
+    if (completed == UINT64_MAX) {
+        ClearCompletedFrames(false);
+        m_completedFailed = true;
+        return true;
+    }
+    if (completed < frame.fence || !TryCompletedPresentPermit()) return false;
+
+    const auto picture = PictureForPlayback(frame.projected);
+    // Remember even a failed attempt, so the normal submit path can retry
+    // the draw without the presenter looping on a bad buffer before its due time.
+    m_completedBackBuffer = {frame.fence, picture, false};
+    CComPtr<ID3D11Texture2D> back;
+    if (FAILED(m_pDXGISwapChain1->GetBuffer(0, IID_PPV_ARGS(&back)))) return true;
+    const auto hr = DrawCompletedBackBuffer(frame, back, picture, false, true);
+    m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+    const auto readFence = ++m_completedFenceValue;
+    if (SUCCEEDED(m_completedContext->Signal(m_completedFence, readFence))) {
+        frame.backBufferReadFence = readFence;
+        m_completedBackBuffer.drawn = SUCCEEDED(hr);
+    }
+    m_pDeviceContext->Flush();
+    return true;
 }
 
 bool CDX11VideoProcessor::CompletedGeometryChanging() const
@@ -479,8 +525,17 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
     const auto clockQpc = tracing ? (beforeClock + (GetPreciseTick() - beforeClock) / 2) : 0;
     if (m_completedFrames.empty()) return m_completedBatches.empty() || PrepareCompletedBatch(stream);
     const auto submitLead = CompletedSubmitLead();
-    if (m_completedFrames.front().due > REFERENCE_TIME(stream) + submitLead)
+    const auto remaining = m_completedFrames.front().due - REFERENCE_TIME(stream);
+    if (remaining > submitLead) {
+        if (remaining <= CompletedBackBufferLead(m_completedFrames.front(), submitLead)) {
+            if (PrepareCompletedBackBuffer(m_completedFrames.front())) return true;
+            if (m_completedBatches.empty()) return false;
+        }
         return m_completedBatches.empty() || PrepareCompletedBatch(stream);
+    }
+    // A waitable signal can be delayed by DWM, e.g. during occlusion. Once
+    // due, try nonblocking Present even without the signal so playback can recover.
+    if (!TryCompletedPresentPermit() && remaining > 0) return false;
     const auto completed = m_completedFence->GetCompletedValue();
     if (completed == UINT64_MAX) {
         ClearCompletedFrames(false);
@@ -491,8 +546,25 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
     if (completed < m_completedFrames.front().fence) return false;
     auto frame = std::move(m_completedFrames.front());
     m_completedFrames.pop_front();
-    if (frame.phase != mfg::MaxGenerated && !m_completedFrames.empty() &&
-        m_completedFrames.front().due <= REFERENCE_TIME(stream)) {
+    bool dropGenerated = false;
+    if (frame.phase != mfg::MaxGenerated && !m_completedFrames.empty()) {
+        const auto& next = m_completedFrames.front();
+        if (next.due <= REFERENCE_TIME(stream)) {
+            dropGenerated = next.phase == mfg::MaxGenerated || next.fence <= completed;
+            if (!dropGenerated) {
+                // A due but unfinished synthetic frame cannot replace a ready
+                // one. Still leave the next refresh available for an original.
+                const auto original = std::find_if(m_completedFrames.begin(), m_completedFrames.end(),
+                    [](const auto& queued) { return queued.phase == mfg::MaxGenerated; });
+                const auto refresh = m_dRefreshPeriodMs >= 1.0 && m_dRefreshPeriodMs <= 1000.0 ?
+                    REFERENCE_TIME(m_dRefreshPeriodMs * (UNITS / 1000)) : REFERENCE_TIME(0);
+                dropGenerated = refresh <= 0 || (original != m_completedFrames.end() &&
+                    original->due <= REFERENCE_TIME(stream) + refresh + submitLead);
+            }
+        }
+    }
+    if (dropGenerated) {
+        if (m_completedBackBuffer.frameFence == frame.fence) InvalidateCompletedBackBuffer();
         ++m_completedStatsDrops.presentLate;
         ++m_mfgLostGenerated;
         ++m_mfgSkipped;
@@ -513,7 +585,8 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
         m_completedDisplayPacing.Reset();
     }
     const auto started = GetPreciseTick();
-    auto hr = PresentCompletedVideo(frame, true);
+    uint64_t readFence = 0;
+    auto hr = PresentCompletedVideo(frame, true, &readFence);
     if (hr == DXGI_ERROR_INVALID_CALL && m_pFilter->m_bIsD3DFullscreen && SUCCEEDED(InitSwapChain(false))) {
         frame.presentRetried = true;
         hr = PresentCompletedVideo(frame, true);
@@ -552,6 +625,13 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
         m_pFilter->m_DrawStats.Add(GetPreciseTick());
     }
     if (hr == S_OK) {
+        const auto run = m_pFilter->m_featureStatusPlaybackRun.load(std::memory_order_relaxed);
+        if (m_completedPresentWaitable && frame.mfg) m_completedPreDraw.Observe(run, readFence != 0);
+        if (m_bShowStats && m_mfgMultiplier) {
+            m_completedCadence.Observe(run, finished, frame.pts, frame.due);
+        } else if (m_completedCadence.lastTick) {
+            m_completedCadence = {};
+        }
         if (frame.mfg) {
             if (frame.phase == mfg::MaxGenerated) ++m_mfgRealPresents;
             else ++m_mfgGeneratedPresents;
@@ -559,8 +639,12 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
             ++m_mfgFallbackPresents;
         }
     }
-    const auto readFence = ++m_completedFenceValue;
-    if (SUCCEEDED(m_completedContext->Signal(m_completedFence, readFence)) && SUCCEEDED(hr)) {
+    if (FAILED(hr) && frame.phase == mfg::MaxGenerated) ++m_mfgLostReal;
+    if (!readFence) {
+        readFence = ++m_completedFenceValue;
+        if (FAILED(m_completedContext->Signal(m_completedFence, readFence))) readFence = 0;
+    }
+    if (readFence && SUCCEEDED(hr)) {
         frame.fence = readFence;
         if (m_completedLast) RecycleCompletedFrame(std::move(*m_completedLast));
         m_completedLast = std::move(frame);
@@ -605,15 +689,32 @@ HRESULT CDX11VideoProcessor::DrawCompletedVideo(const CompletedFrame& frame, ID3
     return TextureCopyRect(frame.image, target, from, to, m_pPS_Simple, nullptr, 0, false, true);
 }
 
-HRESULT CDX11VideoProcessor::PresentCompletedVideo(const CompletedFrame& frame, bool scheduled)
+HRESULT CDX11VideoProcessor::DrawCompletedBackBuffer(const CompletedFrame& frame, ID3D11Texture2D* target,
+    const CRect& picture, bool geometryChanging, bool scheduled)
+{
+    auto& trace = mfg::SourceCadenceTrace();
+    const bool tracing = scheduled && trace.Enabled();
+    const auto started = tracing ? GetPreciseTick() : 0;
+    // Use one pass while the picture rectangle is changing. The normal
+    // scaler can need a new intermediate texture at each transient size.
+    auto hr = DrawCompletedSvdLut(frame, target, picture, geometryChanging);
+    if (hr != S_OK) hr = DrawCompletedVideo(frame, target, picture, geometryChanging);
+    if (tracing) {
+        const auto finished = GetPreciseTick();
+        trace.Record("completed_blit", finished, frame.pts, -1,
+            frame.serial, frame.phase, 0, 0, 0, true, m_mfgLostGenerated, hr, finished - started, frame.due);
+    }
+    return hr;
+}
+
+HRESULT CDX11VideoProcessor::PresentCompletedVideo(const CompletedFrame& frame, bool scheduled, uint64_t* preparedReadFence)
 {
     // Completed video is independent of the swap-chain size. Keep continuous
     // window changes coalesced instead of forcing ResizeBuffers on every
     // presentation. While the final size is still settling, remap the current
     // destination rectangle into the last committed back buffer.
     ApplyPendingWindowResize();
-    const bool trace = scheduled && mfg::SourceCadenceTrace().Enabled();
-    const auto started = trace ? GetPreciseTick() : 0;
+    if (preparedReadFence) *preparedReadFence = 0;
     CComPtr<ID3D11Texture2D> back;
     auto hr = m_pDXGISwapChain1->GetBuffer(0, IID_PPV_ARGS(&back));
     if (FAILED(hr)) return hr;
@@ -653,16 +754,16 @@ HRESULT CDX11VideoProcessor::PresentCompletedVideo(const CompletedFrame& frame, 
         }
     }
     const bool geometryChanging = scheduled && CompletedGeometryChanging();
-    // Use one pass while the picture rectangle is changing. The normal
-    // scaler can need a new intermediate texture at each transient size.
-    hr = DrawCompletedSvdLut(frame, back, picture, geometryChanging);
-    if (hr != S_OK) hr = DrawCompletedVideo(frame, back, picture, geometryChanging);
-    if (trace) {
-        const auto finished = GetPreciseTick();
-        mfg::SourceCadenceTrace().Record("completed_blit", finished, frame.pts, -1,
-            frame.serial, frame.phase, 0, 0, 0, true, m_mfgLostGenerated, hr, finished - started);
+    const bool prepared = scheduled && !geometryChanging && !m_bVBlankBeforePresent &&
+        m_completedBackBuffer.drawn && m_completedBackBuffer.frameFence == frame.fence &&
+        m_completedBackBuffer.picture == picture;
+    InvalidateCompletedBackBuffer();
+    if (prepared) {
+        if (preparedReadFence) *preparedReadFence = frame.backBufferReadFence;
+    } else {
+        hr = DrawCompletedBackBuffer(frame, back, picture, geometryChanging, scheduled);
+        if (FAILED(hr)) return hr;
     }
-    if (FAILED(hr)) return hr;
     if (!geometryChanging && m_bVBlankBeforePresent && m_pDXGIOutput) m_pDXGIOutput->WaitForVBlank();
     // Use the actual resized video rectangle when applying the grade.
     const CRect* outputPicture = (frame.projected || m_svdLut.strength) ? &picture : nullptr;
@@ -682,6 +783,7 @@ void CDX11VideoProcessor::ClearCompletedFrames(bool release)
             false, m_mfgLostGenerated, S_OK, 0, -1, &queue);
     }
     if (release) m_completedPresenter.Stop();
+    InvalidateCompletedBackBuffer();
     m_completedFrames.clear();
     m_completedFree.clear();
     m_completedLast.reset();
@@ -690,9 +792,12 @@ void CDX11VideoProcessor::ClearCompletedFrames(bool release)
     m_completedGroups.Clear();
     m_completedDisplayPacing.Reset();
     m_completedBufferStatsTick = 0;
+    m_completedBufferPercent.reset();
+    m_completedBufferLow = {};
+    m_completedPreDraw = {};
     m_completedBufferStats.clear();
-    m_completedPendingMfgStats = 0;
     m_completedStatsDrops = {};
+    m_completedCadence = {};
     m_completedPresenter.Wake();
     if (release) {
         m_completedResizeTexture.Release();

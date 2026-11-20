@@ -25,6 +25,53 @@
 #include "VideoRenderer.h"
 #include "Mfg/CadenceTrace.h"
 
+HRESULT CDX11VideoProcessor::CreateEditionWindowedSwapChain(DXGI_SWAP_CHAIN_DESC1& desc)
+{
+    if (m_mfgMultiplier.load(std::memory_order_relaxed) >= 2 && desc.BufferCount == 2 &&
+        desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM && desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD) {
+        auto paced = desc;
+        paced.BufferCount = 3;
+        paced.Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+        CComPtr<IDXGISwapChain1> chain;
+        CComPtr<IDXGISwapChain2> pacing;
+        if (SUCCEEDED(m_pDXGIFactory2->CreateSwapChainForHwnd(m_pDevice, m_hWnd, &paced, nullptr, nullptr, &chain)) &&
+            SUCCEEDED(chain->QueryInterface(IID_PPV_ARGS(&pacing))) && SUCCEEDED(pacing->SetMaximumFrameLatency(1))) {
+            m_completedPresentWaitable = pacing->GetFrameLatencyWaitableObject();
+            if (m_completedPresentWaitable) {
+                m_pDXGISwapChain1 = chain;
+                desc = paced;
+                return S_OK;
+            }
+        }
+        if (chain) {
+            // A flip chain for the same HWND cannot coexist with the fallback.
+            pacing.Release();
+            chain.Release();
+            m_pDeviceContext->Flush();
+        }
+    }
+    return m_pDXGIFactory2->CreateSwapChainForHwnd(m_pDevice, m_hWnd, &desc, nullptr, nullptr, &m_pDXGISwapChain1);
+}
+
+UINT CDX11VideoProcessor::EditionSwapChainFlags() const
+{
+    // DXGI requires resizing a waitable chain with the same waitable flag.
+    return m_completedPresentWaitable ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0;
+}
+
+void CDX11VideoProcessor::InvalidateCompletedBackBuffer(bool externalPresent)
+{
+    m_completedBackBuffer = {};
+    if (externalPresent) m_completedPresentPermit = false;
+}
+
+bool CDX11VideoProcessor::TryCompletedPresentPermit()
+{
+    if (!m_completedPresentWaitable || m_completedPresentPermit) return true;
+    m_completedPresentPermit = WaitForSingleObject(m_completedPresentWaitable, 0) == WAIT_OBJECT_0;
+    return m_completedPresentPermit;
+}
+
 CRect CDX11VideoProcessor::ProcessingRect() const
 {
 	return m_processingSize.cx > 0 ? CRect(CPoint(0, 0), m_processingSize) : PictureForPlayback(CanProjectJvr());
@@ -77,7 +124,10 @@ void CDX11VideoProcessor::UpdateProcessingResolution()
 
 HRESULT CDX11VideoProcessor::SetWindowRect(const CRect& windowRect)
 {
-    if (m_windowRect != windowRect || m_resizePending) m_completedGeometryTick = GetTickCount64();
+    if (m_windowRect != windowRect || m_resizePending) {
+        m_completedGeometryTick = GetTickCount64();
+        InvalidateCompletedBackBuffer();
+    }
     const bool sizeChanged = windowRect.Width() != m_windowRect.Width() ||
                              windowRect.Height() != m_windowRect.Height();
     if (!sizeChanged) {
@@ -132,7 +182,7 @@ HRESULT CDX11VideoProcessor::SetWindowRect(const CRect& windowRect)
         m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
         hr = m_pDXGISwapChain1->ResizeBuffers(0,
             static_cast<UINT>(windowRect.Width()),
-            static_cast<UINT>(windowRect.Height()), DXGI_FORMAT_UNKNOWN, 0);
+            static_cast<UINT>(windowRect.Height()), DXGI_FORMAT_UNKNOWN, EditionSwapChainFlags());
     }
     UpdateStatsByWindow();
     UpdatePostScaleTexures();
@@ -151,6 +201,7 @@ HRESULT CDX11VideoProcessor::ApplyPendingWindowResize(bool settle)
     const CRect previous = m_windowRect;
     const CRect finalRect = m_resizeTarget;
     m_completedGeometryTick = GetTickCount64();
+    InvalidateCompletedBackBuffer();
     m_resizePending = false;
     m_windowRect = finalRect;
     if (m_pDXGISwapChain1 && !m_bExclusiveScreen &&
@@ -159,7 +210,7 @@ HRESULT CDX11VideoProcessor::ApplyPendingWindowResize(bool settle)
         m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
         const HRESULT hr = m_pDXGISwapChain1->ResizeBuffers(0,
             static_cast<UINT>(finalRect.Width()),
-            static_cast<UINT>(finalRect.Height()), DXGI_FORMAT_UNKNOWN, 0);
+            static_cast<UINT>(finalRect.Height()), DXGI_FORMAT_UNKNOWN, EditionSwapChainFlags());
         if (FAILED(hr)) {
             // Do not run the renderer with mismatched viewport/buffer sizes.
             m_windowRect = previous;

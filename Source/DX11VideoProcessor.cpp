@@ -814,6 +814,11 @@ void CDX11VideoProcessor::ReleaseSwapChain()
         UpdateRenderRect();
     }
 	StopMfg(true, m_fastShutdown);
+	InvalidateCompletedBackBuffer(true);
+	if (m_completedPresentWaitable) {
+		CloseHandle(m_completedPresentWaitable);
+		m_completedPresentWaitable = nullptr;
+	}
 	if (m_pDXGISwapChain1) {
 		m_pDXGISwapChain1->SetFullscreenState(FALSE, nullptr);
 	}
@@ -1849,7 +1854,7 @@ HRESULT CDX11VideoProcessor::InitSwapChain(bool bWindowChanged)
 			L"CDX11VideoProcessor::InitSwapChain() : Invalid window size {}x{}, use {}x{}",
 			m_windowRect.Width(), m_windowRect.Height(), desc1.Width, desc1.Height);
 
-		hr = m_pDXGIFactory2->CreateSwapChainForHwnd(m_pDevice, m_hWnd, &desc1, nullptr, nullptr, &m_pDXGISwapChain1);
+		hr = CreateEditionWindowedSwapChain(desc1);
 		DLogIf(FAILED(hr), L"CDX11VideoProcessor::InitSwapChain() : CreateSwapChainForHwnd() failed with error {}", HR2Str(hr));
 
 		m_lastFullscreenHMonitor = nullptr;
@@ -3194,6 +3199,7 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 	g_bPresent = true;
 	hr = m_pDXGISwapChain1->Present(1, 0);
 	g_bPresent = false;
+	if (hr == S_OK) InvalidateCompletedBackBuffer(true);
 	if (SUCCEEDED(hr)) {
 		if (field) m_startupHasPicture = true;
 		m_pFilter->OnVideoPresented();
@@ -3216,6 +3222,7 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 HRESULT CDX11VideoProcessor::FillBlack()
 {
 	CheckPointer(m_pDXGISwapChain1, E_ABORT);
+	InvalidateCompletedBackBuffer();
 
 	CComPtr<ID3D11Texture2D> pBackBuffer;
 	HRESULT hr = m_pDXGISwapChain1->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
@@ -3258,6 +3265,7 @@ HRESULT CDX11VideoProcessor::FillBlack()
 	g_bPresent = true;
 	hr = m_pDXGISwapChain1->Present(1, 0);
 	g_bPresent = false;
+	if (hr == S_OK) InvalidateCompletedBackBuffer(true);
 	DLogIf(FAILED(hr), L"CDX11VideoProcessor::FillBlack() : Present() failed with error {}", HR2Str(hr));
 
 	if (hr == DXGI_ERROR_INVALID_CALL && m_pFilter->m_bIsD3DFullscreen) {
@@ -3716,6 +3724,7 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 			if (!bNeedShaderTransform && !numSteps) {
 				m_bVPScalingUseShaders = false;
 				hr = D3D11VPPass(pRenderTarget, rSrc, dstRect, second);
+				if (SUCCEEDED(hr) && timestamp != INVALID_TIME) RecordEditionVsr(rSrc, dstRect, false);
 
 				return hr;
 			}
@@ -3724,6 +3733,7 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 		CRect rect(0, 0, m_TexConvertOutput.desc.Width, m_TexConvertOutput.desc.Height);
 		hr = D3D11VPPass(m_TexConvertOutput.pTexture, rSrc, rect, second);
 		if (FAILED(hr)) return hr;
+		if (timestamp != INVALID_TIME) RecordEditionVsr(rSrc, rect, false);
 		pInputTexture = &m_TexConvertOutput;
 		rSrc = rect;
 		rotation = 0;
@@ -3860,7 +3870,10 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 
 void CDX11VideoProcessor::SetVideoRect(const CRect& videoRect)
 {
-	if (m_videoRect != videoRect) m_completedGeometryTick = GetTickCount64();
+	if (m_videoRect != videoRect) {
+		m_completedGeometryTick = GetTickCount64();
+		InvalidateCompletedBackBuffer();
+	}
 	m_videoRect = videoRect;
 	UpdateRenderRect();
 	// Compute the display-sized offscreen target before allocating the VP
@@ -4057,6 +4070,22 @@ HRESULT CDX11VideoProcessor::GetDisplayedImage(BYTE **ppDib, unsigned* pSize)
 	if (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_R10G10B10A2_UNORM) {
 		DLog(L"CDX11VideoProcessor::GetDisplayedImage() backbuffer format not supported");
 		return E_FAIL;
+	}
+
+	if (m_completedPresentWaitable && m_completedLast) {
+		// The writable buffer may already contain the next video picture.
+		// Recreate the last submitted picture only when requested for capture.
+		CComPtr<ID3D11Texture2D> captured;
+		const auto captureDesc = CreateTex2DDesc(desc.Format, desc.Width, desc.Height, Tex2D_DefaultRTarget);
+		hr = m_pDevice->CreateTexture2D(&captureDesc, nullptr, &captured);
+		if (FAILED(hr)) return hr;
+		const auto& frame = *m_completedLast;
+		const auto picture = PictureForPlayback(frame.projected);
+		hr = DrawCompletedBackBuffer(frame, captured, picture, CompletedGeometryChanging(), false);
+		if (FAILED(hr)) return hr;
+		DrawMfgPresentOverlays(captured, picture, frame.pts, 0);
+		m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+		pBackBuffer = captured;
 	}
 
 	D3D11_TEXTURE2D_DESC desc2 = CreateTex2DDesc(desc.Format, desc.Width, desc.Height, Tex2D_StagingRead);

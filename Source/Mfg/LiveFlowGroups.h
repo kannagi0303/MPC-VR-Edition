@@ -12,6 +12,7 @@
 #include "FrameQueue.h"
 #include "LiveFlowMediaClock.h"
 #include "AdaptiveSourceCadence.h"
+#include "BufferedPhasePlan.h"
 #include "RepeatFrameTiming.h"
 #include <algorithm>
 #include <cmath>
@@ -54,6 +55,8 @@ class LiveFlowGroups {
         if (generatedPending_ > 0) --generatedPending_;
     }
 public:
+    enum class DeadlineMode { Qpc, StreamTime };
+
     void Clear() {
         groups_.clear();
         generatedPending_ = 0;
@@ -88,11 +91,12 @@ public:
                    double frequency, int64_t videoDelay, double refreshHz,
                    bool nativeInput, unsigned bankCount, bool autoCadence = false,
                    bool adaptiveSourceTiming = false, bool repeatBridge = false,
-                   const PresentationTiming& timing = {}) {
+                   const PresentationTiming& timing = {}, DeadlineMode deadlineMode = DeadlineMode::Qpc) {
         QueueDrops drops;
         if (!batch.serial || !batch.original) return drops;
         bankCount = std::clamp(bankCount, 2u, 4u);
-        clock_.Observe(qpc, stream, frequency);
+        const bool usesQpc = deadlineMode == DeadlineMode::Qpc;
+        if (usesQpc) clock_.Observe(qpc, stream, frequency);
         // An NGX output bank is recyclable, not a persistent frame store.
         // Recycle only synthetic phases. Originals hold independent snapshots.
         for (auto& g : groups_) {
@@ -124,6 +128,9 @@ public:
 
         const unsigned totalPhases = std::min(batch.generated, MaxGenerated);
         unsigned phases = unusual ? 0u : totalPhases;
+        // The original owns the last slot. Select only as many phases as
+        // the interval can present before assigning them to distinct slots.
+        if (!usesQpc && timing.slots) phases = std::min(phases, timing.slots - 1);
         // When the display cannot use every phase, select evenly distributed
         // NGX indices, preserving the source PTS and the model's phase order.
         if (phases && !autoCadence && std::isfinite(refreshHz) && refreshHz > 0.0) {
@@ -131,9 +138,14 @@ public:
             phases = std::min(phases, slots > 0 ? slots - 1u : 0u);
         }
         auto append = [&](int64_t stamp, int64_t presentAt, unsigned index) {
-            bool valid = false;
-            const auto deadline = clock_.Deadline(presentAt, videoDelay, qpc, frequency, valid);
-            if (!valid && index != MaxGenerated) { drops.Count(index); return; }
+            // Buffered groups are taken in stream order and checked against
+            // presentationTime by the completed-frame presenter.
+            int64_t deadline = 0;
+            if (usesQpc) {
+                bool valid = false;
+                deadline = clock_.Deadline(presentAt, videoDelay, qpc, frequency, valid);
+                if (!valid && index != MaxGenerated) { drops.Count(index); return; }
+            }
             if (index != MaxGenerated && generatedPending_ >= MaxMultiplier * bankCount) {
                 drops.Count(index); return;
             }
@@ -142,16 +154,34 @@ public:
                                       index == MaxGenerated ? -1 : batch.previous, presentAt + videoDelay});
             if (index != MaxGenerated) ++generatedPending_;
         };
-        if (phases && span > 0) {
+        // Pick a better NGX phase when the display slots are full. A missing
+        // phase must keep its existing slot so it does not shift the cadence.
+        const bool planInDisplaySlots = !usesQpc && timing.slots > 1 &&
+            totalPhases > timing.slots - 1 && phases == timing.slots - 1;
+        if (phases && span > 0 && planInDisplaySlots) {
+            const auto plan = PlanBufferedPhases<MaxGenerated>(batch.previous, batch.current,
+                timing.Start(batch.previous), timing.End(batch.current), totalPhases, timing.slots);
+            for (unsigned i = 0; i < plan.count; ++i) {
+                const auto& phase = plan.frames[i];
+                append(phase.mediaPts, phase.presentationTime, phase.index);
+            }
+        } else if (phases && span > 0) {
             const unsigned whole = totalPhases + 1u;
+            const auto originalDue = timing.End(batch.current);
+            auto previousDue = timing.Start(batch.previous);
             for (unsigned i = 1; i <= phases; ++i) {
                 const unsigned phase = std::clamp((i * whole + (phases + 1u) / 2u) / (phases + 1u), 1u, whole - 1u);
-                const auto stamp = batch.previous + int64_t((double(span) * phase) / whole);
-                append(stamp, timing.Phase(batch.previous, batch.current, phase, whole), phase - 1u);
+                const auto due = timing.Phase(batch.previous, batch.current, phase, whole);
+                if (!usesQpc && (due <= previousDue || due >= originalDue)) continue;
+                const auto stamp = batch.previous + span * phase / whole;
+                append(stamp, due, phase - 1u);
+                previousDue = due;
             }
-            const auto spanQpc = double(timing.End(batch.current) - timing.Start(batch.previous)) * frequency / 1e7;
-            if (std::isfinite(spanQpc) && spanQpc > 0.0)
-                group.phaseTicks = int64_t(spanQpc / double(phases + 1u));
+            if (usesQpc) {
+                const auto spanQpc = double(timing.End(batch.current) - timing.Start(batch.previous)) * frequency / 1e7;
+                if (std::isfinite(spanQpc) && spanQpc > 0.0)
+                    group.phaseTicks = int64_t(spanQpc / double(phases + 1u));
+            }
         }
         // The source picture is appended even if the clock mapping, refresh
         // estimate, or entire NGX generation failed; never drop it here.

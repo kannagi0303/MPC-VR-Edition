@@ -36,6 +36,7 @@ void CMpcVideoRenderer::BeginEditionSegment(double rate)
 	m_completedEndOfStream = false;
 	if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) {
 		dx11->m_mfgDisplayRate.BreakContinuity();
+		dx11->m_editionOriginalDropsBase = dx11->m_mfgLostReal.load(std::memory_order_relaxed);
 		dx11->ClearCompletedFrames(false);
 	}
 }
@@ -87,6 +88,8 @@ void CMpcVideoRenderer::CompleteEditionPause(HRESULT hr, FILTER_STATE previous)
 {
 	if (SUCCEEDED(hr) && previous == State_Running) {
 		CAutoLock cRendererLock(&m_RendererLock);
+		if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get()))
+			dx11->InvalidateCompletedBackBuffer();
 		if (m_filterState == State_Paused && m_bValidBuffer &&
 			m_VideoProcessor->Type() == VP_DX11 && m_Sets.bShowFeatureBadges) {
 			Redraw();

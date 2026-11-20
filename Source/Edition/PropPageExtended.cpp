@@ -77,6 +77,7 @@ void CVRMainPPage::SetEditionControls()
 	UpdateSvdLutLabel();
 	CheckDlgButton(IDC_SHOW_DEPTH_OVERLAY, m_SetsPP.bShowDepthOverlay ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_MFG_FEATURE_BADGES, m_SetsPP.bShowFeatureBadges ? BST_CHECKED : BST_UNCHECKED);
+	CheckDlgButton(IDC_EDITION_STATS_DETAILS, m_SetsPP.bShowEditionDetails ? BST_CHECKED : BST_UNCHECKED);
 	ComboBox_SelectByItemData(m_hWnd, IDC_MFG_PROCESSING_MODE, m_SetsPP.iMfgProcessingMode);
 	ComboBox_SelectByItemData(m_hWnd, IDC_EXTENDED_STARTUP, m_SetsPP.bWaitForExtendedStartup);
 
@@ -106,6 +107,7 @@ void CVRMainPPage::EnableEditionControls()
 	GetDlgItem(IDC_MFG_MULTIPLIER).EnableWindow(m_SetsPP.bUseD3D11 && IsWindows10OrGreater());
 	GetDlgItem(IDC_MFG_PROCESSING_MODE).EnableWindow(bMfgEnabled);
 	const BOOL canUseDlssSR = m_SetsPP.bUseD3D11 && IsWindows10OrGreater();
+	GetDlgItem(IDC_EDITION_STATS_DETAILS).EnableWindow(m_SetsPP.bUseD3D11);
 	const bool srEnabled = canUseDlssSR && m_SetsPP.bDlssSR;
 	GetDlgItem(IDC_ZIPDEPTH_MODE).EnableWindow(canUseDlssSR);
 	GetDlgItem(IDC_SVDLUT_STRENGTH).EnableWindow(canUseDlssSR);
@@ -228,6 +230,7 @@ void CVRMainPPage::AddEditionHints()
 	AddHint(IDC_MFG_FEATURE_BADGES,
 		L"Show DLSS SR, VSR and MFG status.\n"
 		L"Keep it visible while paused. Show it for 5 seconds after starting, resuming or resizing.");
+	AddHint(IDC_EDITION_STATS_DETAILS, L"Show Edition playback diagnostics when Show statistics is enabled.");
 	AddHint(IDC_MFG_MULTIPLIER,
 		L"Enable automatic DLSS Multi Frame Generation (Auto).\n"
 		L"Requires Direct3D 11, compatible NVIDIA RTX hardware and drivers.");
@@ -265,6 +268,7 @@ HRESULT CVRMainPPage::ReadEditionControls()
 	m_SetsPP.bShowDepthOverlay = IsDlgButtonChecked(IDC_SHOW_DEPTH_OVERLAY) == BST_CHECKED;
 	m_SetsPP.SetSvdLutStrength(static_cast<int>(SendDlgItemMessageW(IDC_SVDLUT_STRENGTH, TBM_GETPOS)));
 	m_SetsPP.bShowFeatureBadges = IsDlgButtonChecked(IDC_MFG_FEATURE_BADGES) == BST_CHECKED;
+	m_SetsPP.bShowEditionDetails = IsDlgButtonChecked(IDC_EDITION_STATS_DETAILS) == BST_CHECKED;
     const LRESULT srLimit = ComboBox_GetCurItemData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT);
     if (srLimit < DLSSSR_SOURCE_Disable || srLimit > DLSSSR_SOURCE_1440p) return E_INVALIDARG;
     m_SetsPP.iDlssSRSourceLimit = static_cast<int>(srLimit);
@@ -311,6 +315,11 @@ bool CVRMainPPage::OnEditionMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 		}
 
 		if (action == BN_CLICKED) {
+			if (nID == IDC_EDITION_STATS_DETAILS) {
+				m_SetsPP.bShowEditionDetails = IsDlgButtonChecked(nID) == BST_CHECKED;
+				SetDirty();
+				return TRUE;
+			}
 			if (nID == IDC_JVR_FLAT_VIEW) {
 				m_SetsPP.bJvrFlatView = IsDlgButtonChecked(IDC_JVR_FLAT_VIEW) == BST_CHECKED;
 				ApplyJvrPreview();

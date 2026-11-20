@@ -35,6 +35,7 @@
 #include "SubPic/DX11SubPic.h"
 
 #include "Edition/DX11Dependencies.h"
+#include "Edition/CompletedBufferPolicy.h"
 
 class CVideoRendererInputPin;
 

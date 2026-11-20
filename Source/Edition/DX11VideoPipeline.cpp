@@ -87,6 +87,7 @@ std::optional<HRESULT> CDX11VideoProcessor::PrepareEditionRender(edition::VideoF
 		m_completedTarget->end = frameStartTime + m_sampleDuration;
 		m_completedTarget->due = frameStartTime + m_rtVideoDelay;
 	} else {
+		InvalidateCompletedBackBuffer();
 		hr = m_pDXGISwapChain1->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
 		if (FAILED(hr)) {
 			DLog(L"CDX11VideoProcessor::Render() : GetBuffer() failed with error {}", HR2Str(hr));
