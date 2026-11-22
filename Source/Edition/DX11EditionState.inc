@@ -131,6 +131,9 @@
     CRect m_resizeTarget;
     ULONGLONG m_resizeLastChangeTick = 0;
     ULONGLONG m_completedGeometryTick = 0;
+    // Arm B08's original-first pressure escape only for a real window resize.
+    // Cleared by ClearCompletedFrames on Seek/Flush/NewSegment.
+    std::atomic<bool> m_completedResizeRecovery{false};
     HANDLE m_completedPresentWaitable = nullptr;
     bool m_completedPresentPermit = false;
     HRESULT CreateEditionWindowedSwapChain(DXGI_SWAP_CHAIN_DESC1& desc);
@@ -154,7 +157,7 @@
                            bool bypassUpscale = false, bool projected = false);
     HRESULT FinishMfgPresent(ID3D11Texture2D* preparedVideo, REFERENCE_TIME timestamp, uint64_t serial,
                              bool completed = false, const CRect* pictureOverride = nullptr,
-                             bool svdLutHandled = false);
+                             bool svdLutHandled = false, bool alreadyComposited = false);
     void DrawMfgPresentOverlays(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME timestamp, uint64_t serial);
     struct CompletedFrame {
         Tex2D_t image;
@@ -183,6 +186,13 @@
         uint64_t frameFence = 0;
         CRect picture = CRect(0, 0, 0, 0);
         bool drawn = false;
+        // Actual grade state of the cached pre-draw, not a later attempt.
+        bool graded = false;
+        // DXGI_PRESENT_DO_NOT_WAIT can reject a fully composed back buffer.
+        // These are non-owning identity fields: never retain a COM reference
+        // across ResizeBuffers. InvalidateCompletedBackBuffer clears them.
+        bool busyRetryReady = false;
+        ID3D11Texture2D* busyRetryBuffer = nullptr;
     };
     CompletedBackBuffer m_completedBackBuffer;
     std::vector<CompletedFrame> m_completedFree;
@@ -261,7 +271,7 @@
     HRESULT AcquireCompletedTarget(const D3D11_TEXTURE2D_DESC& desc, CompletedFrame& target);
     void RecycleCompletedFrame(CompletedFrame&& frame);
     bool QueueCompletedFrame(CompletedFrame&& frame);
-    bool PrepareCompletedBatch(REFERENCE_TIME stream);
+    bool PrepareCompletedBatch(REFERENCE_TIME stream, bool originalPriority = false);
     bool NextCompletedFrame(int64_t& deadline);
     bool PresentCompletedFrame();
     REFERENCE_TIME CompletedSubmitLead();

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * (C) 2018-2026 see Authors.txt
  *
  * This file is part of MPC-BE.
@@ -39,6 +39,18 @@ class __declspec(uuid("DA46D181-07D6-441D-B314-019AEB10148A"))
 	int m_oldSDRDisplayNits = SDR_NITS_DEF;
 	int m_oldSvdLutStrength = 0;
 	bool m_svdLutPreviewed = false;
+	bool m_svdLutOff = false;
+	bool m_oldSvdLutOff = false;
+	bool m_svdLutRaw = false;
+	bool m_oldSvdLutRaw = false;
+	bool m_svdLutTemporal = false;
+	bool m_oldSvdLutTemporal = false;
+    bool m_svdLutB2Luminance = false;
+    bool m_oldSvdLutB2Luminance = false;
+    bool m_svdLutB2Memory = false;
+    bool m_oldSvdLutB2Memory = false;
+    bool m_svdLutR1Gamut = false;
+    bool m_oldSvdLutR1Gamut = false;
 	bool m_oldJvrFlatView = false;
 	int m_oldJvrVertical = JVR_VERTICAL_DEFAULT;
 	int m_oldJvrReprojection = JVR_REPROJECTION_DEFAULT;
@@ -70,6 +82,12 @@ private:
 	void ApplyJvrPreview();
 	void UpdateSvdLutLabel();
 	void PreviewSvdLutStrength(int strength);
+	void PreviewSvdLutOff(bool off);
+	void PreviewSvdLutRaw(bool raw);
+	void PreviewSvdLutTemporal(bool temporal);
+    void PreviewSvdLutB2Luminance(bool enable);
+    void PreviewSvdLutB2Memory(bool enable);
+    void PreviewSvdLutR1Gamut(bool enable);
 
 	HRESULT OnConnect(IUnknown* pUnknown) override;
 	HRESULT OnDisconnect() override;

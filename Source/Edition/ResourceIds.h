@@ -26,6 +26,11 @@
 #define IDC_ZIPDEPTH_MODE                 5029
 #define IDC_SVDLUT_STRENGTH               5030
 #define IDC_SVDLUT_VALUE                  5031
+#define IDC_SVDLUT_RAW                    5032
+#define IDC_SVDLUT_MODE                   5033
+#define IDC_SVDLUT_B2_LUMINANCE           5034
+#define IDC_SVDLUT_B2_MEMORY              5035
+#define IDC_SVDLUT_R1_GAMUT                5036
 #define IDC_SHOW_DEPTH_OVERLAY            5023
 #define IDC_JVR_FLAT_VIEW                  1372
 #define IDC_JVR_VERTICAL                   1373

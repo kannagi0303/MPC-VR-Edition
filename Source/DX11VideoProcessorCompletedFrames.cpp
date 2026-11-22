@@ -1,10 +1,11 @@
-﻿// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "stdafx.h"
 #include "Helper.h"
 #include "DX11VideoProcessor.h"
 #include "VideoRenderer.h"
 #include "Times.h"
 #include "Mfg/CadenceTrace.h"
+#include <cstring>
 
 namespace {
 constexpr uint64_t MiB = 1024ull * 1024;
@@ -73,17 +74,49 @@ const char* CDX11VideoProcessor::CompletedAdmissionBlock(REFERENCE_TIME due, std
     }
     const auto bytes = TextureBytes(nextDesc);
     if (!m_completedBatches.empty()) {
-        if (const auto block = CompletedOverlapBlock(stream, margin, completed, committed, bytes)) return block;
-        auto& trace = mfg::SourceCadenceTrace();
-        if (trace.Enabled()) {
-            trace.Record("completed_mfg_overlap_admit", GetPreciseTick(), due, stream,
-                m_completedBatches.front().phases.front().serial, 0, 0, 0, 0, false, m_mfgLostGenerated, S_OK);
+        const char* block = CompletedOverlapBlock(stream, margin, completed, committed, bytes);
+        if (block && m_completedResizeRecovery.load(std::memory_order_relaxed) && m_mfg.AsyncProducer() &&
+            (std::strcmp(block, "completed_wait_mfg_slots") == 0 ||
+             std::strcmp(block, "completed_wait_mfg_bank") == 0)) {
+            // B08 is a resize-recovery escape only. Seek/flush resets the arm,
+            // so seek prebuffering follows the GitHub stable bank/pending path.
+            // Do not decide MFG startup from the Ready-buffer percentage:
+            // seek naturally starts with zero Ready and must still generate.
+            // A recyclable NGX bank is an optional enhancement resource, not
+            // ownership of the original frame. When bank pressure prevents
+            // receiving another source, retire the oldest buffered batch now.
+            // Ready synthetic phases are still rendered; unfinished ones are
+            // discarded, while the independent original snapshot is enqueued.
+            // Without this escape, a pending generated phase can block the
+            // entire batch until the ORIGINAL's deadline, and the queue can
+            // drain even though source/GPU processing has sufficient capacity.
+            PrepareCompletedBatch(stream, true);
+            // Re-check GPU completion, capacity, and bank ownership after
+            // rendering any ready phases and enqueuing the protected original.
+            // A forced batch is not permission to exceed the fence budget.
+            if (m_completedFailed) return "completed_wait_prepare_failed";
+            if (m_completedFrames.size() >= 256) return "completed_wait_queue_limit";
+            const auto latestCompleted = m_completedFence->GetCompletedValue();
+            if (latestCompleted == UINT64_MAX) return "completed_wait_device_removed";
+            if (m_completedFenceValue - latestCompleted > 8) return "completed_wait_gpu_fence";
+            block = m_completedBatches.empty() ? nullptr :
+                CompletedOverlapBlock(stream, margin, latestCompleted,
+                    GetCompletedPoolUsage(latestCompleted).Committed(), bytes);
         }
-        return nullptr;
+        if (block) return block;
+        if (!m_completedBatches.empty()) {
+            auto& trace = mfg::SourceCadenceTrace();
+            if (trace.Enabled()) {
+                trace.Record("completed_mfg_overlap_admit", GetPreciseTick(), due, stream,
+                    m_completedBatches.front().phases.front().serial, 0, 0, 0, 0, false, m_mfgLostGenerated, S_OK);
+            }
+            return nullptr;
+        }
     }
     const auto multiplier = (std::clamp)(m_mfgEffectiveMultiplier.load(std::memory_order_relaxed), 1u, 4u);
     const auto desired = (std::min)(bytes * multiplier, m_completedByteLimit / 3);
-    return committed + (std::max)(bytes, desired) <= m_completedByteLimit ? nullptr : "completed_wait_budget";
+    return GetCompletedPoolUsage(completed).Committed() + (std::max)(bytes, desired) <= m_completedByteLimit
+        ? nullptr : "completed_wait_budget";
 }
 
 const char* CDX11VideoProcessor::CompletedOverlapBlock(REFERENCE_TIME stream, REFERENCE_TIME margin, uint64_t completed,
@@ -317,7 +350,7 @@ bool CDX11VideoProcessor::QueueCompletedFrame(CompletedFrame&& frame)
     return true;
 }
 
-bool CDX11VideoProcessor::PrepareCompletedBatch(REFERENCE_TIME stream)
+bool CDX11VideoProcessor::PrepareCompletedBatch(REFERENCE_TIME stream, bool originalPriority)
 {
     auto& batch = m_completedBatches.front();
     if (batch.phases.empty()) {
@@ -331,7 +364,8 @@ bool CDX11VideoProcessor::PrepareCompletedBatch(REFERENCE_TIME stream)
     const auto future = std::find_if(batch.phases.begin(), batch.phases.end(), [&](const auto& phase) {
         return phase.index != mfg::MaxGenerated && phase.presentationTime > stream;
     });
-    if (future != batch.phases.end() && original.presentationTime - stream > CompletedSubmitLead() &&
+    if (!originalPriority && future != batch.phases.end() &&
+        original.presentationTime - stream > CompletedSubmitLead() &&
         m_mfg.Frame(future->serial, future->index, original.timestamp).pending) return false;
     const auto started = GetPreciseTick();
     // Use the geometry and input layout recorded for this batch.
@@ -436,8 +470,30 @@ bool CDX11VideoProcessor::NextCompletedFrame(int64_t& deadline)
     struct Unlock { CCritSec& lock; ~Unlock() { lock.Unlock(); } } unlock{m_pFilter->m_RendererLock};
     if (m_pFilter->m_filterState != State_Running || m_pFilter->m_bFlushing || !m_pDXGISwapChain1)
         return false;
+    // Complete a deferred window resize on the presentation worker's own
+    // schedule, not only during PresentCompletedVideo(). A pending resize can
+    // otherwise outlive the last queued frame, and the worker would sleep
+    // indefinitely while geometry-dependent admission remains restricted.
+    // The 140-ms interval is measured from the last window change.
+    constexpr ULONGLONG resizeSettleMs = 140;
+    if (m_resizePending && GetTickCount64() - m_resizeLastChangeTick >= resizeSettleMs)
+        ApplyPendingWindowResize();
+    // Early B-only 256x256 thumbnail capture is independent of the actual
+    // display deadline. The high-priority presenter polls this callback while
+    // frames are buffered, including the first frame following a seek.
+    if (!m_completedFrames.empty()) PrimeSvdLutTemporalFrames();
     if (!m_completedBatches.empty()) return true;
     if (m_completedFrames.empty()) {
+        // No picture is due, but an outstanding WM_SIZE still needs a
+        // swap-chain commit. Keep the worker scheduled until the resize
+        // settles (including retries after a failed ResizeBuffers), without
+        // producing or discarding any video frame.
+        if (m_resizePending) {
+            const auto elapsedMs = GetTickCount64() - m_resizeLastChangeTick;
+            const auto waitMs = elapsedMs < resizeSettleMs ? resizeSettleMs - elapsedMs : 1ull;
+            deadline += int64_t((std::max)(1ull, waitMs) * GetPreciseTicksPerSecond() / 1000);
+            return true;
+        }
         if (!m_pFilter->m_completedEndOfStream) return false;
         deadline += int64_t(GetPreciseTicksPerSecond() / 1000);
         return true;
@@ -500,7 +556,26 @@ bool CDX11VideoProcessor::PrepareCompletedBackBuffer(CompletedFrame& frame)
     const auto readFence = ++m_completedFenceValue;
     if (SUCCEEDED(m_completedContext->Signal(m_completedFence, readFence))) {
         frame.backBufferReadFence = readFence;
-        m_completedBackBuffer.drawn = SUCCEEDED(hr);
+        // A speculative pre-draw without a Temporal B LUT must not lock an
+        // ungraded backbuffer into the actual present. The worker may finish
+        // before the present deadline, in which case redraw once with the LUT.
+        // Normal A and RAW B retain the original pre-draw behavior.
+        const bool temporalB = m_pFilter->m_svdLutRaw.load() && m_pFilter->m_svdLutTemporal.load() &&
+            !m_pFilter->m_svdLutOff.load();
+        const bool gradeMayArrive = temporalB && (
+            // After start/seek the model may still be loading: even without a
+            // submitted thumbnail, do not cache an ungraded speculative draw
+            // as the final image of the new segment.
+            (!m_svdLutRawTest.heldView &&
+                m_svdLutRawTest.model.GetState() != svdlut::ModelWorker::State::Failed) ||
+            m_svdLutRawTest.inFlight ||
+            std::any_of(m_svdLutRawTest.captures.begin(), m_svdLutRawTest.captures.end(),
+                [](const auto& capture) { return capture.pending || bool(capture.input); }));
+        // Retry the present-time drawing only when there is real pending LUT
+        // work. Avoid a redundant full-resolution redraw during cold startup
+        // when neither a GPU readback nor model evaluation is in progress.
+        m_completedBackBuffer.drawn = SUCCEEDED(hr) && (!gradeMayArrive || m_svdLutRawTest.active);
+        m_completedBackBuffer.graded = temporalB && SUCCEEDED(hr) && m_svdLutRawTest.active;
     }
     m_pDeviceContext->Flush();
     return true;
@@ -620,6 +695,15 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
         m_completedFrames.push_front(std::move(frame));
         return false;
     }
+    if (hr == S_OK && m_pFilter->m_svdLutRaw.load() &&
+        m_pFilter->m_svdLutTemporal.load() && !m_pFilter->m_svdLutOff.load()) {
+        // b.active is the grade state of the image actually used by the
+        // successful Present (including a previously prepared backbuffer).
+        // These counts exclude speculative pre-draws and failed DXGI retries.
+        if (m_svdLutRawTest.active) ++m_svdLutRawTest.presentedGraded;
+        else ++m_svdLutRawTest.presentedUngraded;
+    }
+    if (hr == S_OK) RememberPresentedSvdLutB2(frame.pts, frame.fence);
     if (hr == S_OK && frame.phase == mfg::MaxGenerated) {
         m_pFilter->ReportCompletedMediaTime(frame.pts, frame.end);
         m_pFilter->m_DrawStats.Add(GetPreciseTick());
@@ -754,11 +838,33 @@ HRESULT CDX11VideoProcessor::PresentCompletedVideo(const CompletedFrame& frame, 
         }
     }
     const bool geometryChanging = scheduled && CompletedGeometryChanging();
-    const bool prepared = scheduled && !geometryChanging && !m_bVBlankBeforePresent &&
+    // Present(DO_NOT_WAIT) did not consume the submitted image if it returned
+    // DXGI_ERROR_WAS_STILL_DRAWING. A retry of the same frame and same DXGI
+    // backbuffer does not need another video blit or another overlay draw.
+    // Window changes and external paints invalidate this state; comparing the
+    // current GetBuffer(0) identity avoids reusing a flipped/recreated buffer.
+    const bool busyRetry = scheduled &&
+        m_completedBackBuffer.busyRetryReady && m_completedBackBuffer.drawn &&
+        m_completedBackBuffer.frameFence == frame.fence &&
+        m_completedBackBuffer.picture == picture &&
+        m_completedBackBuffer.busyRetryBuffer == back.p;
+    const bool prepared = !busyRetry && scheduled && !geometryChanging && !m_bVBlankBeforePresent &&
         m_completedBackBuffer.drawn && m_completedBackBuffer.frameFence == frame.fence &&
         m_completedBackBuffer.picture == picture;
+    const bool preparedGraded = m_completedBackBuffer.graded;
     InvalidateCompletedBackBuffer();
-    if (prepared) {
+    if (busyRetry) {
+        // The prior attempt already composed the final video + OSD. Preserve
+        // the grade state recorded for that exact image in presentation stats.
+        if (m_pFilter->m_svdLutRaw.load() && m_pFilter->m_svdLutTemporal.load() &&
+            !m_pFilter->m_svdLutOff.load()) m_svdLutRawTest.active = preparedGraded;
+        if (preparedReadFence) *preparedReadFence = frame.backBufferReadFence;
+    } else if (prepared) {
+        // A cached backbuffer was already graded (or left ungraded) earlier.
+        // Do not let a later speculative draw overwrite the successful
+        // Present's graded/ungraded counter with an unrelated b.active value.
+        if (m_pFilter->m_svdLutRaw.load() && m_pFilter->m_svdLutTemporal.load() &&
+            !m_pFilter->m_svdLutOff.load()) m_svdLutRawTest.active = preparedGraded;
         if (preparedReadFence) *preparedReadFence = frame.backBufferReadFence;
     } else {
         hr = DrawCompletedBackBuffer(frame, back, picture, geometryChanging, scheduled);
@@ -767,7 +873,20 @@ HRESULT CDX11VideoProcessor::PresentCompletedVideo(const CompletedFrame& frame, 
     if (!geometryChanging && m_bVBlankBeforePresent && m_pDXGIOutput) m_pDXGIOutput->WaitForVBlank();
     // Use the actual resized video rectangle when applying the grade.
     const CRect* outputPicture = (frame.projected || m_svdLut.strength) ? &picture : nullptr;
-    return FinishMfgPresent(back, frame.pts, 0, scheduled, outputPicture, true);
+    const auto presentHr = FinishMfgPresent(back, frame.pts, 0, scheduled, outputPicture, true, busyRetry);
+    if (presentHr == DXGI_ERROR_WAS_STILL_DRAWING && scheduled) {
+        // Retain only the identity of the buffer; do not hold a COM reference
+        // that could prevent the deferred DXGI ResizeBuffers from succeeding.
+        // This cache is invalidated by a geometry update or an outside paint.
+        m_completedBackBuffer.frameFence = frame.fence;
+        m_completedBackBuffer.picture = picture;
+        m_completedBackBuffer.drawn = true;
+        m_completedBackBuffer.graded = m_pFilter->m_svdLutRaw.load() &&
+            m_pFilter->m_svdLutTemporal.load() && !m_pFilter->m_svdLutOff.load() && m_svdLutRawTest.active;
+        m_completedBackBuffer.busyRetryReady = true;
+        m_completedBackBuffer.busyRetryBuffer = back.p;
+    }
+    return presentHr;
 }
 
 void CDX11VideoProcessor::ClearCompletedFrames(bool release)
@@ -784,6 +903,19 @@ void CDX11VideoProcessor::ClearCompletedFrames(bool release)
     }
     if (release) m_completedPresenter.Stop();
     InvalidateCompletedBackBuffer();
+    // A new timeline (Seek/Flush/NewSegment) is not a resize recovery.
+    // Restore the stable MFG bank admission behavior from its first frame.
+    m_completedResizeRecovery.store(false, std::memory_order_relaxed);
+    if (m_pFilter->m_svdLutRaw.load()) {
+        if (m_pFilter->m_svdLutTemporal.load()) {
+            // Seek/stop/flush invalidates asynchronous B work and its PTS.
+            ResetSvdLutTemporalQueue();
+        } else {
+            m_svdLutRawTest.frames = {};
+            m_svdLutRawTest.frameSlot = 0;
+            m_svdLutRawTest.lastWindow = 0;
+        }
+    }
     m_completedFrames.clear();
     m_completedFree.clear();
     m_completedLast.reset();

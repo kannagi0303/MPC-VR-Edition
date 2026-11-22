@@ -130,6 +130,12 @@ HRESULT CDX11VideoProcessor::SetWindowRect(const CRect& windowRect)
     }
     const bool sizeChanged = windowRect.Width() != m_windowRect.Width() ||
                              windowRect.Height() != m_windowRect.Height();
+    // Keep resize-only bank-pressure recovery out of the Seek/Flush MFG
+    // prebuffer path. Both paths may start with an empty Completed Queue,
+    // but only a real window-size change may arm B08's forced batch retire.
+    if (sizeChanged && m_mfgMultiplier.load(std::memory_order_relaxed) != 0 &&
+        m_pFilter->m_filterState == State_Running)
+        m_completedResizeRecovery.store(true, std::memory_order_relaxed);
     if (!sizeChanged) {
         // Position changes are not swap-chain resizes. When a drag returns to
         // the original size, discard the uncommitted resize request. Treat
@@ -163,6 +169,10 @@ HRESULT CDX11VideoProcessor::SetWindowRect(const CRect& windowRect)
         m_resizePending = true;
         m_resizeTarget = windowRect;
         m_resizeLastChangeTick = GetTickCount64();
+        // The resize must complete even if the completed-picture queue drains
+        // before another video Present. Wake the presentation worker so it can
+        // schedule the coalesced swap-chain commit independently of a frame.
+        m_completedPresenter.Wake();
         return S_OK;
     }
 
@@ -179,7 +189,11 @@ HRESULT CDX11VideoProcessor::SetWindowRect(const CRect& windowRect)
     if (m_pDXGISwapChain1 && !m_bExclusiveScreen &&
         windowRect.Width() > 0 && windowRect.Height() > 0) {
         if (m_processingSize.cx > 0) DiscardMfgPreparedFrame();
-        m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+        // ResizeBuffers requires ALL direct/indirect references to the old
+        // back buffers to be released, not just the current OM render target.
+        // Flush deferred D3D11 releases before changing the swap-chain size.
+        m_pDeviceContext->ClearState();
+        m_pDeviceContext->Flush();
         hr = m_pDXGISwapChain1->ResizeBuffers(0,
             static_cast<UINT>(windowRect.Width()),
             static_cast<UINT>(windowRect.Height()), DXGI_FORMAT_UNKNOWN, EditionSwapChainFlags());
@@ -207,7 +221,11 @@ HRESULT CDX11VideoProcessor::ApplyPendingWindowResize(bool settle)
     if (m_pDXGISwapChain1 && !m_bExclusiveScreen &&
         finalRect.Width() > 0 && finalRect.Height() > 0) {
         if (m_processingSize.cx > 0) DiscardMfgPreparedFrame();
-        m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+        // A previously bound SRV/RTV/UAV or deferred D3D11 release can retain
+        // an indirect reference to the old flip-model back buffer. Merely
+        // unbinding OM targets leaves those references alive on some paths.
+        m_pDeviceContext->ClearState();
+        m_pDeviceContext->Flush();
         const HRESULT hr = m_pDXGISwapChain1->ResizeBuffers(0,
             static_cast<UINT>(finalRect.Width()),
             static_cast<UINT>(finalRect.Height()), DXGI_FORMAT_UNKNOWN, EditionSwapChainFlags());

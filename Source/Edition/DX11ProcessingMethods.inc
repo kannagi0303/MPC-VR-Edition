@@ -14,6 +14,8 @@
 	void ReleaseSvdLut(bool fast = false);
 	std::wstring SvdLutStatus() const;
 	HRESULT PrepareSvdLutDraw();
+	bool StartSvdLutModel();
+	HRESULT EnsureSvdLutThumbnails();
 	HRESULT EnsureSvdLutPicture(DXGI_FORMAT format, UINT width, UINT height);
 	bool SvdLutWorkAllowed();
 	void BeginSvdLutScene(REFERENCE_TIME timestamp);
@@ -25,13 +27,38 @@
 		ID3D11PixelShader* shader;
 		ID3D11ShaderResourceView* view;
 		float blend;
-	};
+		};
 	std::optional<SvdLutGrade> PrepareSvdLutGrade(REFERENCE_TIME timestamp);
 	HRESULT ApplySvdLutGrade(const SvdLutGrade& grade, const Tex2D_t& source, ID3D11Texture2D* target,
 		const CRect& area, const CRect& visible, CPoint sourceOffset);
 	HRESULT DrawCompletedSvdLut(const CompletedFrame& frame, ID3D11Texture2D* target,
 		const CRect& picture, bool geometryChanging);
 	void DrawSvdLut(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME timestamp);
+
+	// Independent unprotected, one-DirectML-evaluation-per-frame experiment B.
+	void ReleaseSvdLutRawTest(bool fast = false);
+	bool StartSvdLutRawTest();
+	HRESULT PrepareSvdLutRawResources();
+	HRESULT EnsureSvdLutRawPicture(DXGI_FORMAT format, UINT width, UINT height);
+	void ResetSvdLutTemporalQueue();
+	void PollSvdLutTemporalQueue();
+	void PrimeSvdLutTemporalFrames();
+	SvdLutRawFrame* QueueSvdLutTemporalFrame(const Tex2D_t& source,
+		const CRect& sample, REFERENCE_TIME pts, uint64_t fence);
+	ID3D11ShaderResourceView* SvdLutTemporalReadyView(REFERENCE_TIME pts, uint64_t fence);
+    std::array<float, 3> SvdLutB2ToneForView(REFERENCE_TIME pts, uint64_t fence,
+        ID3D11ShaderResourceView* selected);
+    void RememberPresentedSvdLutB2(REFERENCE_TIME pts, uint64_t fence);
+	SvdLutRawFrame* EvaluateSvdLutRawFrame(const Tex2D_t& source,
+		const CRect& sample, REFERENCE_TIME pts, uint64_t fence);
+	ID3D11ShaderResourceView* SvdLutRawViewForFrame(SvdLutRawFrame& frame);
+	void PrefetchSvdLutRawFuture(const CompletedFrame& current, bool geometryChanging);
+	HRESULT ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Texture2D* target,
+		const CRect& area, const CRect& visible, CPoint offset, REFERENCE_TIME pts, uint64_t fence,
+		bool allowTemporalCapture = true);
+	HRESULT DrawCompletedSvdLutRaw(const CompletedFrame& frame, ID3D11Texture2D* target,
+		const CRect& picture, bool geometryChanging);
+	void DrawSvdLutRaw(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME pts);
 	bool CanProjectJvr() const;
 	HRESULT PrepareJvrFrame(const CRect& picture, bool second);
 	HRESULT ProjectJvr(const Tex2D_t& source, ID3D11Texture2D* target, const CRect& sourceRect, const CRect& picture);

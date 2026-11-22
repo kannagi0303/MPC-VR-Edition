@@ -5,6 +5,7 @@
 #include <d3d12.h>
 #include <dxgi.h>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <fstream>
@@ -334,7 +335,14 @@ bool PinRenderer()
     return pinned;
 }
 
-} // namespace
+ } // namespace
+
+ComPtr<ID3D11ShaderResourceView> CreateParametersView(ID3D11Device* device, const Parameters& parameters)
+{
+    if (!device) return {};
+    try { return CreateGradeView(device, parameters); }
+    catch (const std::exception&) { return {}; }
+}
 
 struct ModelWorker::Impl {
     std::atomic<State> state = State::Loading;
@@ -346,6 +354,7 @@ struct ModelWorker::Impl {
     std::unique_ptr<Image> input;
     ComPtr<ID3D11PixelShader> shader;
     ComPtr<ID3D11ShaderResourceView> result;
+    std::shared_ptr<const Parameters> resultParameters;
     uint64_t generation = 0;
     bool running = false;
     bool stopping = false;
@@ -357,7 +366,7 @@ struct ModelWorker::Impl {
             stopping = true;
             input.reset();
         }
-        wake.notify_one();
+        wake.notify_all();
     }
 
     ~Impl()
@@ -400,8 +409,12 @@ struct ModelWorker::Impl {
                     first = false;
                 }
                 guard.lock();
-                if (!stopping && generation == submittedGeneration) result = std::move(view);
+                if (!stopping && generation == submittedGeneration) {
+                    result = std::move(view);
+                    resultParameters = std::move(parameters);
+                }
                 running = false;
+                wake.notify_all();
             }
         } catch (const std::exception& error) {
             OutputDebugStringA("SVDLUT DirectML: ");
@@ -409,7 +422,11 @@ struct ModelWorker::Impl {
             trace.Write(failure.data());
             OutputDebugStringA(failure.data());
             OutputDebugStringA("\n");
-            state.store(State::Failed, std::memory_order_release);
+            {
+                std::lock_guard guard(lock);
+                state.store(State::Failed, std::memory_order_release);
+            }
+            wake.notify_all();
         }
         finished.store(true, std::memory_order_release);
     }
@@ -463,6 +480,7 @@ void ModelWorker::Invalidate()
     ++m_impl->generation;
     m_impl->input.reset();
     m_impl->result.Reset();
+    m_impl->resultParameters.reset();
 }
 
 bool ModelWorker::ReadyForInput() const
@@ -489,7 +507,47 @@ ComPtr<ID3D11ShaderResourceView> ModelWorker::TakeResult()
     if (!m_impl) return {};
     std::unique_lock guard(m_impl->lock, std::try_to_lock);
     if (!guard.owns_lock()) return {};
+    m_impl->resultParameters.reset();
     return std::move(m_impl->result);
+}
+
+FrameResult ModelWorker::TryTakeFrameResult()
+{
+    if (!m_impl) return {};
+    std::unique_lock guard(m_impl->lock, std::try_to_lock);
+    if (!guard.owns_lock() || !m_impl->result || !m_impl->resultParameters) return {};
+    return {std::move(m_impl->result), std::move(m_impl->resultParameters)};
+}
+
+ComPtr<ID3D11ShaderResourceView> ModelWorker::EvaluateFrame(std::unique_ptr<Image> image)
+{
+    return EvaluateFrameWithParameters(std::move(image)).view;
+}
+
+FrameResult ModelWorker::EvaluateFrameWithParameters(std::unique_ptr<Image> image)
+{
+    if (!image || GetState() != State::Ready) return {};
+    auto& worker = *m_impl;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    std::unique_lock guard(worker.lock);
+    const auto ready = [&] {
+        return !worker.stopping && worker.state.load(std::memory_order_acquire) == State::Ready;
+    };
+    const auto idle = [&] { return !ready() || (!worker.input && !worker.running); };
+    if (!worker.wake.wait_until(guard, deadline, idle) || !ready()) return {};
+
+    worker.result.Reset();
+    worker.resultParameters.reset();
+    worker.input = std::move(image);
+    worker.wake.notify_all();
+    if (!worker.wake.wait_until(guard, deadline, idle)) {
+        // Drop an overdue test result rather than applying it to another frame.
+        ++worker.generation;
+        worker.input.reset();
+        return {};
+    }
+    if (!ready()) return {};
+    return {std::move(worker.result), std::move(worker.resultParameters)};
 }
 
 ID3D11PixelShader* ModelWorker::Shader() const

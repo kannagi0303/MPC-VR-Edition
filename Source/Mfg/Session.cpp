@@ -129,6 +129,10 @@ struct Session::Impl {
         bool checked=false,valid=false,multiplierRetry=false;
     };
     std::array<Bank,4> banks;
+    // Original-only samples must not borrow a producer bank. In particular,
+    // changing Bank::serial while NGX is still writing invalidates an older
+    // generated group before its producer fence has completed.
+    std::shared_ptr<OriginalSnapshot> fallbackOriginal;
     unsigned activeBanks=3; // 2/3/4 selectable, 4 supports longer Live Flow group retention.
     ComPtr<ID3D12Resource> zero;
     CDlssOpticalFlow flow;
@@ -365,16 +369,18 @@ struct Session::Impl {
         allocated=std::max(allocated,count);multiplier=multiple;
     }
     bool CaptureOnly(ID3D11Texture2D* image,int64_t timestamp,Batch& batch,const DepthInput* depth) {
-        // No NGX work in Auto x1. The output bank serial still advances so
-        // queued generated frames can expire, but real snapshots stay valid.
-        auto& bank=banks[unsigned(serial%activeBanks)];
-        Capture(bank,image);
-        if (depth && depth->captureSource) depth->source.Update(device11.Get(), context.Get(), bank.original->view.Get(),
+        // An original-only interval does not own a generated-output bank.
+        // The next serial must advance, but an earlier bank's serial, producer
+        // resources and completion state remain intact until its GPU work and
+        // D3D11 consumer have completed. Capture into an independent snapshot.
+        if (!fallbackOriginal || fallbackOriginal.use_count() != 1)
+            fallbackOriginal = NewOriginal();
+        context->CopyResource(fallbackOriginal->texture.Get(), image);
+        if (depth && depth->captureSource) depth->source.Update(device11.Get(), context.Get(), fallbackOriginal->view.Get(),
             depth->picture, depth->modelSize, timestamp);
-        bank.serial=++serial;
-        bank.motionPicture = {};
-        bank.previewDepth = false;
-        batch={serial,0,previous,timestamp,bank.original};
+        batch={++serial,0,previous,timestamp,fallbackOriginal};
+        // Skipping an interpolation interval still invalidates optical-flow
+        // history. Do not mistake independent capture for timeline continuity.
         previous=-1;
         zipHistory.Reset();
         zipDepthActive = false;

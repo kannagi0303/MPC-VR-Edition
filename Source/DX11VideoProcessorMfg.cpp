@@ -983,7 +983,7 @@ void CDX11VideoProcessor::DrawMfgPresentOverlays(ID3D11Texture2D* target, const 
 }
 
 HRESULT CDX11VideoProcessor::FinishMfgPresent(ID3D11Texture2D* preparedVideo,REFERENCE_TIME timestamp,uint64_t serial,
-    bool completed, const CRect* pictureOverride, bool svdLutHandled) {
+    bool completed, const CRect* pictureOverride, bool svdLutHandled, bool alreadyComposited) {
     InvalidateCompletedBackBuffer();
     const auto picture = pictureOverride ? *pictureOverride : PictureForPlayback(CanProjectJvr());
     const bool trace = completed && mfg::SourceCadenceTrace().Enabled();
@@ -991,16 +991,21 @@ HRESULT CDX11VideoProcessor::FinishMfgPresent(ID3D11Texture2D* preparedVideo,REF
     CComPtr<ID3D11Texture2D> back;
     HRESULT hr=m_pDXGISwapChain1->GetBuffer(0,IID_PPV_ARGS(&back));
     if(FAILED(hr))return hr;
-    if(preparedVideo && back.p != preparedVideo) {
-        // A prepared target may still be bound as an RTV from the draw step.
-        // Unbind it before using it as the source of a resource copy.
-        m_pDeviceContext->OMSetRenderTargets(0,nullptr,nullptr);
-        // This copy is ordered after the early GPU draw on the same D3D11
-        // immediate context. No CPU fence wait is needed for the staged image.
-        m_pDeviceContext->CopyResource(back,preparedVideo);
+    if (!alreadyComposited) {
+        if(preparedVideo && back.p != preparedVideo) {
+            // A prepared target may still be bound as an RTV from the draw step.
+            // Unbind it before using it as the source of a resource copy.
+            m_pDeviceContext->OMSetRenderTargets(0,nullptr,nullptr);
+            // This copy is ordered after the early GPU draw on the same D3D11
+            // immediate context. No CPU fence wait is needed for the staged image.
+            m_pDeviceContext->CopyResource(back,preparedVideo);
+        }
+        if (!svdLutHandled) DrawSvdLut(back, picture, timestamp);
+        DrawMfgPresentOverlays(back, picture, timestamp, serial);
     }
-    if (!svdLutHandled) DrawSvdLut(back, picture, timestamp);
-    DrawMfgPresentOverlays(back, picture, timestamp, serial);
+    // A DO_NOT_WAIT retry may reuse the exact same already-composited buffer.
+    // Repainting overlays there can duplicate alpha blends and keep source
+    // Receive waiting on RendererLock after a transient DXGI stall.
     if (trace) {
         const auto finished = GetPreciseTick();
         mfg::SourceCadenceTrace().Record("completed_osd", finished, timestamp, -1,

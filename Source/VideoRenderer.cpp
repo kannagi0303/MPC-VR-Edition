@@ -1,4 +1,4 @@
-/*
+﻿/*
  * (C) 2018-2026 see Authors.txt
  *
  * This file is part of MPC-BE.
@@ -363,6 +363,23 @@ CMpcVideoRenderer::CMpcVideoRenderer(LPUNKNOWN pUnk, HRESULT* phr)
 	CRegKey key;
 	if (ERROR_SUCCESS == key.Open(HKEY_CURRENT_USER, OPT_REGKEY_VIDEORENDERER, KEY_READ)) {
 		ReadSettings(key, m_Sets);
+		// B mode is an Edition-only setting. Keep Settings_t (and the
+		// native/upstream settings ABI and preset format) unchanged.
+		DWORD svdMode = 0;
+		if (key.QueryDWORDValue(L"SvdLutMode", svdMode) == ERROR_SUCCESS && svdMode <= 3) {
+                m_svdLutOff.store(svdMode == 3);
+			m_svdLutRaw.store(svdMode == 1 || svdMode == 2);
+			m_svdLutTemporal.store(svdMode == 2);
+		}
+        DWORD b2Luminance = 0;
+        if (key.QueryDWORDValue(L"SvdLutB2Luminance", b2Luminance) == ERROR_SUCCESS)
+            m_svdLutB2Luminance.store(b2Luminance == 1);
+        DWORD b2Memory = 0;
+        if (key.QueryDWORDValue(L"SvdLutB2Memory", b2Memory) == ERROR_SUCCESS)
+            m_svdLutB2Memory.store(b2Memory == 1);
+        DWORD r1Gamut = 0;
+        if (key.QueryDWORDValue(L"SvdLutR1Gamut", r1Gamut) == ERROR_SUCCESS)
+            m_svdLutR1Gamut.store(r1Gamut == 1);
 		// Upstream's registry-only tuning of the Measured method: read here and nowhere
 		// else, never written, never in a preset.
 		DWORD dw;
@@ -1340,14 +1357,45 @@ STDMETHODIMP CMpcVideoRenderer::SaveSettings()
 	// Snapshot under the renderer lock; the registry write must not hold the GPU
 	// presentation lock. Persistence does not depend on NGX initialization.
 	Settings_t snapshot;
+	DWORD svdMode = 0;
+    DWORD b2Luminance = 0;
+    DWORD b2Memory = 0;
+    DWORD r1Gamut = 0;
 	{
 		CAutoLock lock(&m_RendererLock);
 		snapshot = m_Sets;
+        b2Luminance = m_svdLutB2Luminance.load() ? 1u : 0u;
+        b2Memory = m_svdLutB2Memory.load() ? 1u : 0u;
+        r1Gamut = m_svdLutR1Gamut.load() ? 1u : 0u;
+		svdMode = m_svdLutOff.load() ? 3u :
+                (m_svdLutRaw.load() ? (m_svdLutTemporal.load() ? 2u : 1u) : 0u);
 	}
 	CRegKey key;
 	const LSTATUS opened = key.Create(HKEY_CURRENT_USER, OPT_REGKEY_VIDEORENDERER);
 	if (opened != ERROR_SUCCESS) return HRESULT_FROM_WIN32(opened);
 	WriteSettings(key, snapshot);
+	// Only store the selected mode when Apply/Save succeeds; preview and
+	// Cancel remain in-memory and are reverted by the property page.
+	const auto stored = key.SetDWORDValue(L"SvdLutMode", svdMode);
+	if (stored != ERROR_SUCCESS) return HRESULT_FROM_WIN32(stored);
+    const auto b2Stored = key.SetDWORDValue(L"SvdLutB2Luminance", b2Luminance);
+    if (b2Stored != ERROR_SUCCESS) return HRESULT_FROM_WIN32(b2Stored);
+    const auto memoryStored = key.SetDWORDValue(L"SvdLutB2Memory", b2Memory);
+    if (memoryStored != ERROR_SUCCESS) return HRESULT_FROM_WIN32(memoryStored);
+    const auto r1Stored = key.SetDWORDValue(L"SvdLutR1Gamut", r1Gamut);
+    if (r1Stored != ERROR_SUCCESS) return HRESULT_FROM_WIN32(r1Stored);
+    DWORD verifyR1 = DWORD(-1);
+    if (key.QueryDWORDValue(L"SvdLutR1Gamut", verifyR1) != ERROR_SUCCESS ||
+        verifyR1 != r1Gamut) return E_FAIL;
+    DWORD verifyMemory = DWORD(-1);
+    if (key.QueryDWORDValue(L"SvdLutB2Memory", verifyMemory) != ERROR_SUCCESS ||
+        verifyMemory != b2Memory) return E_FAIL;
+    DWORD verifyB2 = DWORD(-1);
+    if (key.QueryDWORDValue(L"SvdLutB2Luminance", verifyB2) != ERROR_SUCCESS ||
+        verifyB2 != b2Luminance) return E_FAIL;
+	DWORD verifyMode = DWORD(-1);
+	if (key.QueryDWORDValue(L"SvdLutMode", verifyMode) != ERROR_SUCCESS || verifyMode != svdMode)
+		return E_FAIL;
 	return edition::VerifySavedSettings(key, snapshot);
 }
 

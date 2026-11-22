@@ -26,6 +26,30 @@
 
 std::optional<HRESULT> CMpcVideoRenderer::GetEditionBool(LPCSTR field, bool* value)
 {
+	if (!strcmp(field, "svdLutOff")) {
+		*value = m_svdLutOff.load();
+		return S_OK;
+	}
+	if (!strcmp(field, "svdLutRaw")) {
+		*value = m_svdLutRaw.load();
+		return S_OK;
+	}
+	if (!strcmp(field, "svdLutTemporal")) {
+		*value = m_svdLutTemporal.load();
+		return S_OK;
+	}
+    if (!strcmp(field, "svdLutB2Luminance")) {
+        *value = m_svdLutB2Luminance.load();
+        return S_OK;
+    }
+    if (!strcmp(field, "svdLutB2Memory")) {
+        *value = m_svdLutB2Memory.load();
+        return S_OK;
+    }
+    if (!strcmp(field, "svdLutR1Gamut")) {
+        *value = m_svdLutR1Gamut.load();
+        return S_OK;
+    }
 	if (!strcmp(field, "dlssNR")) {
 		*value = m_Sets.bDlssNR;
 		return S_OK;
@@ -55,6 +79,64 @@ std::optional<HRESULT> CMpcVideoRenderer::GetEditionInt(LPCSTR field, int* value
 
 std::optional<HRESULT> CMpcVideoRenderer::SetEditionBool(LPCSTR field, bool value)
 {
+    if (!strcmp(field, "svdLutR1Gamut")) {
+        CAutoLock lock(&m_RendererLock);
+        if (m_svdLutR1Gamut.exchange(value) == value) return S_FALSE;
+        if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get()))
+            dx11->InvalidateCompletedBackBuffer();
+        if (m_filterState == State_Paused) Redraw();
+        return S_OK;
+    }
+    if (!strcmp(field, "svdLutB2Memory")) {
+        CAutoLock lock(&m_RendererLock);
+        if (m_svdLutB2Memory.exchange(value) == value) return S_FALSE;
+        if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get()))
+            dx11->InvalidateCompletedBackBuffer();
+        if (m_filterState == State_Paused) Redraw();
+        return S_OK;
+    }
+    if (!strcmp(field, "svdLutB2Luminance")) {
+        CAutoLock lock(&m_RendererLock);
+        if (m_svdLutB2Luminance.exchange(value) == value) return S_FALSE;
+        if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) {
+            // Do not reset B1 model/history or the completed video queue.
+            dx11->InvalidateCompletedBackBuffer();
+        }
+        if (m_filterState == State_Paused) Redraw();
+        return S_OK;
+    }
+    if (!strcmp(field, "svdLutOff")) {
+        CAutoLock lock(&m_RendererLock);
+        if (m_svdLutOff.exchange(value) == value) return S_FALSE;
+        if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) {
+            // Off only bypasses SVDLUT; do not change Normal A's stored strength.
+            dx11->InvalidateCompletedBackBuffer();
+        }
+        if (m_filterState == State_Paused) Redraw();
+        return S_OK;
+    }
+	if (!strcmp(field, "svdLutTemporal")) {
+		CAutoLock lock(&m_RendererLock);
+		if (m_svdLutTemporal.exchange(value) == value) return S_FALSE;
+		if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) {
+			dx11->ReleaseSvdLutRawTest(true);
+			dx11->InvalidateCompletedBackBuffer();
+		}
+		if (m_filterState == State_Paused) Redraw();
+		return S_OK;
+	}
+	if (!strcmp(field, "svdLutRaw")) {
+		CAutoLock lock(&m_RendererLock);
+		if (m_svdLutRaw.exchange(value) == value) return S_FALSE;
+		if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) {
+			dx11->ResetSvdLutHistory();
+			dx11->ReleaseSvdLutRawTest(true);
+			dx11->InvalidateCompletedBackBuffer();
+		}
+		if (m_filterState == State_Paused) Redraw();
+		return S_OK;
+	}
+
 	// The settings page's two buttons for the channel's logo: they act at once, as the
 	// preset buttons do, with no Apply.
 	if (!strcmp(field, "cmd_findLogo") && value) {

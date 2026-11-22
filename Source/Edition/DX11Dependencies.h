@@ -13,6 +13,7 @@ namespace edition { struct VideoFrame; }
 #include "DLSS/DlssSR.h"
 #include "DLSS/ZipDepth.h"
 #include "DLSS/SvdLutModel.h"
+#include "SvdLutTemporalStatistics.h"
 #include "Mfg/FrameQueue.h"
 #include "Mfg/LiveFlowGroups.h"
 #include "Mfg/LiveFlowGroupPacing.h"

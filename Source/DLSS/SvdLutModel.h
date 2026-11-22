@@ -27,6 +27,15 @@ struct Parameters {
     std::array<Texel, LutLayers * LutSize * LutSize> lut;
 };
 
+// The CPU parameters are retained only for the experimental temporal path.
+struct FrameResult {
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
+    std::shared_ptr<const Parameters> parameters;
+};
+
+Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> CreateParametersView(
+    ID3D11Device* device, const Parameters& parameters);
+
 class ModelWorker {
 public:
     enum class State { Idle, Loading, Ready, Failed };
@@ -39,6 +48,10 @@ public:
     bool ReadyForInput() const;
     bool Submit(std::unique_ptr<Image> image);
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> TakeResult();
+    // Non-blocking parameter handoff for Temporal B only; A keeps TakeResult().
+    FrameResult TryTakeFrameResult();
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> EvaluateFrame(std::unique_ptr<Image> image);
+    FrameResult EvaluateFrameWithParameters(std::unique_ptr<Image> image);
     ID3D11PixelShader* Shader() const;
     State GetState() const;
     std::wstring Failure() const;

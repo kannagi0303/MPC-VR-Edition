@@ -184,7 +184,17 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 	const bool srDepthUsed = UsesZipDepthSr() && depth.srEvaluations && (!running || now - depth.lastSrUseTick <= 1000);
 	const bool mfgDepthUsed = UsesZipDepthMfg() && depth.mfgSubmissions && (!running || now - depth.lastMfgUseTick <= 1000);
 	const bool depthActive = (srDepthUsed || mfgDepthUsed) && !m_zipDepth.CoolingDown(now);
-	const auto svdStats = m_svdLut.strength && m_svdLut.active ? std::format(L"{}%", m_svdLut.strength) : L"Off";
+	const bool svdOff = m_pFilter->m_svdLutOff.load();
+    const bool svdRaw = !svdOff && m_pFilter->m_svdLutRaw.load();
+	const bool svdTemporal = svdRaw && m_pFilter->m_svdLutTemporal.load();
+    const bool svdBUnsupported = svdRaw && (SourceIsHDR() || m_bVPUseRTXVideoHDR ||
+        m_currentSwapChainColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 ||
+        m_pPSHalfOUtoInterlace);
+	const auto svdStats = svdOff ? L"Off" : svdRaw
+        ? (svdBUnsupported ? L"B (SDR color path required)" :
+            svdTemporal ? (m_svdLutRawTest.completed ? L"Temporal B1" : L"Temporal B1 (loading)") :
+            m_svdLutRawTest.active ? L"RAW B/frame" : L"B (loading)")
+		: (m_svdLut.strength && m_svdLut.active ? std::format(L"{}%", m_svdLut.strength) : L"Off");
 
 	const bool hasVideoBuffer = m_completedLast || CompletedFramesPending();
 	const bool refreshBufferStats = hasVideoBuffer && running &&
@@ -296,12 +306,60 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 				str += std::format(L"\nZipDepth      {}", m_zipDepth.Status());
 			}
 		}
-		if (m_svdLut.strength) {
-			const auto ready = std::count_if(m_svdLut.scenes.begin(), m_svdLut.scenes.end(),
-				[](const auto& scene) { return bool(scene.view); });
-			if (m_svdLut.active) str += std::format(L"\nSVDLUT        {} scenes ready", ready);
-			else str += std::format(L"\nSVDLUT        {}", SvdLutStatus());
+		if (svdRaw) {
+			const auto& b = m_svdLutRawTest;
+			str += std::format(L"\nSVDLUT RAW B  {}/{} frames", b.completed, b.requests);
+			if (b.completed && GetPreciseTicksPerSecond()) {
+				const double factor = 1000.0 / GetPreciseTicksPerSecond() / b.completed;
+				if (svdTemporal) {
+					str += std::format(L" | async result latency {:.2f} ms avg", b.modelTicks * factor);
+				} else {
+					str += std::format(L" | inference {:.2f} ms | total {:.2f} ms avg",
+						b.modelTicks * factor, b.stageTicks * factor);
+				}
+			}
+			if (svdTemporal) {
+				str += std::format(L"\nB temporal    {} blended | {} future LUTs | {} prefetch | {} rejected | {} last-window",
+					b.temporalFrames, b.temporalFuture, b.prefetched, b.temporalRejected, b.lastWindow);
+                str += std::format(L"\nB output      {} graded draws | {} no-LUT | {} cached selections",
+                    b.appliedDraws, b.ungraded, b.reusedGrade);
+                str += std::format(L"\nB presented   {} graded | {} ungraded (successful Presents)",
+                    b.presentedGraded, b.presentedUngraded);
+                str += std::format(L"\nB async       {} results after eviction | {} thumbnails skipped | {} early source thumbnails",
+                    b.missedResult, b.skippedCapture, b.earlyPrimed);
+                if (m_pFilter->m_svdLutB2Luminance.load())
+                {
+                    const double b2Ms = b.b2Analyses && GetPreciseTicksPerSecond() ?
+                        double(b.b2AnalysisTicks) * 1000.0 /
+                        double(GetPreciseTicksPerSecond()) / double(b.b2Analyses) : 0.0;
+                    str += std::format(L"\nB2 zonal      {} analyses | {} adjusted draws | S/M/H {:.2f}/{:.2f}/{:.2f} | B1 shift {:.2f} EV | fit residual {:.2f} EV",
+                        b.b2Analyses, b.b2AdjustedDraws,
+                        b.b2LastTone[0], b.b2LastTone[1], b.b2LastTone[2],
+                        b.b2LastSourceShiftEv, b.b2LastResidualEv);
+                    str += std::format(L"\nB2 budget     {:.3f} ms/analysis avg | {} low-buffer reuse | {} shot resets | {} samples",
+                        b2Ms, b.b2BudgetSkips, b.b2ShotResets, b.b2LastSamples);
+                }
+                if (m_pFilter->m_svdLutB2Memory.load())
+                    str += std::format(L"\nB2 memory     {} gamut/memory shader draws{}",
+                        b.b2MemoryDraws, b.b2MemoryShaderFailed ? L" | shader compile failed" : L"");
+                if (m_pFilter->m_svdLutR1Gamut.load())
+                    str += std::format(L"\nR1 gamut      {} continuity shader draws{}",
+                        b.r1GamutDraws, b.r1GamutShaderFailed ? L" | shader compile failed (fallback)" : L"");
+                if (m_pFilter->m_svdLutB2Luminance.load() && b.b2ShaderFailed)
+                    str += L" | B2.1 shader compile failed";
+			}
+			if (b.model.GetState() == svdlut::ModelWorker::State::Failed || b.failed)
+				str += std::format(L" | {}", SvdLutStatus());
+		} else if (!svdOff && m_svdLut.strength) {
+			if (m_svdLut.active) {
+				const auto ready = std::count_if(m_svdLut.scenes.begin(), m_svdLut.scenes.end(),
+					[](const auto& scene) { return bool(scene.view); });
+				str += std::format(L"\nSVDLUT        {} scenes ready", ready);
+			} else {
+				str += std::format(L"\nSVDLUT        {}", SvdLutStatus());
+			}
 		}
+
 	}
 	return separator;
 }

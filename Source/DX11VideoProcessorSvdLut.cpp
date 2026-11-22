@@ -10,7 +10,10 @@
 #include "VideoRenderer.h"
 #include "DLSS/NgxRuntime.h"
 #include "DLSS/SvdLutShader.h"
+#include "Edition/SvdLutTemporalStatistics.h"
+#include "Edition/SvdLutB2Luminance.h"
 #include "Shaders.h"
+#include "Times.h"
 
 HRESULT svdlut::CreateGradeShader(ID3D11Device* device, ID3D11PixelShader** shader)
 {
@@ -26,6 +29,21 @@ constexpr REFERENCE_TIME FadeInDuration = 500 * 10000;
 constexpr auto ThumbSize = svdlut::InputSize;
 constexpr unsigned SignatureSize = 8;
 using Signature = std::array<float, SignatureSize * SignatureSize * 3>;
+
+std::unique_ptr<svdlut::Image> ReadSvdLutImage(const uint8_t* data, size_t stride)
+{
+    auto image = std::unique_ptr<svdlut::Image>(new (std::nothrow) svdlut::Image);
+    if (!image) return {};
+    for (UINT y = 0; y < ThumbSize; ++y) {
+        const auto* row = data + y * stride;
+        for (UINT x = 0; x < ThumbSize; ++x) {
+            for (UINT c = 0; c < 3; ++c) {
+                (*image)[c * svdlut::InputPixels + y * ThumbSize + x] = row[4 * x + c] * (1.0f / 255.0f);
+            }
+        }
+    }
+    return image;
+}
 
 bool SupportedSdrFormat(DXGI_FORMAT format)
 {
@@ -106,11 +124,25 @@ void CDX11VideoProcessor::ResetSvdLutHistory()
     lut.captured = lut.inference = lut.transitionStart = lut.nextCapture = INVALID_TIME;
     lut.possibleCut = INVALID_TIME;
     lut.staging.Release();
+    if (m_pFilter->m_svdLutRaw.load()) {
+        // Only Temporal B owns asynchronous readbacks/held LUTs. Flush, seek
+        // and geometry changes must invalidate them as well as the frame ring;
+        // otherwise a previous segment can grade the first new frames.
+        if (m_pFilter->m_svdLutTemporal.load()) {
+            ResetSvdLutTemporalQueue();
+        } else {
+            // Keep RAW B's original reset behavior unchanged.
+            m_svdLutRawTest.frames = {};
+            m_svdLutRawTest.frameSlot = 0;
+            m_svdLutRawTest.lastWindow = 0;
+        }
+    }
 }
 
 void CDX11VideoProcessor::ReleaseSvdLut(bool fast)
 {
     ResetSvdLutHistory();
+    ReleaseSvdLutRawTest(fast);
     auto& lut = m_svdLut;
     lut.model.Stop(fast || m_fastShutdown);
     lut.attempted = lut.failed = false;
@@ -124,6 +156,15 @@ void CDX11VideoProcessor::ReleaseSvdLut(bool fast)
 
 std::wstring CDX11VideoProcessor::SvdLutStatus() const
 {
+    if (m_pFilter->m_svdLutOff.load()) return L"Off";
+    if (m_pFilter->m_svdLutRaw.load()) {
+        const auto& b = m_svdLutRawTest;
+        if (b.failed) return L"RAW unavailable";
+        if (b.model.GetState() == svdlut::ModelWorker::State::Failed) return b.model.Failure();
+        if (b.active) return L"RAW active";
+        if (!b.attempted) return L"RAW waiting for SDR video";
+        return b.model.GetState() == svdlut::ModelWorker::State::Ready ? L"RAW evaluating" : L"RAW loading DirectML";
+    }
     const auto& lut = m_svdLut;
     if (lut.failed) return L"Unavailable";
     const auto state = lut.model.GetState();
@@ -162,6 +203,27 @@ HRESULT CDX11VideoProcessor::PrepareSvdLutDraw()
     return created;
 }
 
+bool CDX11VideoProcessor::StartSvdLutModel()
+{
+    auto& lut = m_svdLut;
+    lut.attempted = true;
+    CComQIPtr<IDXGIDevice> dxgi(m_pDevice.p);
+    CComPtr<IDXGIAdapter> adapter;
+    lut.failed = !dxgi || FAILED(dxgi->GetAdapter(&adapter)) ||
+        !lut.model.Start(adapter, m_pDevice, NgxRuntime::EditionDir());
+    return !lut.failed;
+}
+
+HRESULT CDX11VideoProcessor::EnsureSvdLutThumbnails()
+{
+    auto& lut = m_svdLut;
+    const auto hr = lut.thumbnail.CheckCreate(m_pDevice, DXGI_FORMAT_R8G8B8A8_UNORM,
+        ThumbSize, ThumbSize, Tex2D_DefaultShaderRTarget);
+    if (FAILED(hr)) return hr;
+    return lut.staging.CheckCreate(m_pDevice, DXGI_FORMAT_R8G8B8A8_UNORM,
+        ThumbSize, ThumbSize, Tex2D_StagingRead);
+}
+
 HRESULT CDX11VideoProcessor::EnsureSvdLutPicture(DXGI_FORMAT format, UINT width, UINT height)
 {
     auto& picture = m_svdLut.picture;
@@ -193,7 +255,7 @@ bool CDX11VideoProcessor::SvdLutWorkAllowed()
 void CDX11VideoProcessor::BeginSvdLutScene(REFERENCE_TIME timestamp)
 {
     auto& lut = m_svdLut;
-    if (lut.failed || timestamp == INVALID_TIME ||
+    if (m_pFilter->m_svdLutRaw.load() || lut.failed || timestamp == INVALID_TIME ||
         (!lut.scenes.empty() && timestamp <= lut.scenes.back().start)) return;
     try {
         lut.scenes.push_back({timestamp, false, lut.scenes.empty(), {}});
@@ -257,18 +319,7 @@ void CDX11VideoProcessor::PollSvdLut()
                 }
                 lut.nextCapture = timestamp + CaptureInterval;
                 if (!lut.failed && lut.possibleCut == INVALID_TIME && !lut.scenes.back().submitted && !lut.input) {
-                    lut.input.reset(new (std::nothrow) svdlut::Image);
-                    if (lut.input) {
-                        for (UINT y = 0; y < ThumbSize; ++y) {
-                            const auto* row = data + size_t(y) * mapped.RowPitch;
-                            for (UINT x = 0; x < ThumbSize; ++x) {
-                                for (UINT c = 0; c < 3; ++c) {
-                                    (*lut.input)[c * svdlut::InputPixels + y * ThumbSize + x] =
-                                        row[4 * x + c] * (1.0f / 255.0f);
-                                }
-                            }
-                        }
-                    }
+                    lut.input = ReadSvdLutImage(data, mapped.RowPitch);
                 }
             }
             m_pDeviceContext->Unmap(lut.staging.pTexture, 0);
@@ -286,18 +337,14 @@ void CDX11VideoProcessor::PollSvdLut()
 
 void CDX11VideoProcessor::CaptureSvdLut(REFERENCE_TIME timestamp, bool projected, bool second)
 {
+    if (m_pFilter->m_svdLutOff.load()) return;
     auto& lut = m_svdLut;
-    if (!lut.strength || lut.failed || timestamp == INVALID_TIME ||
+    if (m_pFilter->m_svdLutRaw.load() || !lut.strength || lut.failed || timestamp == INVALID_TIME ||
         m_currentSwapChainColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 ||
         SourceIsHDR() || m_bVPUseRTXVideoHDR || m_pPSHalfOUtoInterlace) return;
 
     if (!lut.attempted) {
-        if (!SvdLutWorkAllowed()) return;
-        lut.attempted = true;
-        CComQIPtr<IDXGIDevice> dxgi(m_pDevice.p);
-        CComPtr<IDXGIAdapter> adapter;
-        lut.failed = !dxgi || FAILED(dxgi->GetAdapter(&adapter)) ||
-            !lut.model.Start(adapter, m_pDevice, NgxRuntime::EditionDir());
+        if (!SvdLutWorkAllowed() || !StartSvdLutModel()) return;
     }
     if (lut.failed || lut.model.GetState() != svdlut::ModelWorker::State::Ready) return;
     PollSvdLut();
@@ -311,10 +358,7 @@ void CDX11VideoProcessor::CaptureSvdLut(REFERENCE_TIME timestamp, bool projected
 
     lut.nextCapture = timestamp + CaptureInterval;
     const CRect thumbnail(0, 0, ThumbSize, ThumbSize);
-    if (FAILED(lut.thumbnail.CheckCreate(m_pDevice, DXGI_FORMAT_R8G8B8A8_UNORM,
-            ThumbSize, ThumbSize, Tex2D_DefaultShaderRTarget)) ||
-        FAILED(lut.staging.CheckCreate(m_pDevice, DXGI_FORMAT_R8G8B8A8_UNORM,
-            ThumbSize, ThumbSize, Tex2D_StagingRead))) {
+    if (FAILED(EnsureSvdLutThumbnails())) {
         lut.failed = true;
         return;
     }
@@ -399,6 +443,9 @@ HRESULT CDX11VideoProcessor::ApplySvdLutGrade(const SvdLutGrade& grade, const Te
 HRESULT CDX11VideoProcessor::DrawCompletedSvdLut(const CompletedFrame& frame, ID3D11Texture2D* target,
     const CRect& picture, bool geometryChanging)
 {
+    if (m_pFilter->m_svdLutOff.load()) return S_FALSE;
+    if (m_pFilter->m_svdLutRaw.load())
+        return DrawCompletedSvdLutRaw(frame, target, picture, geometryChanging);
     const auto grade = PrepareSvdLutGrade(frame.pts);
     if (!grade) return S_FALSE;
 
@@ -430,6 +477,11 @@ HRESULT CDX11VideoProcessor::DrawCompletedSvdLut(const CompletedFrame& frame, ID
 
 void CDX11VideoProcessor::DrawSvdLut(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME timestamp)
 {
+    if (m_pFilter->m_svdLutOff.load()) return;
+    if (m_pFilter->m_svdLutRaw.load()) {
+        DrawSvdLutRaw(target, picture, timestamp);
+        return;
+    }
     const auto grade = PrepareSvdLutGrade(timestamp);
     if (!grade || !target) return;
 
@@ -453,3 +505,5 @@ void CDX11VideoProcessor::DrawSvdLut(ID3D11Texture2D* target, const CRect& pictu
     m_pDeviceContext->CopySubresourceRegion(lut.picture.pTexture, 0, 0, 0, 0, target, 0, &box);
     ApplySvdLutGrade(*grade, lut.picture, target, visible, visible, CPoint(-visible.left, -visible.top));
 }
+
+#include "Edition/SvdLutRawMode.inc"
