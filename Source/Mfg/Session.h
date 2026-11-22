@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -98,7 +99,11 @@ public:
     // enqueued. The producer waits for this fence before reusing its outputs.
     void MarkConsumed(uint64_t serial);
     bool AsyncProducer() const;
-    std::optional<uint64_t> ReusableNextBankSerial(bool requirePresenterReadComplete) const;
+    // Reserve the bank actually used by the next Generate() call. Called
+    // under RendererLock while accepting a CompletedFrame source sample.
+    std::optional<uint64_t> ReserveNextBankSerial(bool requirePresenterReadComplete,
+        std::span<const uint64_t> protectedGroups) const;
+    void ClearNextBankReservation();
     bool GenerationPending(uint64_t serial) const;
     uint64_t BusyFallbacks() const;
     unsigned BankCount() const;

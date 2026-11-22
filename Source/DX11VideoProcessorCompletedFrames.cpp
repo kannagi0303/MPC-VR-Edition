@@ -6,6 +6,8 @@
 #include "Times.h"
 #include "Mfg/CadenceTrace.h"
 #include <cstring>
+#include <array>
+#include <span>
 
 namespace {
 constexpr uint64_t MiB = 1024ull * 1024;
@@ -43,6 +45,8 @@ bool CDX11VideoProcessor::LegacyFramesPending()
 
 const char* CDX11VideoProcessor::CompletedAdmissionBlock(REFERENCE_TIME due, std::optional<uint64_t>& deferredFrameFence)
 {
+    // A bank choice must belong only to this one admission attempt.
+    m_mfg.ClearNextBankReservation();
     UpdateProcessingResolution();
     CRefTime stream;
     if (FAILED(m_pFilter->StreamTime(stream))) return "completed_wait_clock";
@@ -143,13 +147,19 @@ const char* CDX11VideoProcessor::CompletedOverlapBlock(REFERENCE_TIME stream, RE
             return "completed_wait_compose";
         if (phases.front().presentationTime - stream <= margin) return "completed_wait_mfg_deadline";
     }
-    const auto bank = m_mfg.ReusableNextBankSerial(!beforeMfgSecondBatch);
-    if (!bank) return "completed_wait_mfg_bank";
-
+    // All still-buffered generated groups own their bank outputs until
+    // composed or retired. Do not reserve one of those banks merely because
+    // its D3D12 producer fence has already completed.
+    std::array<uint64_t, 4> protectedGroups{};
+    size_t protectedCount = 0;
     for (const auto& batch : m_completedBatches) {
         if (batch.phases.empty()) return "completed_wait_compose";
-        if (batch.phases.front().serial == *bank) return "completed_wait_mfg_bank";
+        if (protectedCount == protectedGroups.size()) return "completed_wait_mfg_slots";
+        protectedGroups[protectedCount++] = batch.phases.front().serial;
     }
+    const auto bank = m_mfg.ReserveNextBankSerial(!beforeMfgSecondBatch,
+        std::span<const uint64_t>(protectedGroups.data(), protectedCount));
+    if (!bank) return "completed_wait_mfg_bank";
     const auto reserved = PendingGeneratedBytes() + nextFrameBytes * m_mfg.MaxAvailableMultiplier();
     return committed + reserved <= m_completedByteLimit ? nullptr : "completed_wait_budget";
 }

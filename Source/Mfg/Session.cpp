@@ -4,6 +4,7 @@
 #include "Runtime.h"
 #include "MotionShaders.h"
 #include "GpuBankTimeline.h"
+#include "BankSelection.h"
 #include "DLSS/DlssOpticalFlow.h"
 #include "DLSS/ZipDepth.h"
 #include <d3d12.h>
@@ -133,6 +134,12 @@ struct Session::Impl {
     // changing Bank::serial while NGX is still writing invalidates an older
     // generated group before its producer fence has completed.
     std::shared_ptr<OriginalSnapshot> fallbackOriginal;
+    struct BankReservation {
+        unsigned index = 0;
+        uint64_t sessionSerial = 0;
+        uint64_t previousBankSerial = 0;
+    };
+    std::optional<BankReservation> nextBankReservation;
     unsigned activeBanks=3; // 2/3/4 selectable, 4 supports longer Live Flow group retention.
     ComPtr<ID3D12Resource> zero;
     CDlssOpticalFlow flow;
@@ -401,7 +408,19 @@ struct Session::Impl {
             flow.Reset();
             motionCheck.Reset();
         }
-        const unsigned bankIndex=unsigned(serial%activeBanks);auto& bank=banks[bankIndex];
+        unsigned bankIndex=unsigned(serial%activeBanks);
+        // A CompletedFrame admission can reserve a different idle bank
+        // when the preferred round-robin bank is busy. Consume the lease
+        // once, and reject it if an intervening Generate/Capture changed
+        // the sequence or reassigned that bank. Otherwise keep Golden.
+        if (nextBankReservation) {
+            const auto choice = *nextBankReservation;
+            nextBankReservation.reset();
+            if (choice.sessionSerial == serial && choice.index < activeBanks &&
+                banks[choice.index].serial == choice.previousBankSerial)
+                bankIndex = choice.index;
+        }
+        auto& bank=banks[bankIndex];
         if(asyncProducer && !bank.timeline.ProducerReady(fence->GetCompletedValue())) {
             // NGX is more than N groups behind. Preserve this real frame
             // immediately rather than stalling the player's source clock.
@@ -855,17 +874,34 @@ void Session::MarkConsumed(uint64_t serial) {
     }
 }
 bool Session::AsyncProducer() const {return impl_ ? impl_->asyncProducer : AsyncProducerEnabled();}
-std::optional<uint64_t> Session::ReusableNextBankSerial(bool requirePresenterReadComplete) const {
+std::optional<uint64_t> Session::ReserveNextBankSerial(bool requirePresenterReadComplete,
+    std::span<const uint64_t> protectedGroups) const
+{
     if (!impl_ || failed_ || !impl_->asyncProducer) return {};
-    const auto& bank = impl_->banks[impl_->serial % impl_->activeBanks];
-    const auto generated = impl_->fence->GetCompletedValue();
-    if (generated == UINT64_MAX || !bank.timeline.ProducerReady(generated)) return {};
-    // SubmitBank orders new writes after prior D3D11 reads on the GPU.
-    if (requirePresenterReadComplete) {
-        const auto sampled = impl_->presentFence->GetCompletedValue();
-        if (sampled == UINT64_MAX || sampled < bank.timeline.PresenterFenceValue()) return {};
+    // This reservation is transient admission state. CompletedAdmissionBlock()
+    // discards it on every retry, while Generate() consumes it under the same
+    // RendererLock after a successful sample admission.
+    impl_->nextBankReservation.reset();
+    const auto produced = impl_->fence->GetCompletedValue();
+    const auto sampled = impl_->presentFence->GetCompletedValue();
+    if (produced == UINT64_MAX || sampled == UINT64_MAX) return {};
+    std::array<BankOffer, 4> offers{};
+    for (unsigned i = 0; i < impl_->activeBanks; ++i) {
+        const auto& bank = impl_->banks[i];
+        offers[i] = {bank.serial, bank.timeline.ProducerFenceValue(),
+                     bank.timeline.PresenterFenceValue()};
     }
+    const auto index = SelectReusableBank(
+        std::span<const BankOffer>(offers.data(), impl_->activeBanks), impl_->serial,
+        produced, sampled, requirePresenterReadComplete, protectedGroups);
+    if (!index) return {};
+    const auto& bank = impl_->banks[*index];
+    impl_->nextBankReservation = Impl::BankReservation{*index, impl_->serial, bank.serial};
     return bank.serial;
+}
+
+void Session::ClearNextBankReservation() {
+    if (impl_) impl_->nextBankReservation.reset();
 }
 
 bool Session::GenerationPending(uint64_t serial) const {
