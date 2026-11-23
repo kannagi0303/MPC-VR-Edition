@@ -784,7 +784,8 @@ void CDX11VideoProcessor::ReleaseDevice()
 	m_pFinalPassConstantBuffer.Release();
 
 	if (m_pDeviceContext) {
-		// need ClearState() (see ReleaseVP()) and Flush() for ID3D11DeviceContext when using DXGI_SWAP_EFFECT_DISCARD in Windows 8/8.1
+		// Keep the D3D11 drain for legacy swap effects. Never remove
+		// GPU synchronization merely to accelerate renderer shutdown.
 		m_pDeviceContext->Flush();
 	}
 	m_pDeviceContext.Release();
@@ -820,7 +821,13 @@ void CDX11VideoProcessor::ReleaseSwapChain()
 		m_completedPresentWaitable = nullptr;
 	}
 	if (m_pDXGISwapChain1) {
-		m_pDXGISwapChain1->SetFullscreenState(FALSE, nullptr);
+		// An already-windowed swap chain has no fullscreen transition to undo.
+		// Avoid an unnecessary DXGI driver round trip during media replacement.
+		BOOL exclusive = FALSE;
+		const auto stateHr = m_pDXGISwapChain1->GetFullscreenState(&exclusive, nullptr);
+		if (FAILED(stateHr) || exclusive) {
+			m_pDXGISwapChain1->SetFullscreenState(FALSE, nullptr);
+		}
 	}
 	m_pDXGIOutput.Release();
 	m_pDXGISwapChain4.Release();

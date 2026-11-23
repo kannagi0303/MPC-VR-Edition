@@ -140,21 +140,39 @@ STDMETHODIMP CVideoRendererInputPin::ReceiveConnection(IPin* pConnector, const A
 STDMETHODIMP CVideoRendererInputPin::NewSegment(REFERENCE_TIME startTime, REFERENCE_TIME stopTime, double rate)
 {
 	CAutoLock cReceiveLock(&m_csReceive);
-
 	m_pBaseRenderer->NewSegment(startTime, rate);
-	return CRendererInputPin::NewSegment(startTime, stopTime, rate);
+    const auto hr = CRendererInputPin::NewSegment(startTime, stopTime, rate);
+    return hr;
 }
 
 STDMETHODIMP CVideoRendererInputPin::BeginFlush()
 {
+	m_pBaseRenderer->CancelEditionDelivery();
 	CAutoLock cReceiveLock(&m_csReceive);
-	return CRendererInputPin::BeginFlush();
+	const auto hr = CRendererInputPin::BeginFlush();
+	return hr;
+}
+
+// Wait until the DirectShow base flush is complete to make the next
+// timeline visible. An old Receive still holds its cancelled ticket.
+STDMETHODIMP CVideoRendererInputPin::EndFlush()
+{
+    const HRESULT hr = CRendererInputPin::EndFlush();
+    if (SUCCEEDED(hr)) m_pBaseRenderer->ResumeEditionDelivery();
+    return hr;
 }
 
 STDMETHODIMP CVideoRendererInputPin::EndOfStream()
 {
+	const auto ticket = m_pBaseRenderer->m_playbackCancel.Capture();
 	m_pBaseRenderer->DrainLookahead();
-	return CRendererInputPin::EndOfStream();
+    // If Stop/BeginFlush arrived during Drain, this EOS belongs to the
+    // cancelled timeline. Never notify completion of the next film.
+    if (ticket->Cancelled()) {
+        return S_OK;
+    }
+    const auto hr = CRendererInputPin::EndOfStream();
+    return hr;
 }
 
 // IMFGetService

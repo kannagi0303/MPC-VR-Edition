@@ -467,22 +467,18 @@ void CMpcVideoRenderer::NewSegment(REFERENCE_TIME startTime, double rate)
 HRESULT CMpcVideoRenderer::BeginFlush()
 {
 	DLog(L"CMpcVideoRenderer::BeginFlush()");
-
 	m_bFlushing = true;
 	BeginEditionFlush();
-	return __super::BeginFlush();
+    const HRESULT hr = __super::BeginFlush();
+    return hr;
 }
 
 HRESULT CMpcVideoRenderer::EndFlush()
 {
 	DLog(L"CMpcVideoRenderer::EndFlush()");
-
 	m_VideoProcessor->Flush();
-
 	HRESULT hr = __super::EndFlush();
-
 	m_bFlushing = false;
-
 	return hr;
 }
 
@@ -780,8 +776,8 @@ STDMETHODIMP CMpcVideoRenderer::Stop()
 	DLog(L"CMpcVideoRenderer::Stop()");
 
 	BeginEditionStop();
-
-	return CBaseVideoRenderer2::Stop();
+    const HRESULT hr = CBaseVideoRenderer2::Stop();
+	return hr;
 }
 
 #if _DEBUG

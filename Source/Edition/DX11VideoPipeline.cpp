@@ -30,6 +30,9 @@
 std::optional<HRESULT> CDX11VideoProcessor::PrepareEditionRender(edition::VideoFrame& frame,
 	CComPtr<ID3D11Texture2D>& pBackBuffer, uint64_t& tick1, HRESULT& hr)
 {
+    // Once MPC-BE requests Stop/Flush, do not launch any new DLSS, depth,
+    // LUT, or presentation work from the old source timeline.
+    if (m_pFilter->m_playbackCancel.Capture()->Cancelled()) return S_OK;
 	const int field = frame.field;
 	const auto frameStartTime = frame.frameStartTime;
 	const bool mfgConfigured = m_mfgMultiplier.load(std::memory_order_relaxed) >= 2;
@@ -111,6 +114,7 @@ std::optional<HRESULT> CDX11VideoProcessor::PrepareEditionRender(edition::VideoF
 std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Texture2D>& pBackBuffer,
 	const edition::VideoFrame& frame, HRESULT& hr)
 {
+    if (m_pFilter->m_playbackCancel.Capture()->Cancelled()) return S_OK;
 	const auto& [field, frameStartTime, mfgEnabledForRate, detached, completedVideoOnly,
 		second, wantsProjection, projected, projectionTicks, sourceReady,
 		frameSource, outputPicture, processingRect] = frame;
@@ -224,7 +228,11 @@ std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Tex
                 if (prerollMfg) {
                     // Create the NGX feature/flow/banks while the DirectShow
                     // clock is still stopped. Never enqueue a preroll frame.
-                    m_mfg.Warmup(m_pDevice, m_pDeviceContext, nativeInput.pTexture, 2);
+                    const auto ticket = m_pFilter->m_playbackCancel.Capture();
+                    if (!ticket->Cancelled()) {
+                        m_mfg.SetCancellation(ticket);
+                        m_mfg.Warmup(m_pDevice, m_pDeviceContext, nativeInput.pTexture, 2);
+                    }
                 }
                 bool nativeOverlayHandled = false;
                 if (useMfg && QueueMfg(nativeInput.pTexture, frameStartTime, nativeOverlayHandled, true, postVsrCandidate, false, projected)) {
@@ -289,8 +297,13 @@ std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Tex
 	if (prerollMfg && (!m_resizePending || videoOnlyInput) &&
 	    !m_mfg.InputSize().cx) {
 		auto* mfgInput = videoOnly ? m_processingTexture.pTexture.p : pBackBuffer.p;
-		if (mfgInput) m_mfg.Warmup(m_pDevice, m_pDeviceContext, mfgInput,
-		    2);
+        if (mfgInput) {
+            const auto ticket = m_pFilter->m_playbackCancel.Capture();
+            if (!ticket->Cancelled()) {
+                m_mfg.SetCancellation(ticket);
+                m_mfg.Warmup(m_pDevice, m_pDeviceContext, mfgInput, 2);
+            }
+        }
 	}
 	// Legacy path preserves VSR/HDR and all other native renderer features.
 	// A back-buffer-sized input may need to fall back while its resize is pending.

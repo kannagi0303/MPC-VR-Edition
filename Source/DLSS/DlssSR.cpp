@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
 #include "stdafx.h"
 #include "Times.h"
 #include "Mfg/CadenceTrace.h"
@@ -17,6 +17,8 @@
 #include <thread>
 #include <exception>
 #include <mutex>
+#include <new>
+#include <stop_token>
 #include <array>
 #include <filesystem>
 #include <cwchar>
@@ -991,7 +993,60 @@ struct CDlssSR::Preparation {
 };
 
 CDlssSR::CDlssSR() = default;
-CDlssSR::~CDlssSR() = default;
+CDlssSR::~CDlssSR()
+{
+    // UFE-5: a background NGX preparation can be inside a multi-second,
+    // non-interruptible driver call. Joining that jthread on the DirectShow
+    // graph thread would stall MPC-BE when switching videos or quitting.
+    // Request cooperative cancellation first. If the worker is still active,
+    // let a self-contained cleanup thread join it and release its COM/NGX
+    // resources. The cleanup thread pins this AX module until all code and
+    // destructors have completed, avoiding unload/use-after-free races.
+    if (m_preparation && !m_preparation->finished.load(std::memory_order_acquire)) {
+        m_preparation->worker.request_stop();
+        HMODULE module = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                reinterpret_cast<LPCWSTR>(&NgxD3D11Lock), &module)) {
+            struct DeferredPreparation {
+                std::unique_ptr<Preparation> preparation;
+                HMODULE module = nullptr;
+
+                static DWORD WINAPI Run(LPVOID context) noexcept
+                {
+                    auto* cleanup = static_cast<DeferredPreparation*>(context);
+                    const HMODULE pinnedModule = cleanup->module;
+                    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+                    // Preparation's jthread joins BEFORE its Session is
+                    // destroyed. This is the original safe ownership order.
+                    delete cleanup;
+                    if (SUCCEEDED(com)) CoUninitialize();
+                    // FreeLibrary() followed by returning would execute code
+                    // in an unloaded DLL. This API performs both atomically.
+                    FreeLibraryAndExitThread(pinnedModule, 0);
+                    return 0;
+                }
+            };
+            std::unique_ptr<DeferredPreparation> deferred(new (std::nothrow) DeferredPreparation);
+            if (deferred) {
+                deferred->module = module;
+                deferred->preparation = std::move(m_preparation);
+                HANDLE thread = CreateThread(nullptr, 0, &DeferredPreparation::Run,
+                    deferred.get(), 0, nullptr);
+                if (thread) {
+                    deferred.release(); // Ownership transferred to Run().
+                    CloseHandle(thread);
+                } else {
+                    m_preparation = std::move(deferred->preparation);
+                    FreeLibrary(module);
+                }
+            } else {
+                FreeLibrary(module);
+            }
+        }
+    }
+    m_preparation.reset();
+    m_session.reset();
+}
 
 Tex2D_t* CDlssSR::Prepare(ID3D11Device1* device, UINT width, UINT height,
 	UINT outputWidth, UINT outputHeight, bool background)
@@ -1103,20 +1158,27 @@ void CDlssSR::StartPreparation(std::unique_ptr<Session> retired, ID3D11Device1* 
 		job->outputWidth = outputWidth;
 		job->outputHeight = outputHeight;
 		job->session = std::move(retired);
-		job->worker = std::jthread([pending = job.get(), smallerOnly] {
+		job->worker = std::jthread([pending = job.get(), smallerOnly](std::stop_token stop) {
 			const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 			pending->session.reset();
-			if (pending->device && SUCCEEDED(com)) {
+			if (pending->device && SUCCEEDED(com) && !stop.stop_requested()) {
 				try {
 					pending->session = std::make_unique<Session>();
 					auto& session = *pending->session;
 					if (OpenSession(session, pending->device, true)) {
-						CreateSession(session, pending->width, pending->height, pending->outputWidth,
-							pending->outputHeight, smallerOnly);
-						if (!session.SignalNgx() && !session.sizeFailed) {
-							session.failure = L"Inactive (DLSS SR initialization fence failed)";
-							session.sizeFailed = true;
-						}
+                    // An in-flight NGX call cannot be interrupted. However,
+                    // do not start another expensive call once cancellation
+                    // has been observed between initialization stages.
+                    if (!stop.stop_requested()) {
+                        CreateSession(session, pending->width, pending->height, pending->outputWidth,
+                            pending->outputHeight, smallerOnly);
+                    } else {
+                        session.sizeFailed = true;
+                    }
+                    if (!stop.stop_requested() && !session.sizeFailed && !session.SignalNgx()) {
+                        session.failure = L"Inactive (DLSS SR initialization fence failed)";
+                        session.sizeFailed = true;
+                    }
 					} else {
 						session.sizeFailed = true;
 					}

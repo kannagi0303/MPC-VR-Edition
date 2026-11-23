@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <d3d11_4.h>
 #include <d3d12.h>
@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <atomic>
 #include "FlowMotionCheck.h"
+#include "../Edition/PlaybackCancellation.h"
 class CZipDepth;
 
 namespace mfg {
@@ -68,12 +69,15 @@ class Session {
     std::unique_ptr<WarmupJob> warmup_;
     std::wstring status_;
     std::atomic<bool> failed_{false};
+    mpcvr::edition::PlaybackCancellation::Ticket cancellation_;
     static std::mutex s_retiredWarmupMutex;
     static std::vector<std::unique_ptr<WarmupJob>> s_retiredWarmups;
     static void ReapRetiredWarmups();
     static void RetireWarmup(std::unique_ptr<WarmupJob> job);
 public:
     Session();~Session();
+    // Called under RendererLock before each source submission or preroll.
+    void SetCancellation(mpcvr::edition::PlaybackCancellation::Ticket ticket);
     // Preroll-only initialization: allocate NGX/flow/GPU resources without
     // submitting a frame, advancing history, or starting the presenter.
     bool Warmup(ID3D11Device1* device, ID3D11DeviceContext1* context,

@@ -44,6 +44,7 @@ class CDX11VideoProcessor
 {
 private:
 	friend class CVideoRendererInputPin;
+
 #include "Edition/DX11EditionState.inc"
 
 	// Direct3D 11

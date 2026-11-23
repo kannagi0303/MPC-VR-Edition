@@ -172,7 +172,11 @@ void CDX11VideoProcessor::ReleaseEditionOverlayResources()
 
 void CDX11VideoProcessor::FlushEdition()
 {
-	if (m_pFilter->m_filterState == State_Stopped) {
+	// A real graph Stop (including switching media) is terminal for this
+	// playback session. Unlike Seek/BeginFlush, it must not wait for model
+	// warmup or inference workers to finish before the player can continue.
+	const bool stopping = m_pFilter->m_filterState == State_Stopped;
+	if (stopping) {
 		m_startupHasPicture = false;
 		m_extendedStartupPending = false;
 		m_mfgDisplayRate = {};
@@ -184,7 +188,18 @@ void CDX11VideoProcessor::FlushEdition()
 	m_zipDepth.StopLookahead();
 	m_zipDepth.ResetHistory();
 	m_dlssSR.ResetHistory();
-	StopMfg(false);m_mfg.ResetHistory();
+	if (stopping) {
+		// StopMfg's existing fast path retires unfinished NGX GPU work and
+		// abandons in-flight warmup without joining its worker. The other
+		// model workers already support safe asynchronous retirement, too.
+		// Normal Seek keeps the old history-only behavior below.
+		StopMfg(true, true);
+		m_zipDepth.Stop(true);
+		ReleaseSvdLut(true);
+	} else {
+		StopMfg(false);
+		m_mfg.ResetHistory();
+	}
 	m_mfgAutoEpoch = m_mfgAutoLastPts = -1;
 }
 

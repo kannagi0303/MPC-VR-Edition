@@ -14,6 +14,10 @@
 	std::optional<HRESULT> GetEditionInt(LPCSTR field, int* value);
 	std::optional<HRESULT> SetEditionBool(LPCSTR field, bool value);
 	std::optional<HRESULT> SetEditionInt(LPCSTR field, int value);
+	// Cancellation can be signalled before entering DirectShow/Renderer locks.
+	mpcvr::edition::PlaybackCancellation m_playbackCancel;
+	void CancelEditionDelivery() noexcept;
+	void ResumeEditionDelivery(bool beginPlayback = false);
 	void BeginEditionSegment(double rate);
 	void BeginEditionFlush();
 	void BeginEditionRun();
@@ -36,6 +40,7 @@
 	BOOL ScheduleSample(IMediaSample* sample) override;
 	HRESULT ReceiveScheduled(IMediaSample* sample, uint64_t epoch);
 	HRESULT WaitForRenderTime(uint64_t epoch);
+	HRESULT WaitForRenderTime(uint64_t epoch, const mpcvr::edition::PlaybackCancellation::Ticket& ticket);
 	bool LookaheadCancelled(uint64_t epoch) const;
 	bool PrefetchZipDepth(IMediaSample* sample, int64_t pts, uint64_t epoch);
 	void DrainLookahead();

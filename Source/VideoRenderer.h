@@ -1,4 +1,4 @@
-﻿/*
+/*
  * (C) 2018-2026 see Authors.txt
  *
  * This file is part of MPC-BE.
@@ -21,6 +21,7 @@
 #pragma once
 
 #include <optional>
+#include "Edition/PlaybackCancellation.h"
 
 #include <mfidl.h>
 #include <dxva2api.h>

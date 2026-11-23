@@ -26,6 +26,25 @@
 
 // These hooks execute synchronously at the original lifecycle call sites.
 
+// Called from the input pin BEFORE its Receive lock, or from Stop before
+// RendererLock. Cancellation is independent of the current source state.
+void CMpcVideoRenderer::CancelEditionDelivery() noexcept
+{
+    m_playbackCancel.Cancel();
+    if (m_depthLookahead) m_depthLookahead->Cancel();
+    if (m_ThreadSignal) SetEvent(m_ThreadSignal);
+}
+
+// EndFlush and a fresh Run/Pause establish a new source timeline. Tickets
+// captured by the previous video remain permanently cancelled.
+void CMpcVideoRenderer::ResumeEditionDelivery(bool beginPlayback)
+{
+    // EndFlush can race with Stop: do not re-enable an already stopped source.
+    // A fresh Run/Pause from Stopped explicitly starts a new generation.
+    if (beginPlayback || m_filterState != State_Stopped)
+        m_playbackCancel.Restart();
+}
+
 void CMpcVideoRenderer::BeginEditionSegment(double rate)
 {
 	if (m_depthLookahead) m_depthLookahead->Cancel();
@@ -53,6 +72,7 @@ void CMpcVideoRenderer::BeginEditionFlush()
 void CMpcVideoRenderer::BeginEditionRun()
 {
 	const bool starting = m_filterState == State_Stopped;
+	if (starting) ResumeEditionDelivery(true);
 	m_featureStatusPlaybackRun.fetch_add(1, std::memory_order_relaxed);
 	m_filterState = State_Running;
 	if (starting) {
@@ -61,7 +81,6 @@ void CMpcVideoRenderer::BeginEditionRun()
 	}
 	m_bClockStalled = false;
 	NoteWhoKeepsTime();
-
 }
 
 void CMpcVideoRenderer::CompleteEditionRun(HRESULT hr)
@@ -75,6 +94,7 @@ void CMpcVideoRenderer::CompleteEditionRun(HRESULT hr)
 FILTER_STATE CMpcVideoRenderer::BeginEditionPause()
 {
 	const auto previous = m_filterState;
+	if (previous == State_Stopped) ResumeEditionDelivery(true);
 	m_filterState = State_Paused;
 	if (previous == State_Stopped) {
 		CAutoLock cRendererLock(&m_RendererLock);
@@ -100,7 +120,11 @@ void CMpcVideoRenderer::CompleteEditionPause(HRESULT hr, FILTER_STATE previous)
 void CMpcVideoRenderer::BeginEditionStop()
 {
 	m_filterState = State_Stopped;
-	if (m_depthLookahead) m_depthLookahead->Cancel();
+	CancelEditionDelivery();
+	// Wake a streaming/lookahead thread that may still be waiting for its
+	// presentation deadline. Cancel before taking RendererLock so Stop does
+	// not spend another scheduling interval waiting for that thread.
+	if (m_ThreadSignal) SetEvent(m_ThreadSignal);
 	m_bValidBuffer = false;
 	m_bStartupOverlayPending.store(false, std::memory_order_release);
 	// Stopped is not initialization; don't keep (or resurrect) the label.
@@ -113,7 +137,6 @@ void CMpcVideoRenderer::BeginEditionStop()
 		m_completedEndOfStream = false;
 		m_VideoProcessor->Flush();
 	}
-
 }
 
 // Called only after a real video frame has successfully reached the swapchain,
@@ -171,6 +194,7 @@ void CMpcVideoRenderer::ResizeStartupOverlay(HWND hwnd)
 
 void CMpcVideoRenderer::ShutdownEditionSource()
 {
+	CancelEditionDelivery();
 	if (m_depthLookahead) {
 		m_depthLookahead->Cancel();
 		SetEvent(m_ThreadSignal);
@@ -186,5 +210,4 @@ void CMpcVideoRenderer::ReleaseEditionUiState()
 		DeleteTimerQueueTimer(nullptr, m_hNoticeTimer, INVALID_HANDLE_VALUE);
 		m_hNoticeTimer = nullptr;
 	}
-
 }

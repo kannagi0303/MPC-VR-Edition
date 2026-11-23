@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "stdafx.h"
 #include "Session.h"
 #include "Runtime.h"
@@ -169,6 +169,7 @@ struct Session::Impl {
     int64_t previous=-1;
     FlowMotionCheck motionCheck;
     bool pending=false,asyncProducer=AsyncProducerEnabled();HANDLE event=nullptr;
+    mpcvr::edition::PlaybackCancellation::Ticket cancellation;
     uint64_t busyFallbacks=0;
     Runtime runtime; // destroyed before resources, after caller has drained GPU.
     // Retain pending sessions until BOTH the producer and D3D11 presenter are
@@ -184,9 +185,20 @@ struct Session::Impl {
             (presentFence && presentFence->GetCompletedValue()>=presentValue);
         return generatedDone && sampledDone;
     }
+    // A cancelled CPU wait does not cancel GPU commands. Reset/FastShutdown
+    // keep submitted resources alive until their producer/presenter fences retire.
+    bool WaitForFenceOrCancel() const {
+        if (cancellation && cancellation->Cancelled()) return false;
+        const HANDLE signal = cancellation ? cancellation->Event() : nullptr;
+        if (signal) {
+            HANDLE handles[2]{event, signal};
+            if (WaitForMultipleObjects(2, handles, FALSE, 2000) != WAIT_OBJECT_0) return false;
+        } else if (WaitForSingleObject(event, 2000) != WAIT_OBJECT_0) return false;
+        return !cancellation || !cancellation->Cancelled();
+    }
     bool Wait() {
         Check(fence->SetEventOnCompletion(pendingValue,event));
-        if(WaitForSingleObject(event,2000)!=WAIT_OBJECT_0) return false;
+        if(!WaitForFenceOrCancel()) return false;
         if(FAILED(device12->GetDeviceRemovedReason())) return false;
         pending=false;return true;
     }
@@ -200,7 +212,7 @@ struct Session::Impl {
     bool AwaitBank(Bank& bank) {
         if(bank.timeline.ProducerReady(fence->GetCompletedValue())) return true;
         Check(fence->SetEventOnCompletion(bank.timeline.ProducerFenceValue(),event));
-        return WaitForSingleObject(event,2000)==WAIT_OBJECT_0 &&
+        return WaitForFenceOrCancel() &&
                SUCCEEDED(device12->GetDeviceRemovedReason());
     }
     bool SubmitBank(Bank& bank) {
@@ -664,6 +676,11 @@ bool Session::PollWarmup(ID3D11Device1* device, ID3D11DeviceContext1* context, I
     }
     return false;
 }
+void Session::SetCancellation(mpcvr::edition::PlaybackCancellation::Ticket ticket) {
+    cancellation_ = std::move(ticket);
+    if (impl_) impl_->cancellation = cancellation_;
+}
+
 bool Session::Warmup(ID3D11Device1* device, ID3D11DeviceContext1* context,
     ID3D11Texture2D* image, unsigned multiplier,
     bool nativeSharedOriginals) {
@@ -675,6 +692,13 @@ bool Session::Warmup(ID3D11Device1* device, ID3D11DeviceContext1* context,
     // A changed startup preference may leave background work in flight.
     // Reuse compatible work in preroll before considering a new session.
     if (warmup_) {
+        // Preroll runs under RendererLock. Never join unfinished background
+        // resource creation here: Stop/Close also needs that lock. Preserve
+        // the worker and let PollWarmup() collect it when complete.
+        if (!warmup_->done.load(std::memory_order_acquire)) {
+            status_ = L"MFG: preparing resources";
+            return false;
+        }
         warmup_->worker.join();
         if (!nativeSharedOriginals && warmup_->device.Get() == device &&
             warmup_->desc.Width == desc.Width && warmup_->desc.Height == desc.Height &&
@@ -696,14 +720,20 @@ bool Session::Warmup(ID3D11Device1* device, ID3D11DeviceContext1* context,
             }
         }
         next=std::make_unique<Impl>();
+        next->cancellation = cancellation_;
         next->Init(device,context,desc,nativeSharedOriginals);
         impl_=std::move(next);
         status_=L"MFG: resources prewarmed before playback";
         return true;
     } catch(const std::exception& e) {
+        const bool cancelled = cancellation_ && cancellation_->Cancelled();
         const std::string what=e.what();status_=std::wstring(what.begin(),what.end());
         if(next&&!next->runtime.Status().empty()) status_+=L"; "+next->runtime.Status();
-        Reset();failed_=true;
+        if(next && !next->Safe()) {
+            std::lock_guard guard(Impl::retiredMutex);
+            Impl::retired.emplace_back(std::move(next));
+        }
+        Reset();failed_=!cancelled;
         return false;
     }
 }
@@ -770,7 +800,9 @@ bool Session::Generate(ID3D11Device1* device,ID3D11DeviceContext1* context,ID3D1
                     return false;
                 }
             }
-            impl_=std::make_unique<Impl>();impl_->Init(device,context,desc,nativeSharedOriginals);
+            impl_=std::make_unique<Impl>();
+            impl_->cancellation = cancellation_;
+            impl_->Init(device,context,desc,nativeSharedOriginals);
         }
         const bool continuous = impl_->previous >= 0 && timestamp > impl_->previous &&
             timestamp - impl_->previous <= 2'500'000;
@@ -782,9 +814,10 @@ bool Session::Generate(ID3D11Device1* device,ID3D11DeviceContext1* context,ID3D1
             L" from "+std::to_wstring(impl_->sourceW)+L"x"+std::to_wstring(impl_->sourceH)+
             L"; generated "+std::to_wstring(batch.generated)+L"; "+impl_->runtime.Status();return ok;
     }catch(const std::exception& e) {
+        const bool cancelled = cancellation_ && cancellation_->Cancelled();
         const std::string what=e.what();status_=std::wstring(what.begin(),what.end());
         if(impl_&&!impl_->runtime.Status().empty()) status_+=L"; "+impl_->runtime.Status();
-        Reset();failed_=true;return false;
+        Reset();failed_=!cancelled;return false;
     }
 }
 FlowMotion Session::TakeFlowMotion(int64_t pts) {

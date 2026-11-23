@@ -29,10 +29,13 @@ DecodedFrameLookahead::~DecodedFrameLookahead() { Shutdown(); }
 bool DecodedFrameLookahead::Push(IMediaSample* sample, int64_t pts, uint64_t bytes, uint64_t epoch)
 {
     std::unique_lock lock(m_lock);
-    m_changed.wait(lock, [&] {
+    const auto canPush = [&] {
         return m_stopping || Epoch() != epoch || m_frames.empty() ||
             (m_bytes + bytes <= MaxVideoBytes && pts - m_frames.front().pts <= m_lead);
-    });
+    };
+    if (!canPush()) {
+        m_changed.wait(lock, canPush);
+    }
     if (m_stopping || Epoch() != epoch) return false;
     m_frames.push_back({sample, pts, bytes, epoch});
     m_bytes += bytes;
@@ -51,11 +54,20 @@ void DecodedFrameLookahead::Drain()
 
 void DecodedFrameLookahead::Cancel()
 {
-    std::lock_guard lock(m_lock);
-    ++m_epoch;
-    m_frames.clear();
-    m_bytes = 0;
+    std::deque<Frame> retired;
+    {
+        std::lock_guard lock(m_lock);
+        ++m_epoch;
+        // Release decoder-owned sample/texture COM references *outside* the
+        // queue mutex. Destructors can wait for device/allocator work; holding
+        // m_lock would stop other waiting threads from observing cancellation.
+        retired.swap(m_frames);
+        m_bytes = 0;
+    }
     m_changed.notify_all();
+    if (!retired.empty()) {
+        retired.clear();
+    }
 }
 
 void DecodedFrameLookahead::Shutdown()

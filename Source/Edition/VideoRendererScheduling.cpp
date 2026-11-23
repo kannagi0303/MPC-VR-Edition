@@ -100,12 +100,19 @@ void CMpcVideoRenderer::NoteWhoKeepsTime()
 // sitting in WaitForRenderTime.
 HRESULT CMpcVideoRenderer::WaitForRenderTime()
 {
-	return WaitForRenderTime(0);
+	return WaitForRenderTime(0, m_playbackCancel.Capture());
 }
 
 HRESULT CMpcVideoRenderer::WaitForRenderTime(uint64_t epoch)
 {
-	HANDLE objects[2] = { m_ThreadSignal, m_RenderEvent };
+    return WaitForRenderTime(epoch, m_playbackCancel.Capture());
+}
+
+HRESULT CMpcVideoRenderer::WaitForRenderTime(uint64_t epoch,
+    const mpcvr::edition::PlaybackCancellation::Ticket& ticket)
+{
+    HANDLE objects[3] = { m_ThreadSignal, m_RenderEvent, ticket->Event() };
+    const DWORD objectCount = objects[2] ? 3 : 2;
 	const ULONGLONG waitStart = GetTickCount64();
 	bool bSaidSo = false;
 	// Whatever way this is left, the note goes with it: a dump that reads a note
@@ -128,13 +135,17 @@ HRESULT CMpcVideoRenderer::WaitForRenderTime(uint64_t epoch)
 	}
 
 	for (;;) {
-		if (LookaheadCancelled(epoch)) return Leave(VFW_E_STATE_CHANGED);
+		if (ticket->Cancelled() || LookaheadCancelled(epoch)) return Leave(VFW_E_STATE_CHANGED);
 		DWORD quantum = 500;
 		if (m_bClockStalled) {
 			const ULONGLONG now = GetTickCount64();
 			quantum = (DWORD)std::clamp<ULONGLONG>(m_tickPictureDue > now ? m_tickPictureDue - now : 0, 1, 500);
 		}
-		const DWORD result = WaitForMultipleObjects(2, objects, FALSE, quantum);
+        // Missing cancel event (e.g. handle exhaustion) must still poll
+        // the permanent cancelled bit in bounded time.
+        if (objectCount == 2) quantum = (std::min)(quantum, DWORD(10));
+        const DWORD result = WaitForMultipleObjects(objectCount, objects, FALSE, quantum);
+        if (result == WAIT_OBJECT_0 + 2) return Leave(VFW_E_STATE_CHANGED);
 		if (result == WAIT_OBJECT_0) {
 			return Leave(VFW_E_STATE_CHANGED);
 		}
@@ -169,8 +180,6 @@ HRESULT CMpcVideoRenderer::WaitForRenderTime(uint64_t epoch)
 		const ULONGLONG bound = 1000;
 		const ULONGLONG waited = GetTickCount64() - waitStart;
 		if (!bSaidSo) {
-			// Half a second of waiting never happens while a film plays, so this
-			// costs nothing in the ordinary case.
 			bSaidSo = true;
 			SayWhatThisThreadWaitsFor(std::format(
 				L"MPCVR waiting for a picture's turn: advise {}, streaming {}, state {}",
@@ -322,8 +331,10 @@ BOOL CMpcVideoRenderer::ScheduleSample(IMediaSample* sample)
 
 std::optional<HRESULT> CMpcVideoRenderer::ReceiveCompletedSample(IMediaSample* sample)
 {
-	if (!m_localFile) return {};
-	REFERENCE_TIME pts = 0, end = 0;
+    if (!m_localFile) return {};
+    const auto ticket = m_playbackCancel.Capture();
+    if (ticket->Cancelled()) return S_OK;
+    REFERENCE_TIME pts = 0, end = 0;
 	AM_MEDIA_TYPE* changed = nullptr;
 	const bool changesFormat = sample->GetMediaType(&changed) == S_OK;
 	if (changed) DeleteMediaType(changed);
@@ -352,12 +363,13 @@ std::optional<HRESULT> CMpcVideoRenderer::ReceiveCompletedSample(IMediaSample* s
 		}
 	} waitTrace{valid ? pts : -1};
 	for (;;) {
+		if (ticket->Cancelled()) return S_OK;
 		const char* block;
 		{
 			CAutoLock state(&m_InterfaceLock);
 			CAutoLock render(&m_RendererLock);
 			if (!epoch) epoch = m_completedEpoch;
-			if (m_bFlushing || m_State == State_Stopped || *epoch != m_completedEpoch) return S_OK;
+			if (ticket->Cancelled() || m_bFlushing || m_State == State_Stopped || *epoch != m_completedEpoch) return S_OK;
 			auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get());
 			if (!dx11) return {};
 			if (dx11->m_completedPresenter.Failed()) dx11->ClearCompletedFrames(true);
@@ -382,8 +394,14 @@ std::optional<HRESULT> CMpcVideoRenderer::ReceiveCompletedSample(IMediaSample* s
 						dx11->m_completedTarget.reset();
 						return prepared == VFW_E_SAMPLE_REJECTED ? S_OK : prepared;
 					}
-					m_bInReceive = FALSE;
-					const auto hr = dx11->RenderCompletedSample(sample);
+                    m_bInReceive = FALSE;
+                    if (ticket->Cancelled()) {
+                        dx11->m_completedTarget.reset();
+                        ClearPendingSample();
+                        CancelNotification();
+                        return S_OK;
+                    }
+                    const auto hr = dx11->RenderCompletedSample(sample);
 					ClearPendingSample();
 					CancelNotification();
 					return hr;
@@ -393,8 +411,11 @@ std::optional<HRESULT> CMpcVideoRenderer::ReceiveCompletedSample(IMediaSample* s
 			}
 		}
 		waitTrace.Wait(block);
-		// Capacity and timeline waits must allow the presenter and BeginFlush through.
-		Sleep(2);
+        // An event wake is preferable to sleeping behind an obsolete
+        // playback timeline. Keep the same 2ms retry for live frames.
+        if (const auto cancelEvent = ticket->Event()) {
+            if (WaitForSingleObject(cancelEvent, 2) == WAIT_OBJECT_0) return S_OK;
+        } else Sleep(2);
 	}
 }
 
@@ -462,9 +483,11 @@ void CMpcVideoRenderer::ReportLookaheadError(HRESULT hr)
 
 HRESULT CMpcVideoRenderer::ReceiveScheduled(IMediaSample* pSample, uint64_t epoch)
 {
-	// override CBaseRenderer::Receive() for the implementation of the search during the pause
+    // Capture once: a seek must never re-enable an older source sample.
+    const auto ticket = m_playbackCancel.Capture();
+    // override CBaseRenderer::Receive() for the implementation of the search during the pause
 
-	if (m_bFlushing || LookaheadCancelled(epoch)) {
+    if (ticket->Cancelled() || m_bFlushing || LookaheadCancelled(epoch)) {
 		DLog(L"CMpcVideoRenderer::Receive() - flushing, skip sample");
 		return S_OK;
 	}
@@ -473,7 +496,7 @@ HRESULT CMpcVideoRenderer::ReceiveScheduled(IMediaSample* pSample, uint64_t epoc
 
 	// It may return VFW_E_SAMPLE_REJECTED code to say don't bother
 
-	HRESULT hr = PrepareReceive(pSample);
+    HRESULT hr = PrepareReceive(pSample);
 	ASSERT(m_bInReceive == SUCCEEDED(hr));
 	if (FAILED(hr)) {
 		if (hr == VFW_E_SAMPLE_REJECTED) {
@@ -491,7 +514,7 @@ HRESULT CMpcVideoRenderer::ReceiveScheduled(IMediaSample* pSample, uint64_t epoc
 		m_bInReceive = FALSE;
 		{
 			CAutoLock cRendererLock(&m_RendererLock);
-			DoRenderSample(m_pMediaSample);
+            DoRenderSample(m_pMediaSample);
 		}
 		{
 			// Keep the original CBaseRenderer handshake and lock ordering:
@@ -507,10 +530,10 @@ HRESULT CMpcVideoRenderer::ReceiveScheduled(IMediaSample* pSample, uint64_t epoc
 	// awoken by the clock firing or by a state change. The rendering call
 	// will lock the critical section and check we can still render the data
 
-	hr = WaitForRenderTime(epoch);
+	hr = WaitForRenderTime(epoch, ticket);
 	if (FAILED(hr)) {
 		m_bInReceive = FALSE;
-		if (LookaheadCancelled(epoch)) {
+		if (ticket->Cancelled() || LookaheadCancelled(epoch)) {
 			CAutoLock cVideoLock(&m_InterfaceLock);
 			CAutoLock cRendererLock(&m_RendererLock);
 			if (m_pMediaSample == pSample) {
@@ -531,9 +554,9 @@ HRESULT CMpcVideoRenderer::ReceiveScheduled(IMediaSample* pSample, uint64_t epoc
 		{
 			CAutoLock cVideoLock(&m_InterfaceLock);
 			CAutoLock cRendererLock(&m_RendererLock);
-			if (m_State == State_Stopped || m_pMediaSample != pSample) return NOERROR;
+			if (ticket->Cancelled() || m_State == State_Stopped || m_pMediaSample != pSample) return NOERROR;
 
-			const bool running = m_State == State_Running && !m_bFlushing && !LookaheadCancelled(epoch);
+			const bool running = !ticket->Cancelled() && m_State == State_Running && !m_bFlushing && !LookaheadCancelled(epoch);
 			auto* dx11 = running && !m_bClockStalled && m_Sets.iMfgMultiplier
 				? dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get()) : nullptr;
 			const bool drainMfg = dx11 && dx11->MfgSourceMeetsDisplayRate() && dx11->LegacyFramesPending();
@@ -545,8 +568,10 @@ HRESULT CMpcVideoRenderer::ReceiveScheduled(IMediaSample* pSample, uint64_t epoc
 				return NOERROR;
 			}
 		}
-		// Let the presenter finish the older originals on their own deadlines.
-		Sleep(2);
+        // Do not keep old Receive alive for its presenter after Stop/Flush.
+        if (const auto cancelEvent = ticket->Event()) {
+            if (WaitForSingleObject(cancelEvent, 2) == WAIT_OBJECT_0) return NOERROR;
+        } else Sleep(2);
 	}
 }
 

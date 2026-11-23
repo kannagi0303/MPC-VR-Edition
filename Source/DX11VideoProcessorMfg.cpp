@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "stdafx.h"
 #include "Helper.h"
 #include "DX11VideoProcessor.h"
@@ -343,6 +343,10 @@ bool CDX11VideoProcessor::NextMfg(int64_t& deadline) {
 }
 bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timestamp, bool& overlayInputHandled,
     bool nativeInput, bool postVsrInput, bool videoOnlyInput, bool projected) {
+    // Source and NGX GPU producer use the same playback cancellation ticket.
+    const auto ticket = m_pFilter->m_playbackCancel.Capture();
+    if (ticket->Cancelled()) return false;
+    m_mfg.SetCancellation(ticket);
     if(m_mfgThread.Failed())m_mfgPresentFailed=true;
     if(m_mfgPresentFailed) {StopMfg(false);return false;}
     if(m_mfg.Failed())return false;

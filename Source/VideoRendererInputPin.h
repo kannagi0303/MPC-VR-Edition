@@ -63,6 +63,7 @@ public:
 
 	STDMETHODIMP NewSegment(REFERENCE_TIME startTime, REFERENCE_TIME stopTime, double rate) override;
 	STDMETHODIMP BeginFlush() override;
+	STDMETHODIMP EndFlush() override;
 	STDMETHODIMP EndOfStream() override;
 
 	// IMFGetService
