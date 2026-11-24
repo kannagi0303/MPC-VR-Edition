@@ -469,6 +469,8 @@ CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Setti
 
 CDX11VideoProcessor::~CDX11VideoProcessor()
 {
+	// Request telemetry stop without waiting for NVML or its worker thread.
+	m_gpuLoadSampler.reset();
 	BeginEditionShutdown();
 	for (const auto& [displayName, state] : m_hdrModeSavedState) {
 		DisplayConfig_t displayConfig = {};
@@ -4884,9 +4886,14 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 	}
 	if (m_statsFeatureOffset != featureOffset) {
 		m_statsFeatureOffset = featureOffset;
+		m_cachedStatisticsTick = 0;
 		CalcStatsParams();
 	}
 
+	const auto statsNow = GetTickCount64();
+	const auto statsRun = m_pFilter->m_featureStatusPlaybackRun.load(std::memory_order_relaxed);
+	if (!m_cachedStatisticsTick || statsNow - m_cachedStatisticsTick >= 250 ||
+		m_cachedStatisticsRun != statsRun) {
 	std::wstring str;
 	str.reserve(700);
 	str.assign(m_strStatsHeader);
@@ -5005,6 +5012,10 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 		UpdateStatsByWindow();
 	}
 	if (editionSeparator) InsertEditionStatsSeparator(str, *editionSeparator);
+	m_cachedStatisticsText = std::move(str);
+	m_cachedStatisticsTick = statsNow;
+	m_cachedStatisticsRun = statsRun;
+	}
 
 	ID3D11RenderTargetView* pRenderTargetView = nullptr;
 	HRESULT hr = m_pDevice->CreateRenderTargetView(pRenderTarget, nullptr, &pRenderTargetView);
@@ -5014,7 +5025,7 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 		m_StatsBackground.Draw(pRenderTargetView, rtSize);
 
 		hr = m_Font3D.Draw2DText(pRenderTargetView, rtSize, m_StatsTextPoint.x,
-			m_StatsTextPoint.y + m_statsFeatureOffset, m_dwStatsTextColor, str.c_str());
+			m_StatsTextPoint.y + m_statsFeatureOffset, m_dwStatsTextColor, m_cachedStatisticsText.c_str());
 		if (--m_StatsMarkerX < m_StatsRect.left || m_StatsMarkerX > m_StatsRect.right) {
 			m_StatsMarkerX = m_StatsRect.right;
 		}

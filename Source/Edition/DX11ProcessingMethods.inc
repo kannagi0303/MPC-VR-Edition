@@ -16,6 +16,8 @@
 	HRESULT PrepareSvdLutDraw();
 	bool StartSvdLutModel();
 	HRESULT EnsureSvdLutThumbnails();
+	float BindSvdLutOutputDither(ID3D11Texture2D* target, bool enabled = true);
+	HRESULT RenderSvdLutThumbnail(const Tex2D_t& source, ID3D11Texture2D* target, const CRect& sample);
 	HRESULT EnsureSvdLutPicture(DXGI_FORMAT format, UINT width, UINT height);
 	bool SvdLutWorkAllowed();
 	void BeginSvdLutScene(REFERENCE_TIME timestamp);
@@ -34,6 +36,17 @@
 	HRESULT DrawCompletedSvdLut(const CompletedFrame& frame, ID3D11Texture2D* target,
 		const CRect& picture, bool geometryChanging);
 	void DrawSvdLut(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME timestamp);
+    // No-model standalone, or fused A/B colour enhancement. Cached depth only.
+    bool PerceptualEnabled() const;
+    HRESULT PreparePerceptualShader(int mode);
+    HRESULT ApplyPerceptual(const Tex2D_t& source, ID3D11Texture2D* target,
+        const CRect& area, const CRect& visible, CPoint offset, REFERENCE_TIME pts,
+        int mode, ID3D11ShaderResourceView* lut = nullptr,
+        std::array<float, 3> tone = {1.0f, 1.0f, 1.0f}, bool useTone = false,
+        float blend = 1.0f, bool allowDepth = false);
+    HRESULT DrawCompletedPerceptual(const CompletedFrame& frame, ID3D11Texture2D* target,
+        const CRect& picture, bool geometryChanging);
+    void DrawPerceptual(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME pts);
 
 	// Independent unprotected, one-DirectML-evaluation-per-frame experiment B.
 	void ReleaseSvdLutRawTest(bool fast = false);
@@ -55,7 +68,7 @@
 	void PrefetchSvdLutRawFuture(const CompletedFrame& current, bool geometryChanging);
 	HRESULT ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Texture2D* target,
 		const CRect& area, const CRect& visible, CPoint offset, REFERENCE_TIME pts, uint64_t fence,
-		bool allowTemporalCapture = true);
+		bool allowTemporalCapture = true, bool allowDepth = false);
 	HRESULT DrawCompletedSvdLutRaw(const CompletedFrame& frame, ID3D11Texture2D* target,
 		const CRect& picture, bool geometryChanging);
 	void DrawSvdLutRaw(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME pts);

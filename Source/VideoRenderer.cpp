@@ -1,4 +1,4 @@
-﻿/*
+/*
  * (C) 2018-2026 see Authors.txt
  *
  * This file is part of MPC-BE.
@@ -371,6 +371,9 @@ CMpcVideoRenderer::CMpcVideoRenderer(LPUNKNOWN pUnk, HRESULT* phr)
 			m_svdLutRaw.store(svdMode == 1 || svdMode == 2);
 			m_svdLutTemporal.store(svdMode == 2);
 		}
+        DWORD bStrength = 200;
+        if (key.QueryDWORDValue(L"SvdLutBStrength", bStrength) == ERROR_SUCCESS && bStrength <= 200)
+            m_svdLutBStrength.store(static_cast<int>(bStrength));
         DWORD b2Luminance = 0;
         if (key.QueryDWORDValue(L"SvdLutB2Luminance", b2Luminance) == ERROR_SUCCESS)
             m_svdLutB2Luminance.store(b2Luminance == 1);
@@ -380,6 +383,13 @@ CMpcVideoRenderer::CMpcVideoRenderer(LPUNKNOWN pUnk, HRESULT* phr)
         DWORD r1Gamut = 0;
         if (key.QueryDWORDValue(L"SvdLutR1Gamut", r1Gamut) == ERROR_SUCCESS)
             m_svdLutR1Gamut.store(r1Gamut == 1);
+        // Do not migrate retired M1/D1 guard settings: new colour enhancements
+        // are independently enabled and have a different visual purpose.
+        DWORD preferred = 0, skin = 0;
+        if (key.QueryDWORDValue(L"PreferredColors", preferred) == ERROR_SUCCESS)
+            m_preferredColors.store(preferred == 1);
+        if (key.QueryDWORDValue(L"SkinTones", skin) == ERROR_SUCCESS)
+            m_skinTones.store(skin == 1);
 		// Upstream's registry-only tuning of the Measured method: read here and nowhere
 		// else, never written, never in a preset.
 		DWORD dw;
@@ -1357,12 +1367,16 @@ STDMETHODIMP CMpcVideoRenderer::SaveSettings()
     DWORD b2Luminance = 0;
     DWORD b2Memory = 0;
     DWORD r1Gamut = 0;
+    DWORD preferred = 0, skinTones = 0, bStrength = 200;
 	{
 		CAutoLock lock(&m_RendererLock);
 		snapshot = m_Sets;
         b2Luminance = m_svdLutB2Luminance.load() ? 1u : 0u;
         b2Memory = m_svdLutB2Memory.load() ? 1u : 0u;
         r1Gamut = m_svdLutR1Gamut.load() ? 1u : 0u;
+        preferred = m_preferredColors.load() ? 1u : 0u;
+        skinTones = m_skinTones.load() ? 1u : 0u;
+        bStrength = static_cast<DWORD>(m_svdLutBStrength.load());
 		svdMode = m_svdLutOff.load() ? 3u :
                 (m_svdLutRaw.load() ? (m_svdLutTemporal.load() ? 2u : 1u) : 0u);
 	}
@@ -1374,12 +1388,26 @@ STDMETHODIMP CMpcVideoRenderer::SaveSettings()
 	// Cancel remain in-memory and are reverted by the property page.
 	const auto stored = key.SetDWORDValue(L"SvdLutMode", svdMode);
 	if (stored != ERROR_SUCCESS) return HRESULT_FROM_WIN32(stored);
+    const auto bsStored = key.SetDWORDValue(L"SvdLutBStrength", bStrength);
+    if (bsStored != ERROR_SUCCESS) return HRESULT_FROM_WIN32(bsStored);
     const auto b2Stored = key.SetDWORDValue(L"SvdLutB2Luminance", b2Luminance);
     if (b2Stored != ERROR_SUCCESS) return HRESULT_FROM_WIN32(b2Stored);
     const auto memoryStored = key.SetDWORDValue(L"SvdLutB2Memory", b2Memory);
     if (memoryStored != ERROR_SUCCESS) return HRESULT_FROM_WIN32(memoryStored);
     const auto r1Stored = key.SetDWORDValue(L"SvdLutR1Gamut", r1Gamut);
     if (r1Stored != ERROR_SUCCESS) return HRESULT_FROM_WIN32(r1Stored);
+    const auto preferredStored = key.SetDWORDValue(L"PreferredColors", preferred);
+    if (preferredStored != ERROR_SUCCESS) return HRESULT_FROM_WIN32(preferredStored);
+    const auto skinStored = key.SetDWORDValue(L"SkinTones", skinTones);
+    if (skinStored != ERROR_SUCCESS) return HRESULT_FROM_WIN32(skinStored);
+    DWORD verifyBStrength = DWORD(-1);
+    if (key.QueryDWORDValue(L"SvdLutBStrength", verifyBStrength) != ERROR_SUCCESS ||
+        verifyBStrength != bStrength) return E_FAIL;
+    DWORD verifyPreferred = DWORD(-1), verifySkin = DWORD(-1);
+    if (key.QueryDWORDValue(L"PreferredColors", verifyPreferred) != ERROR_SUCCESS ||
+        verifyPreferred != preferred) return E_FAIL;
+    if (key.QueryDWORDValue(L"SkinTones", verifySkin) != ERROR_SUCCESS ||
+        verifySkin != skinTones) return E_FAIL;
     DWORD verifyR1 = DWORD(-1);
     if (key.QueryDWORDValue(L"SvdLutR1Gamut", verifyR1) != ERROR_SUCCESS ||
         verifyR1 != r1Gamut) return E_FAIL;

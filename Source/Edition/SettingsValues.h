@@ -106,5 +106,5 @@ inline constexpr int JVR_VERTICAL_DEFAULT = 0;
 inline constexpr int JVR_REPROJECTION_MIN = 0;
 inline constexpr int JVR_REPROJECTION_MAX = 200;
 inline constexpr int JVR_REPROJECTION_DEFAULT = 50;
-inline constexpr int SVDLUT_STRENGTH_MAX = 100;
+inline constexpr int SVDLUT_STRENGTH_MAX = 200; // A: legacy 100% unchanged; experimental extension to 200%.
 

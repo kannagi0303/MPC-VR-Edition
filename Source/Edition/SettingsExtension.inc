@@ -129,7 +129,7 @@
 	int GetSvdLutStrength() const {
 		if (!bSvdLut) return 0;
 		return svdLutStrength > 0 && svdLutStrength <= SVDLUT_STRENGTH_MAX
-			? svdLutStrength : SVDLUT_STRENGTH_MAX;
+			? svdLutStrength : 100; // legacy fallback must remain 100%, not new 200%
 	}
 
 	void SetSvdLutStrength(int strength) {

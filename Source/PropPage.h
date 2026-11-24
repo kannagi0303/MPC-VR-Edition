@@ -1,4 +1,4 @@
-﻿/*
+/*
  * (C) 2018-2026 see Authors.txt
  *
  * This file is part of MPC-BE.
@@ -38,6 +38,9 @@ class __declspec(uuid("DA46D181-07D6-441D-B314-019AEB10148A"))
 
 	int m_oldSDRDisplayNits = SDR_NITS_DEF;
 	int m_oldSvdLutStrength = 0;
+    int m_svdLutBStrength = 200;
+    int m_oldSvdLutBStrength = 200;
+    bool m_svdLutBPreviewed = false;
 	bool m_svdLutPreviewed = false;
 	bool m_svdLutOff = false;
 	bool m_oldSvdLutOff = false;
@@ -51,6 +54,11 @@ class __declspec(uuid("DA46D181-07D6-441D-B314-019AEB10148A"))
     bool m_oldSvdLutB2Memory = false;
     bool m_svdLutR1Gamut = false;
     bool m_oldSvdLutR1Gamut = false;
+    bool m_skinTones = false;
+    bool m_oldSkinTones = false;
+    bool m_preferredColors = false;
+    bool m_oldPreferredColors = false;
+
 	bool m_oldJvrFlatView = false;
 	int m_oldJvrVertical = JVR_VERTICAL_DEFAULT;
 	int m_oldJvrReprojection = JVR_REPROJECTION_DEFAULT;
@@ -82,12 +90,15 @@ private:
 	void ApplyJvrPreview();
 	void UpdateSvdLutLabel();
 	void PreviewSvdLutStrength(int strength);
+    void PreviewSvdLutBStrength(int strength);
 	void PreviewSvdLutOff(bool off);
 	void PreviewSvdLutRaw(bool raw);
 	void PreviewSvdLutTemporal(bool temporal);
     void PreviewSvdLutB2Luminance(bool enable);
     void PreviewSvdLutB2Memory(bool enable);
     void PreviewSvdLutR1Gamut(bool enable);
+    void PreviewSkinTones(bool enable);
+    void PreviewPreferredColors(bool enable);
 
 	HRESULT OnConnect(IUnknown* pUnknown) override;
 	HRESULT OnDisconnect() override;

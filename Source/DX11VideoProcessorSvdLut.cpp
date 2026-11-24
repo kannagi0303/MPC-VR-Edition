@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "stdafx.h"
+#include "Edition/SvdLutStrength.h"
+#include "Edition/SvdLutInput.h"
 #include <algorithm>
 #include <cmath>
 #include <d3dcompiler.h>
@@ -10,15 +12,25 @@
 #include "VideoRenderer.h"
 #include "DLSS/NgxRuntime.h"
 #include "DLSS/SvdLutShader.h"
+#include "DLSS/PerceptualColorShader.h"
 #include "Edition/SvdLutTemporalStatistics.h"
 #include "Edition/SvdLutB2Luminance.h"
+#include "Edition/SvdLutB2Refined.h"
+#include "Edition/SvdLutB2AdaptiveLuma.h"
 #include "Shaders.h"
 #include "Times.h"
+
+namespace {
+HRESULT CompileSvdLutOutputShader(const char* source, const D3D_SHADER_MACRO* defines, ID3DBlob** code)
+{
+    return CompileShader(std::string(SvdLutAdaptiveLumaShader) + source + SvdLutOutputShader, defines, "ps_5_0", code);
+}
+}
 
 HRESULT svdlut::CreateGradeShader(ID3D11Device* device, ID3D11PixelShader** shader)
 {
     CComPtr<ID3DBlob> code;
-    const auto hr = CompileShader(SvdLutShader, nullptr, "ps_5_0", &code);
+    const auto hr = CompileSvdLutOutputShader(SvdLutShader, nullptr, &code);
     if (FAILED(hr)) return hr;
     return device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, shader);
 }
@@ -27,6 +39,8 @@ namespace {
 constexpr REFERENCE_TIME CaptureInterval = 125 * 10000;
 constexpr REFERENCE_TIME FadeInDuration = 500 * 10000;
 constexpr auto ThumbSize = svdlut::InputSize;
+static_assert(ThumbSize == svdlut::input::Size);
+constexpr auto ThumbFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;
 constexpr unsigned SignatureSize = 8;
 using Signature = std::array<float, SignatureSize * SignatureSize * 3>;
 
@@ -34,14 +48,7 @@ std::unique_ptr<svdlut::Image> ReadSvdLutImage(const uint8_t* data, size_t strid
 {
     auto image = std::unique_ptr<svdlut::Image>(new (std::nothrow) svdlut::Image);
     if (!image) return {};
-    for (UINT y = 0; y < ThumbSize; ++y) {
-        const auto* row = data + y * stride;
-        for (UINT x = 0; x < ThumbSize; ++x) {
-            for (UINT c = 0; c < 3; ++c) {
-                (*image)[c * svdlut::InputPixels + y * ThumbSize + x] = row[4 * x + c] * (1.0f / 255.0f);
-            }
-        }
-    }
+    if (!svdlut::input::ReadPlanar(data, stride, *image)) return {};
     return image;
 }
 
@@ -56,13 +63,12 @@ Signature ReadSignature(const uint8_t* data, size_t stride)
     Signature signature{};
     constexpr unsigned block = ThumbSize / SignatureSize;
     constexpr unsigned step = 4;
-    constexpr float normalized = 1.0f / (255 * (block / step) * (block / step));
+    constexpr float normalized = 1.0f / ((block / step) * (block / step));
     for (unsigned y = 0; y < ThumbSize; y += step) {
-        const auto* row = data + (y + step / 2) * stride;
         for (unsigned x = 0; x < ThumbSize; x += step) {
             const auto tile = (y / block) * SignatureSize + x / block;
             for (unsigned c = 0; c < 3; ++c) {
-                signature[tile * 3 + c] += row[(x + step / 2) * 4 + c] * normalized;
+                signature[tile * 3 + c] += svdlut::input::Code(data, stride, x + step / 2, y + step / 2, c) * normalized;
             }
         }
     }
@@ -143,12 +149,22 @@ void CDX11VideoProcessor::ReleaseSvdLut(bool fast)
 {
     ResetSvdLutHistory();
     ReleaseSvdLutRawTest(fast);
+    m_perceptual.constants.Release();
+    m_perceptual.sampler.Release();
+    m_perceptual.standalone.Release();
+    m_perceptual.normalA.Release();
+    m_perceptual.rawB.Release();
+    m_perceptual.triedStandalone = m_perceptual.triedA = m_perceptual.triedB = false;
+    m_perceptual.failedStandalone = m_perceptual.failedA = m_perceptual.failedB = false;
+    m_perceptual.draws = m_perceptual.depthUsed = m_perceptual.depthFallback = 0;
     auto& lut = m_svdLut;
     lut.model.Stop(fast || m_fastShutdown);
     lut.attempted = lut.failed = false;
     lut.clearViewSupported = false;
     lut.picture.Release();
     lut.nativeThumbnail.Release();
+    m_svdLutThumbnailShader.Release();
+    m_svdLutThumbnailConstants.Release();
     lut.thumbnail.Release();
     lut.lutSampler.Release();
     lut.constants.Release();
@@ -193,7 +209,7 @@ HRESULT CDX11VideoProcessor::PrepareSvdLutDraw()
 
     D3D11_BUFFER_DESC desc{};
     desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    desc.ByteWidth = 8 * sizeof(float);
+    desc.ByteWidth = 12 * sizeof(float);
     const auto created = m_pDevice->CreateBuffer(&desc, nullptr, &lut.constants);
     if (SUCCEEDED(created) && m_processingSize.cx > 0 && m_processingSize.cy > 0 && SupportedSdrFormat(m_SwapChainFmt)) {
         // Prepare the reusable surface before a resize needs it. If the
@@ -217,11 +233,53 @@ bool CDX11VideoProcessor::StartSvdLutModel()
 HRESULT CDX11VideoProcessor::EnsureSvdLutThumbnails()
 {
     auto& lut = m_svdLut;
-    const auto hr = lut.thumbnail.CheckCreate(m_pDevice, DXGI_FORMAT_R8G8B8A8_UNORM,
+    const auto hr = lut.thumbnail.CheckCreate(m_pDevice, ThumbFormat,
         ThumbSize, ThumbSize, Tex2D_DefaultShaderRTarget);
     if (FAILED(hr)) return hr;
-    return lut.staging.CheckCreate(m_pDevice, DXGI_FORMAT_R8G8B8A8_UNORM,
+    return lut.staging.CheckCreate(m_pDevice, ThumbFormat,
         ThumbSize, ThumbSize, Tex2D_StagingRead);
+}
+
+float CDX11VideoProcessor::BindSvdLutOutputDither(ID3D11Texture2D* target, bool enabled)
+{
+    float q = 0.0f;
+    if (enabled && m_bUseDither && m_TexDither.pShaderResource && target) {
+        D3D11_TEXTURE2D_DESC desc{};
+        target->GetDesc(&desc);
+        if (SupportedSdrFormat(desc.Format))
+            q = desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM ? 1023.0f : 255.0f;
+    }
+    ID3D11ShaderResourceView* view = q > 0.0f ? m_TexDither.pShaderResource.p : nullptr;
+    m_pDeviceContext->PSSetShaderResources(4, 1, &view);
+    return q;
+}
+
+HRESULT CDX11VideoProcessor::RenderSvdLutThumbnail(const Tex2D_t& source, ID3D11Texture2D* target,
+    const CRect& sample)
+{
+    if (!target || !source.pShaderResource || sample.IsRectEmpty() ||
+        sample.left < 0 || sample.top < 0 || sample.right > LONG(source.desc.Width) ||
+        sample.bottom > LONG(source.desc.Height)) return E_INVALIDARG;
+    if (!m_svdLutThumbnailShader) {
+        CComPtr<ID3DBlob> code;
+        auto hr = CompileShader(SvdLutThumbnailShader, nullptr, "ps_5_0", &code);
+        if (FAILED(hr)) return hr;
+        hr = m_pDevice->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr,
+            &m_svdLutThumbnailShader);
+        if (FAILED(hr)) return hr;
+    }
+    if (!m_svdLutThumbnailConstants) {
+        D3D11_BUFFER_DESC desc{};
+        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        desc.ByteWidth = 4 * sizeof(float);
+        const auto hr = m_pDevice->CreateBuffer(&desc, nullptr, &m_svdLutThumbnailConstants);
+        if (FAILED(hr)) return hr;
+    }
+    const float rect[4] = {float(sample.left), float(sample.top), float(sample.Width()), float(sample.Height())};
+    m_pDeviceContext->UpdateSubresource(m_svdLutThumbnailConstants, 0, nullptr, rect, 0, 0);
+    const CRect dst(0, 0, ThumbSize, ThumbSize);
+    return TextureCopyRect(source, target, sample, dst, m_svdLutThumbnailShader,
+        m_svdLutThumbnailConstants, 0, false);
 }
 
 HRESULT CDX11VideoProcessor::EnsureSvdLutPicture(DXGI_FORMAT format, UINT width, UINT height)
@@ -382,8 +440,7 @@ void CDX11VideoProcessor::CaptureSvdLut(REFERENCE_TIME timestamp, bool projected
     }
     m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
     if (!source->pShaderResource || sourceRect.IsRectEmpty() ||
-        FAILED(TextureCopyRect(*source, lut.thumbnail.pTexture, sourceRect, thumbnail, m_pPS_Simple,
-                               nullptr, 0, false, true))) return;
+        FAILED(RenderSvdLutThumbnail(*source, lut.thumbnail.pTexture, sourceRect))) return;
     m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
     m_pDeviceContext->CopyResource(lut.staging.pTexture, lut.thumbnail.pTexture);
     lut.captured = timestamp;
@@ -414,16 +471,17 @@ std::optional<CDX11VideoProcessor::SvdLutGrade> CDX11VideoProcessor::PrepareSvdL
 
     if (scene->fadeIn && lut.transitionStart == INVALID_TIME) lut.transitionStart = timestamp;
     const float fade = scene->fadeIn ? InitialGradeBlend(timestamp, lut.transitionStart) : 1.0f;
-    return SvdLutGrade{shader, scene->view.Get(), fade * (float(lut.strength) / SVDLUT_STRENGTH_MAX)};
+    return SvdLutGrade{shader, scene->view.Get(), fade * edition::svdstrength::AScale(lut.strength)};
 }
 
 HRESULT CDX11VideoProcessor::ApplySvdLutGrade(const SvdLutGrade& grade, const Tex2D_t& source, ID3D11Texture2D* target,
     const CRect& area, const CRect& visible, CPoint sourceOffset)
 {
     auto& lut = m_svdLut;
-    const float constants[8] = {
+    const float constants[12] = {
         float(visible.left), float(visible.top), float(visible.Width() - 1), float(visible.Height() - 1),
-        grade.blend, float(sourceOffset.x), float(sourceOffset.y), 0
+        grade.blend, float(sourceOffset.x), float(sourceOffset.y), 0,
+        BindSvdLutOutputDither(target), 0, 0, 0
     };
     CRect input = area;
     input.OffsetRect(sourceOffset);
@@ -434,6 +492,7 @@ HRESULT CDX11VideoProcessor::ApplySvdLutGrade(const SvdLutGrade& grade, const Te
     ID3D11ShaderResourceView* noView = nullptr;
     ID3D11SamplerState* noSampler = nullptr;
     m_pDeviceContext->PSSetShaderResources(1, 1, &noView);
+    m_pDeviceContext->PSSetShaderResources(4, 1, &noView);
     m_pDeviceContext->PSSetSamplers(1, 1, &noSampler);
     lut.failed = FAILED(hr);
     lut.active = !lut.failed;
@@ -443,11 +502,14 @@ HRESULT CDX11VideoProcessor::ApplySvdLutGrade(const SvdLutGrade& grade, const Te
 HRESULT CDX11VideoProcessor::DrawCompletedSvdLut(const CompletedFrame& frame, ID3D11Texture2D* target,
     const CRect& picture, bool geometryChanging)
 {
-    if (m_pFilter->m_svdLutOff.load()) return S_FALSE;
-    if (m_pFilter->m_svdLutRaw.load())
-        return DrawCompletedSvdLutRaw(frame, target, picture, geometryChanging);
+    if (m_pFilter->m_svdLutOff.load())
+        return DrawCompletedPerceptual(frame, target, picture, geometryChanging);
+    if (m_pFilter->m_svdLutRaw.load()) {
+        const auto hr = DrawCompletedSvdLutRaw(frame, target, picture, geometryChanging);
+        return hr == S_OK ? hr : DrawCompletedPerceptual(frame, target, picture, geometryChanging);
+    }
     const auto grade = PrepareSvdLutGrade(frame.pts);
-    if (!grade) return S_FALSE;
+    if (!grade) return DrawCompletedPerceptual(frame, target, picture, geometryChanging);
 
     D3D11_TEXTURE2D_DESC desc{};
     target->GetDesc(&desc);
@@ -459,6 +521,12 @@ HRESULT CDX11VideoProcessor::DrawCompletedSvdLut(const CompletedFrame& frame, ID
     const auto& source = frame.image.desc;
     if (frame.picture == picture && source.Width == desc.Width && source.Height == desc.Height &&
         source.Format == desc.Format && frame.image.pShaderResource) {
+        if (PerceptualEnabled()) {
+            const auto fused = ApplyPerceptual(frame.image, target, area, visible, CPoint(0, 0),
+                frame.pts, 1, grade->view, {1.0f, 1.0f, 1.0f}, false, grade->blend,
+                !geometryChanging && frame.picture == area);
+            if (fused == S_OK) return fused;
+        }
         return ApplySvdLutGrade(*grade, frame.image, target, area, visible, CPoint(0, 0));
     }
 
@@ -472,18 +540,30 @@ HRESULT CDX11VideoProcessor::DrawCompletedSvdLut(const CompletedFrame& frame, ID
     const auto& pictureTexture = m_svdLut.picture;
     const auto drawn = DrawCompletedVideo(frame, pictureTexture.pTexture, picture, geometryChanging, &area);
     if (drawn != S_OK) return drawn;
+    if (PerceptualEnabled()) {
+        const auto fused = ApplyPerceptual(pictureTexture, target, area, visible, CPoint(0, 0),
+            frame.pts, 1, grade->view, {1.0f, 1.0f, 1.0f}, false, grade->blend);
+        if (fused == S_OK) return fused;
+    }
     return ApplySvdLutGrade(*grade, pictureTexture, target, area, visible, CPoint(0, 0));
 }
 
 void CDX11VideoProcessor::DrawSvdLut(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME timestamp)
 {
-    if (m_pFilter->m_svdLutOff.load()) return;
+    if (m_pFilter->m_svdLutOff.load()) {
+        DrawPerceptual(target, picture, timestamp);
+        return;
+    }
     if (m_pFilter->m_svdLutRaw.load()) {
         DrawSvdLutRaw(target, picture, timestamp);
+        if (!m_svdLutRawTest.active) DrawPerceptual(target, picture, timestamp);
         return;
     }
     const auto grade = PrepareSvdLutGrade(timestamp);
-    if (!grade || !target) return;
+    if (!grade || !target) {
+        DrawPerceptual(target, picture, timestamp);
+        return;
+    }
 
     D3D11_TEXTURE2D_DESC desc{};
     target->GetDesc(&desc);
@@ -503,7 +583,190 @@ void CDX11VideoProcessor::DrawSvdLut(ID3D11Texture2D* target, const CRect& pictu
     const D3D11_BOX box{UINT(visible.left), UINT(visible.top), 0, UINT(visible.right), UINT(visible.bottom), 1};
     m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
     m_pDeviceContext->CopySubresourceRegion(lut.picture.pTexture, 0, 0, 0, 0, target, 0, &box);
+    if (PerceptualEnabled()) {
+        const auto fused = ApplyPerceptual(lut.picture, target, visible, visible,
+            CPoint(-visible.left, -visible.top), timestamp, 1, grade->view,
+            {1.0f, 1.0f, 1.0f}, false, grade->blend);
+        if (fused == S_OK) return;
+    }
     ApplySvdLutGrade(*grade, lut.picture, target, visible, visible, CPoint(-visible.left, -visible.top));
+}
+
+
+// P1: no new model, readback, asynchronous task, or full-size colour pass
+// when A/B is already drawing its LUT. Standalone mode replaces the normal
+// completed-frame blit where geometry permits.
+bool CDX11VideoProcessor::PerceptualEnabled() const
+{
+    return m_pFilter->m_preferredColors.load() || m_pFilter->m_skinTones.load();
+}
+
+HRESULT CDX11VideoProcessor::PreparePerceptualShader(int mode)
+{
+    auto& e = m_perceptual;
+    if (!e.constants) {
+        D3D11_BUFFER_DESC cb{};
+        cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        cb.ByteWidth = 24 * sizeof(float);
+        const auto hr = m_pDevice->CreateBuffer(&cb, nullptr, &e.constants);
+        if (FAILED(hr)) return hr;
+    }
+    if (!e.sampler) {
+        D3D11_SAMPLER_DESC desc{};
+        desc.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+        desc.AddressU = desc.AddressV = desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        const auto hr = m_pDevice->CreateSamplerState(&desc, &e.sampler);
+        if (FAILED(hr)) return hr;
+    }
+    bool& tried = mode == 1 ? e.triedA : mode == 2 ? e.triedB : e.triedStandalone;
+    bool& failed = mode == 1 ? e.failedA : mode == 2 ? e.failedB : e.failedStandalone;
+    auto& shader = mode == 1 ? e.normalA : mode == 2 ? e.rawB : e.standalone;
+    if (shader) return S_OK;
+    if (tried) return E_FAIL;
+    tried = true;
+    const D3D_SHADER_MACRO a[] = {{"P1_NORMAL_A", "1"}, {nullptr, nullptr}};
+    const D3D_SHADER_MACRO b[] = {{"P1_RAW_B", "1"}, {nullptr, nullptr}};
+    CComPtr<ID3DBlob> code;
+    HRESULT hr = CompileSvdLutOutputShader(PerceptualColorShader, mode == 1 ? a : mode == 2 ? b : nullptr, &code);
+    if (SUCCEEDED(hr))
+        hr = m_pDevice->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(),
+            nullptr, &shader);
+    failed = FAILED(hr);
+    return hr;
+}
+
+HRESULT CDX11VideoProcessor::ApplyPerceptual(const Tex2D_t& source, ID3D11Texture2D* target,
+    const CRect& area, const CRect& visible, CPoint offset, REFERENCE_TIME pts,
+    int mode, ID3D11ShaderResourceView* lut, std::array<float, 3> tone, bool useTone,
+    float blend, bool allowDepth)
+{
+    if (!PerceptualEnabled() || !target || (mode != 0 && !lut)) return S_FALSE;
+    if (FAILED(PreparePerceptualShader(mode))) return S_FALSE;
+    auto& e = m_perceptual;
+    auto* shader = mode == 1 ? e.normalA.p : mode == 2 ? e.rawB.p : e.standalone.p;
+    if (!shader) return S_FALSE;
+
+    ID3D11ShaderResourceView* depth = nullptr;
+    ID3D11ShaderResourceView* previousDepth = nullptr;
+    float confidence = 0.0f, rotated = 0.0f, previousRotated = 0.0f;
+    float historyWeight = 0.0f;
+    // The source depth is only safe at exact picture geometry. There is no
+    // arbitrary SR/MFG/letterbox coordinate guess and NEVER extra inference.
+    if (allowDepth && pts != INVALID_TIME && (UsesZipDepthSr() || UsesZipDepthMfg()) &&
+        visible == area && offset == CPoint(0, 0) &&
+        m_zipDepth.MatchesColorPicture(visible.Width(), visible.Height())) {
+        const auto estimate = m_zipDepth.ForFrame(pts);
+        const auto age = pts - estimate.pts;
+        if (estimate.view && estimate.pts != INVALID_TIME && age >= 0 && age < 1'900'000) {
+            // Fade stale depth softly, never snap colour at one timestamp.
+            confidence = 0.50f * (std::min)(1.0f,
+                float(1'900'000 - age) / 1'000'000.0f);
+            depth = estimate.view;
+            rotated = estimate.rotated ? 1.0f : 0.0f;
+            // Reuse a previous cached map from the SAME scene and capture size.
+            // No extra model invocation, GPU pass or CPU readback. The pixel
+            // shader can damp depth disagreement at a small sampling cost.
+            if (estimate.pts > 0) {
+                const auto previous = m_zipDepth.ForFrame(estimate.pts - 1);
+                if (previous.view && previous.pts >= 0 &&
+                    estimate.pts - previous.pts <= 1'500'000 &&
+                    previous.rotated == estimate.rotated) {
+                    previousDepth = previous.view;
+                    previousRotated = previous.rotated ? 1.0f : 0.0f;
+                    historyWeight = 1.0f;
+                }
+            }
+        }
+    }
+    const float cb[24] = {
+        float(visible.left), float(visible.top),
+        float(visible.Width() - 1), float(visible.Height() - 1),
+        blend, float(offset.x), float(offset.y), rotated,
+        tone[0], tone[1], tone[2], confidence,
+        m_pFilter->m_preferredColors.load() ? 1.0f : 0.0f,
+        m_pFilter->m_skinTones.load() ? 1.0f : 0.0f,
+        useTone ? 1.0f : 0.0f,
+        mode == 2 && useTone && m_pFilter->m_svdLutB2Memory.load() &&
+            !m_pFilter->m_svdLutR1Gamut.load() && !m_pFilter->m_svdLutM1Skin.load() ? 1.0f : 0.0f,
+        historyWeight, previousRotated,
+        0.01f, 0.0f, // 1% maximum linear-light distant-scene tonal lift-down.
+        BindSvdLutOutputDither(target, mode != 0), 0, 0, 0
+    };
+    CRect input(area);
+    input.OffsetRect(offset);
+    m_pDeviceContext->UpdateSubresource(e.constants, 0, nullptr, cb, 0, 0);
+    ID3D11ShaderResourceView* noView = nullptr;
+    ID3D11SamplerState* noSampler = nullptr;
+    m_pDeviceContext->PSSetShaderResources(1, 1, mode ? &lut : &noView);
+    m_pDeviceContext->PSSetShaderResources(2, 1, depth ? &depth : &noView);
+    m_pDeviceContext->PSSetShaderResources(3, 1, previousDepth ? &previousDepth : &noView);
+    m_pDeviceContext->PSSetSamplers(1, 1, &e.sampler.p);
+    m_pDeviceContext->PSSetSamplers(2, 1, depth ? &e.sampler.p : &noSampler);
+    const auto hr = TextureCopyRect(source, target, input, area, shader, e.constants, 0, false);
+    m_pDeviceContext->PSSetShaderResources(1, 1, &noView);
+    m_pDeviceContext->PSSetShaderResources(2, 1, &noView);
+    m_pDeviceContext->PSSetShaderResources(3, 1, &noView);
+    m_pDeviceContext->PSSetShaderResources(4, 1, &noView);
+    m_pDeviceContext->PSSetSamplers(1, 1, &noSampler);
+    m_pDeviceContext->PSSetSamplers(2, 1, &noSampler);
+    if (SUCCEEDED(hr)) {
+        ++e.draws;
+        if (depth && confidence > .001f) ++e.depthUsed;
+        else ++e.depthFallback;
+    }
+    return hr;
+}
+
+HRESULT CDX11VideoProcessor::DrawCompletedPerceptual(const CompletedFrame& frame,
+    ID3D11Texture2D* target, const CRect& picture, bool geometryChanging)
+{
+    if (!PerceptualEnabled() || !target ||
+        m_currentSwapChainColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 ||
+        SourceIsHDR() || m_bVPUseRTXVideoHDR || m_pPSHalfOUtoInterlace) return S_FALSE;
+    D3D11_TEXTURE2D_DESC d{};
+    target->GetDesc(&d);
+    const CRect area(0, 0, d.Width, d.Height);
+    CRect visible;
+    if (!SupportedSdrFormat(d.Format) || !visible.IntersectRect(picture, area) ||
+        visible.Width() < 2 || visible.Height() < 2) return S_FALSE;
+    if (frame.picture == picture && frame.image.desc.Width == d.Width &&
+        frame.image.desc.Height == d.Height && frame.image.desc.Format == d.Format &&
+        frame.image.pShaderResource) {
+        return ApplyPerceptual(frame.image, target, area, visible, CPoint(0, 0), frame.pts,
+            0, nullptr, {1.0f, 1.0f, 1.0f}, false, 1.0f,
+            !geometryChanging && frame.picture == area);
+    }
+    // Same scalable fallback as SVDLUT A/B: draw the normal picture once into
+    // an existing reusable texture, then apply the enhancement in the final draw.
+    if (FAILED(EnsureSvdLutPicture(d.Format, d.Width, d.Height))) return S_FALSE;
+    const auto drawn = DrawCompletedVideo(frame, m_svdLut.picture.pTexture, picture,
+        geometryChanging, &area);
+    if (drawn != S_OK) return drawn;
+    return ApplyPerceptual(m_svdLut.picture, target, area, visible, CPoint(0, 0), frame.pts, 0);
+}
+
+void CDX11VideoProcessor::DrawPerceptual(ID3D11Texture2D* target,
+    const CRect& picture, REFERENCE_TIME pts)
+{
+    if (!PerceptualEnabled() || !target ||
+        m_currentSwapChainColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 ||
+        SourceIsHDR() || m_bVPUseRTXVideoHDR || m_pPSHalfOUtoInterlace) return;
+    D3D11_TEXTURE2D_DESC desc{};
+    target->GetDesc(&desc);
+    CRect visible;
+    if (!SupportedSdrFormat(desc.Format) ||
+        !visible.IntersectRect(picture, CRect(0, 0, desc.Width, desc.Height)) ||
+        visible.Width() < 2 || visible.Height() < 2 ||
+        FAILED(EnsureSvdLutPicture(desc.Format, visible.Width(), visible.Height()))) return;
+    // Legacy pre-MFG path must first copy the target to a shader-readable
+    // surface; this copy is not needed on the direct completed-video path.
+    const D3D11_BOX box{UINT(visible.left), UINT(visible.top), 0,
+        UINT(visible.right), UINT(visible.bottom), 1};
+    m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+    m_pDeviceContext->CopySubresourceRegion(m_svdLut.picture.pTexture, 0, 0, 0, 0, target, 0, &box);
+    ApplyPerceptual(m_svdLut.picture, target, visible, visible,
+        CPoint(-visible.left, -visible.top), pts, 0);
 }
 
 #include "Edition/SvdLutRawMode.inc"

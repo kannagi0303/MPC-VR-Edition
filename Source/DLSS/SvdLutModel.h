@@ -42,7 +42,8 @@ public:
 
     ModelWorker();
     ~ModelWorker();
-    bool Start(IDXGIAdapter* adapter, ID3D11Device* renderDevice, const std::filesystem::path& directory);
+    bool Start(IDXGIAdapter* adapter, ID3D11Device* renderDevice, const std::filesystem::path& directory,
+               bool regularizeB = false);
     void Stop(bool fast);
     void Invalidate();
     bool ReadyForInput() const;

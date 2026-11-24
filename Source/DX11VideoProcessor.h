@@ -36,6 +36,7 @@
 
 #include "Edition/DX11Dependencies.h"
 #include "Edition/CompletedBufferPolicy.h"
+#include "Edition/GpuLoadSampler.h"
 
 class CVideoRendererInputPin;
 

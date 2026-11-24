@@ -20,8 +20,10 @@ uint64_t TextureBytes(const D3D11_TEXTURE2D_DESC& desc)
 
 bool CDX11VideoProcessor::CanBufferCompletedSample() const
 {
+    // The completed queue belongs to the presenter, not to MFG. A 60 fps
+    // source on a 60 Hz display can still benefit from buffering SR/VSR work;
+    // only the generation path should bypass MFG at the display rate.
     return !m_completedFailed && !m_completedPresenter.Failed() && m_pDXGISwapChain1 &&
-        !(m_mfgMultiplier && MfgSourceMeetsDisplayRate()) &&
         m_pDevice && m_pDeviceContext && m_srcDXGIFormat == DXGI_FORMAT_NV12 &&
         m_SwapChainFmt == DXGI_FORMAT_B8G8R8A8_UNORM && !m_bInterlaced && !m_bDoubleFrames &&
         !SourceIsHDR() && !m_bVPUseRTXVideoHDR && !m_bVPRTXVideoHDR && !m_pPSHalfOUtoInterlace &&
@@ -535,7 +537,10 @@ REFERENCE_TIME CDX11VideoProcessor::CompletedSubmitLead()
 
 REFERENCE_TIME CDX11VideoProcessor::CompletedBackBufferLead(const CompletedFrame& frame, REFERENCE_TIME submitLead) const
 {
-    if (!m_completedPresentWaitable || !m_completedLast || !frame.mfg || !m_mfgMultiplier ||
+    // Pre-draw is an output-stage optimization for any completed frame, not
+    // just MFG batches. Leave the first present, VBlank-before-present, resize
+    // transitions, and non-waitable swap chains on the normal submit schedule.
+    if (!m_completedPresentWaitable || !m_completedLast ||
         m_completedBackBuffer.frameFence == frame.fence || m_bVBlankBeforePresent || CompletedGeometryChanging()) {
         return submitLead;
     }
@@ -720,7 +725,8 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
     }
     if (hr == S_OK) {
         const auto run = m_pFilter->m_featureStatusPlaybackRun.load(std::memory_order_relaxed);
-        if (m_completedPresentWaitable && frame.mfg) m_completedPreDraw.Observe(run, readFence != 0);
+        // Count all compatible completed presents, including ungenerated originals.
+        if (m_completedPresentWaitable) m_completedPreDraw.Observe(run, readFence != 0);
         if (m_bShowStats && m_mfgMultiplier) {
             m_completedCadence.Observe(run, finished, frame.pts, frame.due);
         } else if (m_completedCadence.lastTick) {

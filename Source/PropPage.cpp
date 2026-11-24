@@ -478,9 +478,11 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 					m_SetsPP.iJvrReprojection = m_oldJvrReprojection;
 					m_SetsPP.iJvrEye = m_oldJvrEye;
 				}
+                m_svdLutBStrength = 200;
 				SetControls();
 				EnableControls();
 				PreviewSvdLutStrength(m_SetsPP.GetSvdLutStrength());
+                PreviewSvdLutBStrength(m_svdLutBStrength);
 				SetDirty();
 				return (LRESULT)1;
 			}

@@ -51,4 +51,18 @@
 
 ## 歷史與產物
 
+- 2026-11-24 新增 `Export-Project-For-GPT.cmd`，雙擊後由 `build-support/export-project-for-gpt.ps1` 掃描目前工作區，將 ZIP 存在專案根目錄。保留程式、附屬資源和 notes 的相對路徑，排除建置產物、發行包、快取及模型二進位。規則集中於 PowerShell 腳本，不依賴 Git。
+
 前五輪交接、設計及地圖保留在 notes/history/2026-11-19-edition-boundary-stage-*-*.md。第六輪開始快照在 _bin/native-settings-check/before/，測試／差異／官方 body 比對與 build 紀錄同目錄；更早快照在 _bin/minimal-boundary-check/、_bin/edition-refactor-check/、_bin/edition-refinement-check/。根目錄 handoff 與成品緩衝歷史未刪減。
+
+## 2026-11-24 — SVDLUT Reference Pipeline Correction
+
+Current reference pipeline changes and tests: `notes/svdlut-reference-pipeline.md` (authoritative for this round). Based on exact user archive 20261124-145114-817 and matching actual graph. Fixed point-downsample/extra thumbnail quantization, checked external tensor layouts, fused native dither at grade UNORM write. Portable input/CPU graph tests passed; Windows shader and x64 Release unverified. Existing architecture and B2/temporal/MFG decisions retained. Root `handoff.md` records previous integrated calibration plus this update. No commit or deployment.
+
+## 2026-11-24 — B2.1 Adaptive Luma Participation
+
+Current incremental work: `notes/svdlut-b21-adaptive-luma.md` and adjacent results JSONL. Preserves the previously delivered SVDLUT reference pipeline, replaces three-zone B2.1 gains with independent source-conditioned luma participation and gamut-safe chroma recomposition. User's three cards plus four natural photos tested offline against actual graph; Windows build/shaders/page tests pending. Cumulative overlay against original 20261124-145114-817 archive, no unshipped multi-constraint experiment, no commit or deployment.
+
+## 2026-11-24 — B2.2 Source-Adaptive Chroma candidate
+
+User reports actual B2.1 playback feels good and more suitable than A. Preserve B2.1 unchanged. Optional B2.2 candidate implemented, source-relative soft knee at unchanged B2.1 code-luma. See `notes/svdlut-b22-adaptive-chroma.md` and results JSONL. Incremental overlay against already applied B21 package; no new runtime dependencies. Portable scalar/actual graph tests passed; Windows compile/shader/page tests and real playback pending. No commit or deployment.

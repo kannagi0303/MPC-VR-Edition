@@ -24,6 +24,7 @@
 #include "DX11VideoProcessor.h"
 #include "VideoRenderer.h"
 #include "Mfg/CadenceTrace.h"
+#include "Edition/GpuLoadSampler.h"
 
 void CDX11VideoProcessor::RecordEditionVsr(const CRect& input, const CRect& output, bool afterMfg)
 {
@@ -190,10 +191,11 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
     const bool svdBUnsupported = svdRaw && (SourceIsHDR() || m_bVPUseRTXVideoHDR ||
         m_currentSwapChainColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 ||
         m_pPSHalfOUtoInterlace);
-	const auto svdStats = svdOff ? L"Off" : svdRaw
+	const auto svdStats = (svdOff || (svdRaw && m_pFilter->m_svdLutBStrength.load() == 0)) ? L"Off" : svdRaw
         ? (svdBUnsupported ? L"B (SDR color path required)" :
-            svdTemporal ? (m_svdLutRawTest.completed ? L"Temporal B1" : L"Temporal B1 (loading)") :
-            m_svdLutRawTest.active ? L"RAW B/frame" : L"B (loading)")
+            svdTemporal ? (m_svdLutRawTest.completed ?
+                std::format(L"Temporal B1 {}%", m_pFilter->m_svdLutBStrength.load()) : L"Temporal B1 (loading)") :
+            m_svdLutRawTest.active ? std::format(L"RAW B {}%", m_pFilter->m_svdLutBStrength.load()) : L"B (loading)")
 		: (m_svdLut.strength && m_svdLut.active ? std::format(L"{}%", m_svdLut.strength) : L"Off");
 
 	const bool hasVideoBuffer = m_completedLast || CompletedFramesPending();
@@ -218,38 +220,6 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 				m_completedBufferStats += std::format(L" | 10 s low {}%", *low);
 			}
 			if (time.nonIncreasing) m_completedBufferStats += std::format(L"\nBuffer order  {} out of order", time.nonIncreasing);
-			if (m_completedFence && time.fence != UINT64_MAX) {
-				constexpr double mib = 1024.0 * 1024.0;
-				const auto pool = GetCompletedPoolUsage(time.fence);
-				m_completedBufferStats += std::format(L"\nPool (MiB)    {:.0f}/{:.0f} | Reusable {:.0f} | Held {:.0f} | Reserved {:.0f}",
-					pool.Retained() / mib, m_completedByteLimit / mib, pool.reusable / mib,
-					pool.gpuPending / mib, PendingGeneratedBytes() / mib);
-			}
-			const auto& drops = m_completedStatsDrops;
-			if (m_completedBufferStatsTick && (drops.ngxLate || drops.composeLate || drops.presentLate || drops.budget || drops.other)) {
-				m_completedBufferStats += std::format(L"\nMFG drops ({} ms)", now - m_completedBufferStatsTick);
-				auto appendDrop = [&, first = true](const wchar_t* label, unsigned count) mutable {
-					if (!count) return;
-					m_completedBufferStats += std::format(L"{}{} {}", first ? L"  " : L" | ", label, count);
-					first = false;
-				};
-				appendDrop(L"NGX", drops.ngxLate);
-				appendDrop(L"Compose", drops.composeLate);
-				appendDrop(L"Present", drops.presentLate);
-				appendDrop(L"Budget", drops.budget);
-				appendDrop(L"Other", drops.other);
-			}
-			const auto& cadence = m_completedCadence;
-			const auto frequency = GetPreciseTicksPerSecond();
-			if (cadence.submit.high > 0 && frequency > 0 && cadence.playbackRun == run) {
-				const auto range = [](const auto& values, double scale) {
-					const auto low = edition::CompactNumber(values.low * scale);
-					const auto high = edition::CompactNumber(values.high * scale);
-					return low == high ? low : low + L"-" + high;
-				};
-				m_completedBufferStats += std::format(L"\nCadence (ms)  Submit {} | Due {} | Media {}",
-					range(cadence.submit, 1000.0 / frequency), range(cadence.due, 0.0001), range(cadence.media, 0.0001));
-			}
 		}
 		m_completedStatsDrops = {};
 		m_completedCadence.ClearWindow();
@@ -263,104 +233,108 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 		srStats, vsrStats, mfgStats, depthActive ? L"On" : L"Off", svdStats, level);
 
 	if (m_showEditionDetails) {
-		str += L"\n\nEdition details";
+		// Keep the full diagnostic counters in their owners, but do not rebuild
+		// a multi-page text dump every time Statistics is displayed.
+		str += L"\n\nGPU / timing";
+		if (m_VendorId == PCIV_NVIDIA) {
+			if (!m_gpuLoadSampler) m_gpuLoadSampler = std::make_unique<edition::GpuLoadSampler>();
+			const auto gpu = m_gpuLoadSampler->Read();
+			const auto value = [](int v) -> std::wstring {
+				return v >= 0 ? std::format(L"{}%", v) : L"n/a";
+			};
+			str += std::format(L"\nGPU activity  {} | Memory bus {}", value(gpu.gpu), value(gpu.memory));
+			str += std::format(L"\nEngines       Decode {} | Encode {} | OFA {}",
+				value(gpu.decoder), value(gpu.encoder), value(gpu.opticalFlow));
+			// This is one NVML signal, not two independent measures.
+			str += std::format(L"\nCore idle     {} | 6-sample idle low {}",
+				value(gpu.gpu >= 0 ? 100 - gpu.gpu : -1), value(gpu.idleLow));
+		} else {
+			str += L"\nGPU activity  n/a (NVML: NVIDIA only)";
+		}
+		// NVML GPU idle is NOT a full pipeline GPU frame deadline measurement.
+		// DLSS SR, ZipDepth and DX12 MFG can overlap on independent timelines.
+		// Never turn (100 - GPU load) into an invented per-frame headroom.
+		if (running && m_dRefreshPeriodMs > 0.0) {
+			str += std::format(L"\nFrame budget  {:.2f} ms | GPU frame headroom n/a", m_dRefreshPeriodMs);
+		} else {
+			str += L"\nGPU frame headroom n/a";
+		}
+		if (srActive && sr.ngxGpuTimeValid) {
+			str += std::format(L"\nDLSS SR GPU   {:.2f} ms (NGX only)", sr.ngxGpuMs);
+		}
+		if (zipDepthEnabled && depth.gpuTimings.available) {
+			str += std::format(L"\nZipDepth GPU  {:.2f} / {:.2f} / {:.2f} ms (pack/model/post)",
+				depth.gpuTimings.packMs, depth.gpuTimings.modelMs, depth.gpuTimings.postMs);
+		}
+
 		const bool mfgActive = !mfgReason && m_mfgMultiplier && m_mfg.InputSize().cx;
 		if (mfgActive || m_completedPresentWaitable) {
 			str += L"\nPresent       ";
 			str += displayFps ? std::format(L"DXGI {} fps", edition::CompactNumber(*displayFps)) : L"DXGI n/a";
-			if (m_completedPresentWaitable) {
-				str += L" | Flip 3 buffers";
-				if (m_completedPreDraw.playbackRun == run && m_completedPreDraw.count) {
-					str += std::format(L" | Pre-draw {}/{}", m_completedPreDraw.frames.count(), m_completedPreDraw.count);
-				}
-			}
-			if (skippedPerSec >= 0.1) str += std::format(L" | {} skipped/s", edition::CompactNumber(skippedPerSec));
+			if (skippedPerSec >= 0.1)
+				str += std::format(L" | {} skipped/s", edition::CompactNumber(skippedPerSec));
 		}
-		if (hasVideoBuffer) str.append(m_completedBufferStats);
-		if (mfgActive && (srActive || vsrActive)) {
-			const auto* scaler = srActive ? L"DLSS SR" : L"VSR";
-			const bool afterMfg = srActive ? m_dlssSRAfterMfg : m_editionVsr.afterMfg;
-			str += afterMfg ? std::format(L"\nPipeline      MFG -> {}", scaler)
-				: std::format(L"\nPipeline      {} -> MFG", scaler);
+		if (hasVideoBuffer) {
+			str.append(m_completedBufferStats);
 		}
 		const auto lostOriginals = m_mfgLostReal.load(std::memory_order_relaxed);
-		if (lostOriginals > m_editionOriginalDropsBase) {
+		if (lostOriginals > m_editionOriginalDropsBase)
 			str += std::format(L"\nOriginal drops {}", lostOriginals - m_editionOriginalDropsBase);
-		}
 		if (mfgReason) str += std::format(L"\nMFG           {}", mfgReason);
 		if (srSelected && !srActive) {
-			const auto* status = m_dlssSR.Preparing() ? L"Preparing" :
-				m_dlssSRInputStatus ? m_dlssSRInputStatus : L"Inactive";
-			str += std::format(L"\nDLSS SR       {}", status);
-		}
-		if (m_VendorId == PCIV_NVIDIA && !srSelected && m_iVPSuperRes != SUPERRES_Disable && !vsrActive) {
-			str += m_bVPUseSuperRes ? L"\nVSR           No upscale recorded" : L"\nVSR           Unavailable on current path";
+			str += std::format(L"\nDLSS SR       {}", m_dlssSR.Preparing() ? L"Preparing" :
+				m_dlssSRInputStatus ? m_dlssSRInputStatus : L"Inactive");
 		}
 		if (zipDepthEnabled) {
 			const auto cache = m_zipDepth.GetCacheStats(playbackPts);
-			if (cache.capacity) {
-				str += std::format(L"\nZipDepth      {}/{} cached", cache.cached, cache.capacity);
-				if (playbackPts >= 0) str += std::format(L" | {} ahead", cache.ahead);
-				if (depth.lateMaps) str += std::format(L" | {} late", depth.lateMaps);
-			} else {
-				str += std::format(L"\nZipDepth      {}", m_zipDepth.Status());
-			}
+			str += cache.capacity ?
+				std::format(L"\nZipDepth      {}/{} cached | {} late maps", cache.cached, cache.capacity, depth.lateMaps) :
+				std::format(L"\nZipDepth      {}", m_zipDepth.Status());
 		}
+        if (PerceptualEnabled()) {
+            str += std::format(L"\nPreferred/Skin {} / {} | Depth {} used / {} fallback",
+                m_pFilter->m_preferredColors.load() ? L"On" : L"Off",
+                m_pFilter->m_skinTones.load() ? L"On" : L"Off",
+                m_perceptual.depthUsed, m_perceptual.depthFallback);
+            if (m_perceptual.failedStandalone || m_perceptual.failedA || m_perceptual.failedB)
+                str += L"\nPerceptual    shader compile failed (fallback)";
+        }
 		if (svdRaw) {
 			const auto& b = m_svdLutRawTest;
-			str += std::format(L"\nSVDLUT RAW B  {}/{} frames", b.completed, b.requests);
-			if (b.completed && GetPreciseTicksPerSecond()) {
-				const double factor = 1000.0 / GetPreciseTicksPerSecond() / b.completed;
-				if (svdTemporal) {
-					str += std::format(L" | async result latency {:.2f} ms avg", b.modelTicks * factor);
-				} else {
-					str += std::format(L" | inference {:.2f} ms | total {:.2f} ms avg",
-						b.modelTicks * factor, b.stageTicks * factor);
-				}
-			}
-			if (svdTemporal) {
-				str += std::format(L"\nB temporal    {} blended | {} future LUTs | {} prefetch | {} rejected | {} last-window",
-					b.temporalFrames, b.temporalFuture, b.prefetched, b.temporalRejected, b.lastWindow);
-                str += std::format(L"\nB output      {} graded draws | {} no-LUT | {} cached selections",
-                    b.appliedDraws, b.ungraded, b.reusedGrade);
-                str += std::format(L"\nB presented   {} graded | {} ungraded (successful Presents)",
-                    b.presentedGraded, b.presentedUngraded);
-                str += std::format(L"\nB async       {} results after eviction | {} thumbnails skipped | {} early source thumbnails",
-                    b.missedResult, b.skippedCapture, b.earlyPrimed);
-                if (m_pFilter->m_svdLutB2Luminance.load())
-                {
-                    const double b2Ms = b.b2Analyses && GetPreciseTicksPerSecond() ?
-                        double(b.b2AnalysisTicks) * 1000.0 /
-                        double(GetPreciseTicksPerSecond()) / double(b.b2Analyses) : 0.0;
-                    str += std::format(L"\nB2 zonal      {} analyses | {} adjusted draws | S/M/H {:.2f}/{:.2f}/{:.2f} | B1 shift {:.2f} EV | fit residual {:.2f} EV",
-                        b.b2Analyses, b.b2AdjustedDraws,
-                        b.b2LastTone[0], b.b2LastTone[1], b.b2LastTone[2],
-                        b.b2LastSourceShiftEv, b.b2LastResidualEv);
-                    str += std::format(L"\nB2 budget     {:.3f} ms/analysis avg | {} low-buffer reuse | {} shot resets | {} samples",
-                        b2Ms, b.b2BudgetSkips, b.b2ShotResets, b.b2LastSamples);
-                }
-                if (m_pFilter->m_svdLutB2Memory.load())
-                    str += std::format(L"\nB2 memory     {} gamut/memory shader draws{}",
-                        b.b2MemoryDraws, b.b2MemoryShaderFailed ? L" | shader compile failed" : L"");
-                if (m_pFilter->m_svdLutR1Gamut.load())
-                    str += std::format(L"\nR1 gamut      {} continuity shader draws{}",
-                        b.r1GamutDraws, b.r1GamutShaderFailed ? L" | shader compile failed (fallback)" : L"");
-                if (m_pFilter->m_svdLutB2Luminance.load() && b.b2ShaderFailed)
-                    str += L" | B2.1 shader compile failed";
-			}
+			str += std::format(L"\nSVDLUT B      {}/{} analyzed | {} graded | {} ungraded",
+				b.completed, b.requests, b.presentedGraded, b.presentedUngraded);
+            if (svdTemporal && b.grayProbe.valid) {
+                const auto& probe = b.grayProbe;
+                // Synthetic gray (not sampled from the output), prior to
+                // B2.1/Preferred/Skin/Depth/SR/MFG and display conversion.
+                const wchar_t* origin = probe.source == 1 ? L"temporal" :
+                    probe.source == 2 ? L"held" : L"raw";
+                str += std::format(
+                    L"\nB1 gray 236   LUT {:.0f}/{:.0f}/{:.0f} | B mix {:.0f}/{:.0f}/{:.0f} ({})",
+                    probe.model[0] * 255.0f, probe.model[1] * 255.0f,
+                    probe.model[2] * 255.0f,
+                    probe.strengthMixed[0] * 255.0f, probe.strengthMixed[1] * 255.0f,
+                    probe.strengthMixed[2] * 255.0f, origin);
+            } else if (svdTemporal) {
+                str += L"\nB1 gray 236   n/a (selected LUT data unavailable)";
+            }
+            if (svdTemporal && m_pFilter->m_svdLutB2Luminance.load() && b.b2Analyses) {
+                str += std::format(L"\nB2.1 analysis  {:.1f}% luma | {:.2f} EV candidate shift",
+                    b.b2LastTone[0] * 100.0f, b.b2LastSourceShiftEv);
+            }
+			if (m_pFilter->m_svdLutB2Memory.load() && b.b2MemoryShaderFailed)
+				str += L"\nB2 memory     shader compile failed";
+			if (m_pFilter->m_svdLutR1Gamut.load() && b.r1GamutShaderFailed)
+				str += L"\nR1 gamut      shader compile failed (fallback)";
+			if (m_pFilter->m_svdLutB2Luminance.load() && b.b2ShaderFailed)
+				str += L"\nB2.1          shader compile failed";
 			if (b.model.GetState() == svdlut::ModelWorker::State::Failed || b.failed)
-				str += std::format(L" | {}", SvdLutStatus());
-		} else if (!svdOff && m_svdLut.strength) {
-			if (m_svdLut.active) {
-				const auto ready = std::count_if(m_svdLut.scenes.begin(), m_svdLut.scenes.end(),
-					[](const auto& scene) { return bool(scene.view); });
-				str += std::format(L"\nSVDLUT        {} scenes ready", ready);
-			} else {
-				str += std::format(L"\nSVDLUT        {}", SvdLutStatus());
-			}
+				str += std::format(L"\nSVDLUT error  {}", SvdLutStatus());
+		} else if (!svdOff && m_svdLut.strength && !m_svdLut.active) {
+			str += std::format(L"\nSVDLUT        {}", SvdLutStatus());
 		}
-
 	}
+
 	return separator;
 }
 

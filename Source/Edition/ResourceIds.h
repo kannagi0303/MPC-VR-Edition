@@ -31,6 +31,10 @@
 #define IDC_SVDLUT_B2_LUMINANCE           5034
 #define IDC_SVDLUT_B2_MEMORY              5035
 #define IDC_SVDLUT_R1_GAMUT                5036
+#define IDC_SKIN_TONES                     5037
+#define IDC_PREFERRED_COLORS               5038
+#define IDC_SVDLUT_B_STRENGTH             5039
+#define IDC_SVDLUT_B_VALUE                5040
 #define IDC_SHOW_DEPTH_OVERLAY            5023
 #define IDC_JVR_FLAT_VIEW                  1372
 #define IDC_JVR_VERTICAL                   1373

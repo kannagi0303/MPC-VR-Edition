@@ -113,6 +113,11 @@ private:
     std::atomic_bool m_svdLutB2Luminance = false; // B2.1, independent durable opt-in; B1 untouched.
     std::atomic_bool m_svdLutB2Memory = false; // B2.2 selective memory-colour protection; independent.
     std::atomic_bool m_svdLutR1Gamut = false; // R1 opt-in continuity variant; B2.2 remains intact.
+    std::atomic_bool m_svdLutM1Skin = false; // M1 opt-in source-reference skin guard on B2.2/R1.
+    std::atomic_bool m_svdLutD1Depth = false; // Historical D1, retired from UI/registry; never auto-enable.
+    std::atomic_bool m_preferredColors = false; // Independent active Preferred Colors enhancement.
+    std::atomic_bool m_skinTones = false; // Independent active Skin Tones enhancement.
+    std::atomic_int m_svdLutBStrength = 200; // RAW/Temporal B independent 0..200; 200=pre-P3 full effect.
 
 	FILTER_STATE m_filterState = State_Stopped;
 	bool m_bFlushing = false;

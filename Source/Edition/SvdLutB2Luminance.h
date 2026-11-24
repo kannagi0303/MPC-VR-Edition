@@ -72,12 +72,13 @@ inline std::array<float, 3> ApplyTone(const std::array<float, 3>& original,
     return {Unit(graded[0] * gain), Unit(graded[1] * gain), Unit(graded[2] * gain)};
 }
 
-// Interior plane RGB interpolation, consistent with the existing B1 shader.
+// Packed plane RGB interpolation; default interior, optional edge variant.
 inline std::array<float, 3> ApplyB1(std::span<const float> lut,
-    const std::array<float, 3>& rgb)
+    const std::array<float, 3>& rgb, unsigned variant = 0)
 {
     std::array<float, 3> output{};
-    if (lut.size() != Values) return output;
+    if (lut.size() != Values || variant >= 4) return output;
+    const size_t base = variant * 3;
     const auto plane = [&](size_t layer, float u, float v, size_t channel) {
         const float x = Unit(u) * float(Width - 1);
         const float y = Unit(v) * float(Width - 1);
@@ -93,9 +94,9 @@ inline std::array<float, 3> ApplyB1(std::span<const float> lut,
         return top + ty * (bottom - top);
     };
     for (size_t c = 0; c < 3; ++c)
-        output[c] = Unit(plane(0, rgb[0], rgb[1], c) +
-                         plane(1, rgb[0], rgb[2], c) +
-                         plane(2, rgb[1], rgb[2], c));
+        output[c] = Unit(plane(base, rgb[0], rgb[1], c) +
+                         plane(base + 1, rgb[0], rgb[2], c) +
+                         plane(base + 2, rgb[1], rgb[2], c));
     return output;
 }
 

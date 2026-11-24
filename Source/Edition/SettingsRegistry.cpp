@@ -215,7 +215,7 @@ void ReadSettings(CRegKey& key, Settings_t& sets)
 	if (key.QueryDWORDValue(L"SvdLutStrength", dw) == ERROR_SUCCESS && dw <= SVDLUT_STRENGTH_MAX) {
 		sets.SetSvdLutStrength(static_cast<int>(dw));
 	} else if (key.QueryDWORDValue(L"SvdLut", dw) == ERROR_SUCCESS) {
-		sets.SetSvdLutStrength(dw ? SVDLUT_STRENGTH_MAX : 0);
+		sets.SetSvdLutStrength(dw ? 100 : 0); // old enable flag meant previous A 100%
 	}
 	if (key.QueryDWORDValue(L"JvrFlatView", dw) == ERROR_SUCCESS) sets.bJvrFlatView = dw != 0;
 	if (key.QueryDWORDValue(L"JvrVerticalFraming", dw) == ERROR_SUCCESS &&

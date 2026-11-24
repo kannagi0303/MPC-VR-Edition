@@ -27,8 +27,11 @@
 
 HRESULT CDX11VideoProcessor::CreateEditionWindowedSwapChain(DXGI_SWAP_CHAIN_DESC1& desc)
 {
-    if (m_mfgMultiplier.load(std::memory_order_relaxed) >= 2 && desc.BufferCount == 2 &&
-        desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM && desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD) {
+    // Flip triple-buffering is a presentation capability, independent of MFG.
+    // Only upgrade the existing compatible SDR BGRA8 windowed flip path;
+    // preserve HDR/deep-color, exclusive fullscreen and legacy swap chains.
+    if (desc.BufferCount == 2 && desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM &&
+        desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD) {
         auto paced = desc;
         paced.BufferCount = 3;
         paced.Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;

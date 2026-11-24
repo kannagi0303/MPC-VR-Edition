@@ -44,6 +44,8 @@
     <ClInclude Include="DLSS\SvdLutModel.h" />
     <ClInclude Include="DLSS\SvdLutModel.inc" />
     <ClInclude Include="DLSS\SvdLutShader.h" />
+    <ClInclude Include="Edition\SvdLutInput.h" />
+    <ClInclude Include="Edition\SvdLutB2AdaptiveLuma.h" />
     <ClInclude Include="DLSS\ZipDepthPack.h" />
     <ClInclude Include="DLSS\ZipDepthGpuShaders.h" />
     <ClInclude Include="DLSS\ZipDepthTemporalShaders.h" />

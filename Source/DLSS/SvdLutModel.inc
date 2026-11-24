@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Included by ZipDepthNative.cpp so both native models use the same graph helpers.
 #include "SvdLutModel.h"
+#include "../Edition/SvdLutLutRegularity.h"
 
 #include <d3d12.h>
 #include <dxgi.h>
@@ -26,6 +27,33 @@ constexpr std::array<UINT64, 4> OutputBytes{
 };
 constexpr std::array<std::string_view, 4> OutputNames{"lut_planes", "lut_mix", "grid_planes", "grid_mix"};
 constexpr UINT64 ReadbackBytes = OutputBytes[0] + OutputBytes[1] + OutputBytes[2] + OutputBytes[3];
+
+// The graph stores two outputs flattened intentionally; validate storage shape,
+// not just the same byte count (e.g. a transposed RGB plane is not compatible).
+constexpr std::array<uint32_t, 4> InputShape{1, 3, InputSize, InputSize};
+constexpr std::array<std::array<uint32_t, 4>, 4> OutputShapes{{
+    {1, 9, LutSize, LutSize}, {1, 1, 1, 12},
+    {1, 1, 1, 18 * GridSize * GridSize}, {1, 1, 1, 24}
+}};
+void CheckSvdLutTensor(const DmlBufferTensorDesc* tensor, UINT64 bytes,
+    const std::array<uint32_t, 4>& shape)
+{
+    CheckTensor(tensor, bytes);
+    if (tensor->sizes.size() != shape.size() ||
+        !std::equal(shape.begin(), shape.end(), tensor->sizes.begin()))
+        throw std::runtime_error("Incompatible SVDLUT tensor shape");
+    if (tensor->strides) {
+        const auto& strides = *tensor->strides;
+        if (strides.size() != shape.size()) throw std::runtime_error("Incompatible SVDLUT strides");
+        uint32_t stride = 1;
+        for (size_t i = shape.size(); i-- > 0;) {
+            // Singleton axes never contribute to the address.
+            if (shape[i] > 1 && strides[i] != stride)
+                throw std::runtime_error("Non-contiguous SVDLUT tensor");
+            stride *= shape[i];
+        }
+    }
+}
 
 class StartupTrace {
     std::unique_ptr<void, decltype(&CloseHandle)> m_file{nullptr, CloseHandle};
@@ -130,14 +158,15 @@ UINT InitializeModel(NativeGraphExecution& graph, ID3D12Device* device, ID3D12Co
     for (const auto& edge : decoded.InputEdges) {
         if (edge.GraphInputIndex != 0) throw std::runtime_error("Unexpected SVDLUT input");
         const auto& op = std::get<AbstractOperatorDesc>(decoded.Nodes.at(edge.ToNodeIndex).Desc);
-        CheckTensor(op.GetInputTensors().at(edge.ToNodeInputIndex), ImageBytes);
+        CheckSvdLutTensor(op.GetInputTensors().at(edge.ToNodeInputIndex), ImageBytes, InputShape);
     }
     std::array<bool, OutputNames.size()> seen{};
     for (const auto& edge : decoded.OutputEdges) {
         if (seen.at(edge.GraphOutputIndex)) throw std::runtime_error("Duplicate SVDLUT output");
         seen[edge.GraphOutputIndex] = true;
         const auto& op = std::get<AbstractOperatorDesc>(decoded.Nodes.at(edge.FromNodeIndex).Desc);
-        CheckTensor(op.GetOutputTensors().at(edge.FromNodeOutputIndex), OutputBytes[edge.GraphOutputIndex]);
+        CheckSvdLutTensor(op.GetOutputTensors().at(edge.FromNodeOutputIndex), OutputBytes[edge.GraphOutputIndex],
+            OutputShapes[edge.GraphOutputIndex]);
     }
     trace.Mark("Map initializer weights");
     std::unordered_map<std::string_view, std::uint32_t> slots;
@@ -358,6 +387,7 @@ struct ModelWorker::Impl {
     uint64_t generation = 0;
     bool running = false;
     bool stopping = false;
+    bool regularizeB = false;
 
     void RequestStop()
     {
@@ -397,6 +427,12 @@ struct ModelWorker::Impl {
                 guard.unlock();
                 if (first) trace.Mark("First DirectML dispatch");
                 auto parameters = model.Evaluate(*image);
+                if (regularizeB && parameters) {
+                    // Regularity is optional: allocation failure must not disable
+                    // SVDLUT playback or alter its existing fallback path.
+                    try { regularity::Regularize(*parameters); }
+                    catch (const std::bad_alloc&) {}
+                }
                 guard.lock();
                 const bool current = !stopping && generation == submittedGeneration;
                 guard.unlock();
@@ -441,7 +477,8 @@ std::vector<std::unique_ptr<ModelWorker::Impl>> ModelWorker::Impl::retired;
 ModelWorker::ModelWorker() = default;
 ModelWorker::~ModelWorker() = default;
 
-bool ModelWorker::Start(IDXGIAdapter* adapter, ID3D11Device* renderDevice, const std::filesystem::path& directory)
+bool ModelWorker::Start(IDXGIAdapter* adapter, ID3D11Device* renderDevice,
+                        const std::filesystem::path& directory, bool regularizeB)
 {
     if (!renderDevice || (renderDevice->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED)) return false;
     {
@@ -450,6 +487,7 @@ bool ModelWorker::Start(IDXGIAdapter* adapter, ID3D11Device* renderDevice, const
     }
     try {
         auto impl = std::make_unique<Impl>();
+        impl->regularizeB = regularizeB;
         impl->thread = std::thread([job = impl.get(), adapter = ComPtr<IDXGIAdapter>(adapter),
                                    device = ComPtr<ID3D11Device>(renderDevice), directory] {
             job->Run(adapter.Get(), device.Get(), directory);

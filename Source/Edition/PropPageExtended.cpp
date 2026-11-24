@@ -50,18 +50,24 @@ void CVRMainPPage::ApplyJvrPreview()
 
 void CVRMainPPage::UpdateSvdLutLabel()
 {
-	const int strength = m_SetsPP.GetSvdLutStrength();
-	const auto label = m_svdLutOff ? L"SVDLUT color: Off" :
-        m_svdLutRaw ? (m_svdLutTemporal ? L"SVDLUT: Temporal B1" : L"SVDLUT RAW B") :
-		strength ? std::format(L"SVDLUT color: {}%", strength) : L"SVDLUT color: Off";
-	SetDlgItemTextW(IDC_SVDLUT_VALUE, label.c_str());
+    SetDlgItemTextW(IDC_SVDLUT_VALUE,
+        std::format(L"A: {}%", m_SetsPP.GetSvdLutStrength()).c_str());
+    SetDlgItemTextW(IDC_SVDLUT_B_VALUE,
+        std::format(L"B: {}%", m_svdLutBStrength).c_str());
 }
 
 void CVRMainPPage::PreviewSvdLutStrength(int strength)
 {
-	CComQIPtr<IExFilterConfig> config(m_pVideoRenderer.p);
-	if (config && config->Flt_SetInt("svdLutStrengthPreview", strength) == S_OK)
-		m_svdLutPreviewed = true;
+    CComQIPtr<IExFilterConfig> config(m_pVideoRenderer.p);
+    if (config && config->Flt_SetInt("svdLutStrengthPreview", strength) == S_OK)
+        m_svdLutPreviewed = true;
+}
+
+void CVRMainPPage::PreviewSvdLutBStrength(int strength)
+{
+    CComQIPtr<IExFilterConfig> config(m_pVideoRenderer.p);
+    if (config && config->Flt_SetInt("svdLutBStrengthPreview", strength) == S_OK)
+        m_svdLutBPreviewed = true;
 }
 
 void CVRMainPPage::PreviewSvdLutOff(bool off)
@@ -103,6 +109,20 @@ void CVRMainPPage::PreviewSvdLutR1Gamut(bool enable)
         m_svdLutR1Gamut = enable;
 }
 
+void CVRMainPPage::PreviewSkinTones(bool enable)
+{
+    CComQIPtr<IExFilterConfig> config(m_pVideoRenderer.p);
+    if (config && SUCCEEDED(config->Flt_SetBool("skinTones", enable)))
+        m_skinTones = enable;
+}
+
+void CVRMainPPage::PreviewPreferredColors(bool enable)
+{
+    CComQIPtr<IExFilterConfig> config(m_pVideoRenderer.p);
+    if (config && SUCCEEDED(config->Flt_SetBool("preferredColors", enable)))
+        m_preferredColors = enable;
+}
+
 void CVRMainPPage::SetEditionControls()
 {
 	CheckDlgButton(IDC_JVR_FLAT_VIEW, m_SetsPP.bJvrFlatView ? BST_CHECKED : BST_UNCHECKED);
@@ -115,12 +135,15 @@ void CVRMainPPage::SetEditionControls()
 	ComboBox_SelectByItemData(m_hWnd, IDC_ZIPDEPTH_MODE, edition::ZipDepthModeFromSettings(m_SetsPP));
 	CheckDlgButton(IDC_SHOW_MFG_MOTION, m_SetsPP.bShowMfgMotion ? BST_CHECKED : BST_UNCHECKED);
 	SendDlgItemMessageW(IDC_SVDLUT_STRENGTH, TBM_SETPOS, TRUE, m_SetsPP.GetSvdLutStrength());
+    SendDlgItemMessageW(IDC_SVDLUT_B_STRENGTH, TBM_SETPOS, TRUE, m_svdLutBStrength);
 	ComboBox_SelectByItemData(m_hWnd, IDC_SVDLUT_MODE,
         m_svdLutOff ? 0 : (m_svdLutRaw ? (m_svdLutTemporal ? 3 : 2) : 1));
 	UpdateSvdLutLabel();
     CheckDlgButton(IDC_SVDLUT_B2_LUMINANCE, m_svdLutB2Luminance ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(IDC_SVDLUT_B2_MEMORY, m_svdLutB2Memory ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(IDC_SVDLUT_R1_GAMUT, m_svdLutR1Gamut ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(IDC_SKIN_TONES, m_skinTones ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(IDC_PREFERRED_COLORS, m_preferredColors ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_SHOW_DEPTH_OVERLAY, m_SetsPP.bShowDepthOverlay ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_MFG_FEATURE_BADGES, m_SetsPP.bShowFeatureBadges ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_EDITION_STATS_DETAILS, m_SetsPP.bShowEditionDetails ? BST_CHECKED : BST_UNCHECKED);
@@ -156,13 +179,18 @@ void CVRMainPPage::EnableEditionControls()
 	GetDlgItem(IDC_EDITION_STATS_DETAILS).EnableWindow(m_SetsPP.bUseD3D11);
 	const bool srEnabled = canUseDlssSR && m_SetsPP.bDlssSR;
 	GetDlgItem(IDC_ZIPDEPTH_MODE).EnableWindow(canUseDlssSR);
-	GetDlgItem(IDC_SVDLUT_STRENGTH).EnableWindow(canUseDlssSR && !m_svdLutRaw && !m_svdLutOff);
-	GetDlgItem(IDC_SVDLUT_VALUE).EnableWindow(canUseDlssSR && !m_svdLutRaw && !m_svdLutOff);
+	GetDlgItem(IDC_SVDLUT_STRENGTH).EnableWindow(canUseDlssSR);
+	GetDlgItem(IDC_SVDLUT_VALUE).EnableWindow(canUseDlssSR);
+    GetDlgItem(IDC_SVDLUT_B_STRENGTH).EnableWindow(canUseDlssSR);
+    GetDlgItem(IDC_SVDLUT_B_VALUE).EnableWindow(canUseDlssSR);
 	GetDlgItem(IDC_SVDLUT_MODE).EnableWindow(canUseDlssSR);
     const bool b2Available = canUseDlssSR && m_svdLutRaw && m_svdLutTemporal && !m_svdLutOff;
     GetDlgItem(IDC_SVDLUT_B2_LUMINANCE).EnableWindow(b2Available);
     GetDlgItem(IDC_SVDLUT_B2_MEMORY).EnableWindow(b2Available);
     GetDlgItem(IDC_SVDLUT_R1_GAMUT).EnableWindow(b2Available);
+    // Enhancements are independent of SVDLUT mode and legacy B2.2/R1.
+    GetDlgItem(IDC_SKIN_TONES).EnableWindow(canUseDlssSR);
+    GetDlgItem(IDC_PREFERRED_COLORS).EnableWindow(canUseDlssSR);
 	GetDlgItem(IDC_SHOW_MFG_MOTION).EnableWindow(bMfgEnabled);
 	const bool depthAvailable = (srEnabled && m_SetsPP.bUseZipDepthSr) ||
 		(bMfgEnabled && m_SetsPP.bUseZipDepthMfg);
@@ -179,12 +207,14 @@ void CVRMainPPage::RestorePreviewSettings()
 	const bool restoreSettings = live.iSDRDisplayNits != m_oldSDRDisplayNits || live.bJvrFlatView != m_oldJvrFlatView ||
 		live.iJvrVertical != m_oldJvrVertical || live.iJvrReprojection != m_oldJvrReprojection ||
 		live.iJvrEye != m_oldJvrEye;
-	const bool restoreSvdLut = m_svdLutPreviewed || m_svdLutOff != m_oldSvdLutOff ||
+	const bool restoreSvdLut = m_svdLutPreviewed || m_svdLutBPreviewed || m_svdLutOff != m_oldSvdLutOff ||
         m_svdLutRaw != m_oldSvdLutRaw ||
 		m_svdLutTemporal != m_oldSvdLutTemporal ||
         m_svdLutB2Luminance != m_oldSvdLutB2Luminance ||
         m_svdLutB2Memory != m_oldSvdLutB2Memory ||
-        m_svdLutR1Gamut != m_oldSvdLutR1Gamut;
+        m_svdLutR1Gamut != m_oldSvdLutR1Gamut ||
+        m_skinTones != m_oldSkinTones ||
+        m_preferredColors != m_oldPreferredColors;
 	if (restoreSettings) {
 		// Roll back the fields that can be previewed before Apply.
 		live.iSDRDisplayNits = m_oldSDRDisplayNits;
@@ -199,6 +229,11 @@ void CVRMainPPage::RestorePreviewSettings()
 		PreviewSvdLutStrength(m_oldSvdLutStrength);
 		m_svdLutPreviewed = false;
 	}
+    if (m_svdLutBPreviewed) {
+        PreviewSvdLutBStrength(m_oldSvdLutBStrength);
+        m_svdLutBPreviewed = false;
+        m_svdLutBStrength = m_oldSvdLutBStrength;
+    }
 	if (m_svdLutTemporal != m_oldSvdLutTemporal) PreviewSvdLutTemporal(m_oldSvdLutTemporal);
     if (m_svdLutB2Luminance != m_oldSvdLutB2Luminance)
         PreviewSvdLutB2Luminance(m_oldSvdLutB2Luminance);
@@ -206,6 +241,10 @@ void CVRMainPPage::RestorePreviewSettings()
         PreviewSvdLutB2Memory(m_oldSvdLutB2Memory);
     if (m_svdLutR1Gamut != m_oldSvdLutR1Gamut)
         PreviewSvdLutR1Gamut(m_oldSvdLutR1Gamut);
+    if (m_skinTones != m_oldSkinTones)
+        PreviewSkinTones(m_oldSkinTones);
+    if (m_preferredColors != m_oldPreferredColors)
+        PreviewPreferredColors(m_oldPreferredColors);
 	if (m_svdLutRaw != m_oldSvdLutRaw) PreviewSvdLutRaw(m_oldSvdLutRaw);
     if (m_svdLutOff != m_oldSvdLutOff) PreviewSvdLutOff(m_oldSvdLutOff);
 	if (trace.Enabled()) {
@@ -220,6 +259,12 @@ void CVRMainPPage::CapturePreviewSettings()
 	m_showJvrOptions = !jvr::ProfileFiles(g_hInst).empty();
 	m_oldSDRDisplayNits = m_SetsPP.iSDRDisplayNits;
 	if (!m_svdLutPreviewed) m_oldSvdLutStrength = m_SetsPP.GetSvdLutStrength();
+    CComQIPtr<IExFilterConfig> bConfig(m_pVideoRenderer.p);
+    int liveB = 200;
+    if (bConfig && SUCCEEDED(bConfig->Flt_GetInt("svdLutBStrength", &liveB)))
+        m_svdLutBStrength = std::clamp(liveB, 0, 200);
+    m_oldSvdLutBStrength = m_svdLutBStrength;
+    m_svdLutBPreviewed = false;
 	CComQIPtr<IExFilterConfig> config(m_pVideoRenderer.p);
 	m_svdLutOff = false;
     if (config) config->Flt_GetBool("svdLutOff", &m_svdLutOff);
@@ -239,6 +284,12 @@ void CVRMainPPage::CapturePreviewSettings()
     m_svdLutR1Gamut = false;
     if (config) config->Flt_GetBool("svdLutR1Gamut", &m_svdLutR1Gamut);
     m_oldSvdLutR1Gamut = m_svdLutR1Gamut;
+    m_skinTones = false;
+    if (config) config->Flt_GetBool("skinTones", &m_skinTones);
+    m_oldSkinTones = m_skinTones;
+    m_preferredColors = false;
+    if (config) config->Flt_GetBool("preferredColors", &m_preferredColors);
+    m_oldPreferredColors = m_preferredColors;
 	m_oldJvrFlatView = m_SetsPP.bJvrFlatView;
 	m_oldJvrVertical = m_SetsPP.iJvrVertical;
 	m_oldJvrReprojection = m_SetsPP.iJvrReprojection;
@@ -259,8 +310,11 @@ HRESULT CVRMainPPage::InitializeEditionControls()
     ComboBox_AddStringData(m_hWnd, IDC_SVDLUT_MODE, L"RAW B", 2);
     ComboBox_AddStringData(m_hWnd, IDC_SVDLUT_MODE, L"Temporal B1", 3);
 	SendDlgItemMessageW(IDC_SVDLUT_STRENGTH, TBM_SETRANGE, TRUE, MAKELONG(0, SVDLUT_STRENGTH_MAX));
+    SendDlgItemMessageW(IDC_SVDLUT_B_STRENGTH, TBM_SETRANGE, TRUE, MAKELONG(0, 200));
 	SendDlgItemMessageW(IDC_SVDLUT_STRENGTH, TBM_SETTIC, 0, SVDLUT_STRENGTH_MAX / 2);
 	SendDlgItemMessageW(IDC_SVDLUT_STRENGTH, TBM_SETPAGESIZE, 0, 10);
+    SendDlgItemMessageW(IDC_SVDLUT_B_STRENGTH, TBM_SETTIC, 0, 100);
+    SendDlgItemMessageW(IDC_SVDLUT_B_STRENGTH, TBM_SETPAGESIZE, 0, 10);
 	SendDlgItemMessageW(IDC_JVR_VERTICAL, TBM_SETRANGEMIN, FALSE, JVR_VERTICAL_MIN);
 	SendDlgItemMessageW(IDC_JVR_VERTICAL, TBM_SETRANGEMAX, TRUE, JVR_VERTICAL_MAX);
 	SendDlgItemMessageW(IDC_JVR_VERTICAL, TBM_SETTIC, 0, JVR_VERTICAL_DEFAULT);
@@ -307,9 +361,13 @@ void CVRMainPPage::AddEditionHints()
 	AddHint(IDC_ZIPDEPTH_MODE,
 		L"Choose which Extended path receives ZipDepth.\n"
 		L"Both (default), DLSS SR Only, MFG Only, or Disable.");
-	AddHint(IDC_SVDLUT_STRENGTH,
-		L"Adjust SVDLUT color strength for SDR video. 0% disables SVDLUT.\n"
-		L"Requires the DirectML model in the edition folder.");
+    AddHint(IDC_SVDLUT_STRENGTH,
+        L"Normal A only: 100% matches the previous full A result; 200% is an experimental extension.\n"
+        L"0% disables the A grade. Preferred Colors and Skin Tones are independent.");
+    AddHint(IDC_SVDLUT_B_STRENGTH,
+        L"RAW/Temporal B only: 200% matches the previous complete B grade.\n"
+        L"100% is the gentler daily-use candidate; 0% disables B model grading.\n"
+        L"B2.1 and perceptual enhancements keep their separate logic.");
 	AddHint(IDC_SVDLUT_MODE,
 		L"Off: bypass all SVDLUT processing (saved A strength is kept).\n"
         L"Normal A: original scene-based Edition SVDLUT with its strength slider.\n"
@@ -319,25 +377,35 @@ void CVRMainPPage::AddEditionHints()
 		L"Temporal future frames are opportunistic; unavailable frames are not awaited.\n"
 		L"Mode is saved on Apply. RAW B may reduce playback FPS.");
     AddHint(IDC_SVDLUT_B2_MEMORY,
-        L"B2.2 experiment: Keep SVDLUT floating-point RGB until final SDR\n"
-        L"output, gently compress out-of-gamut/high-chroma colours, and\n"
-        L"apply restrained source-guided skin/foliage/sky preferences.\n"
-        L"General-purpose: no face/plant detection, no scene-specific presets.\n"
-        L"No extra model, readback or full-resolution rendering pass.\n"
-        L"Independent of B2.1 brightness; saved on Apply.");
+        L"B2.2 + B2.1: limit excessive source-relative chroma changes\n"
+        L"with a soft knee at the B2.1 code-luma anchor.\n"
+        L"Small changes pass unchanged; near-neutral colours get tighter limits.\n"
+        L"Works with Preferred/Skin P1 before their independent enhancement.\n"
+        L"B2.1 off: legacy memory/gamut path. R1 or M1 selects legacy repair.\n"
+        L"No extra inference, readback or GPU pass. Saved on Apply.");
+    AddHint(IDC_SKIN_TONES,
+        L"Skin Tones: proactively enhance skin-family colour and chroma.\n"
+        L"Independent of SVDLUT A/B, B2.1, B2.2 and R1. Not face detection.\n"
+        L"Existing cached ZipDepth is used automatically if safely aligned.\n"
+        L"No additional depth inference. Saved on Apply.");
+    AddHint(IDC_PREFERRED_COLORS,
+        L"Preferred Colors: enhance familiar sky blue and foliage green.\n"
+        L"Independent of SVDLUT and Skin Tones. Existing ZipDepth is optional\n"
+        L"and used automatically only when reliable; otherwise 2D enhancement.\n"
+        L"Same LUT draw when possible. Saved on Apply.");
     AddHint(IDC_SVDLUT_R1_GAMUT,
         L"R1 experiment: Continuously roll off chroma near the SDR boundary.\n"
         L"Preserves the B2.1 brightness anchor and B2.2 memory-colour logic,\n"
         L"but removes two discontinuous threshold jumps. No extra inference,\n"
         L"readback, GPU pass or frame-buffer change. This is NOT a complete\n"
         L"libplacebo/ACES implementation. When both B2.2 and R1 are checked,\n"
-        L"R1 takes precedence; uncheck R1 to restore legacy B2.2.\n"
+        L"R1 takes precedence; uncheck R1 for the selected B2.2 path.\n"
         L"Saved on Apply. Compare Video Buffer before accepting."
     );
     AddHint(IDC_SVDLUT_B2_LUMINANCE,
-        L"B2.1 experiment: Preserve relative original brightness in fixed\n"
-        L"shadow / midtone / highlight regions after Temporal B1.\n"
-        L"A shot-based reference reduces per-frame composition bias.\n"
+        L"B2.1: Independently limit SVDLUT code-luma participation after B1.\n"
+        L"Source samples and neutral response constrain luma; chroma is retained\n"
+        L"within the output gamut. Same-shot relaxation is gradual.\n"
         L"No new inference, readback, or full-resolution pass; optional\n"
         L"analysis is limited under low-buffer pressure. B1 is unchanged.\n"
         L"Saved on Apply; paused redraws preserve the presented result.");
@@ -386,6 +454,7 @@ HRESULT CVRMainPPage::ReadEditionControls()
 	m_SetsPP.bShowMfgMotion = IsDlgButtonChecked(IDC_SHOW_MFG_MOTION) == BST_CHECKED;
 	m_SetsPP.bShowDepthOverlay = IsDlgButtonChecked(IDC_SHOW_DEPTH_OVERLAY) == BST_CHECKED;
 	m_SetsPP.SetSvdLutStrength(static_cast<int>(SendDlgItemMessageW(IDC_SVDLUT_STRENGTH, TBM_GETPOS)));
+    m_svdLutBStrength = static_cast<int>(SendDlgItemMessageW(IDC_SVDLUT_B_STRENGTH, TBM_GETPOS));
 	m_SetsPP.bShowFeatureBadges = IsDlgButtonChecked(IDC_MFG_FEATURE_BADGES) == BST_CHECKED;
 	m_SetsPP.bShowEditionDetails = IsDlgButtonChecked(IDC_EDITION_STATS_DETAILS) == BST_CHECKED;
     const LRESULT srLimit = ComboBox_GetCurItemData(m_hWnd, IDC_DLSS_SR_SOURCE_LIMIT);
@@ -409,6 +478,8 @@ void CVRMainPPage::CommitPreviewSettings()
 {
 	m_oldSDRDisplayNits = m_SetsPP.iSDRDisplayNits;
 	m_oldSvdLutStrength = m_SetsPP.GetSvdLutStrength();
+    m_oldSvdLutBStrength = m_svdLutBStrength;
+    m_svdLutBPreviewed = false;
 	m_svdLutPreviewed = false;
 	m_oldSvdLutOff = m_svdLutOff;
 	m_oldSvdLutRaw = m_svdLutRaw;
@@ -416,6 +487,8 @@ void CVRMainPPage::CommitPreviewSettings()
     m_oldSvdLutB2Luminance = m_svdLutB2Luminance;
     m_oldSvdLutB2Memory = m_svdLutB2Memory;
     m_oldSvdLutR1Gamut = m_svdLutR1Gamut;
+    m_oldSkinTones = m_skinTones;
+    m_oldPreferredColors = m_preferredColors;
 	m_oldJvrFlatView = m_SetsPP.bJvrFlatView;
 	m_oldJvrVertical = m_SetsPP.iJvrVertical;
 	m_oldJvrReprojection = m_SetsPP.iJvrReprojection;
@@ -464,6 +537,24 @@ bool CVRMainPPage::OnEditionMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
             const bool checked = IsDlgButtonChecked(nID) == BST_CHECKED;
             if (checked != m_svdLutB2Memory) {
                 PreviewSvdLutB2Memory(checked);
+                EnableEditionControls();
+                SetDirty();
+            }
+            return TRUE;
+        }
+        if (action == BN_CLICKED && nID == IDC_SKIN_TONES) {
+            const bool checked = IsDlgButtonChecked(nID) == BST_CHECKED;
+            if (checked != m_skinTones) {
+                PreviewSkinTones(checked);
+                EnableEditionControls();
+                SetDirty();
+            }
+            return TRUE;
+        }
+        if (action == BN_CLICKED && nID == IDC_PREFERRED_COLORS) {
+            const bool checked = IsDlgButtonChecked(nID) == BST_CHECKED;
+            if (checked != m_preferredColors) {
+                PreviewPreferredColors(checked);
                 SetDirty();
             }
             return TRUE;
@@ -472,6 +563,7 @@ bool CVRMainPPage::OnEditionMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
             const bool checked = IsDlgButtonChecked(nID) == BST_CHECKED;
             if (checked != m_svdLutR1Gamut) {
                 PreviewSvdLutR1Gamut(checked);
+                EnableEditionControls();
                 SetDirty();
             }
             return TRUE;
@@ -571,6 +663,16 @@ bool CVRMainPPage::OnEditionMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 			}
 			return (LRESULT)1;
 		}
+        if ((HWND)lParam == GetDlgItem(IDC_SVDLUT_B_STRENGTH)) {
+            const int strength = static_cast<int>(SendDlgItemMessageW(IDC_SVDLUT_B_STRENGTH, TBM_GETPOS));
+            if (strength != m_svdLutBStrength) {
+                m_svdLutBStrength = strength;
+                UpdateSvdLutLabel();
+                PreviewSvdLutBStrength(strength);
+                SetDirty();
+            }
+            return (LRESULT)1;
+        }
 		if ((HWND)lParam == GetDlgItem(IDC_JVR_VERTICAL) || (HWND)lParam == GetDlgItem(IDC_JVR_REPROJECTION)) {
 			m_SetsPP.iJvrVertical = static_cast<int>(SendDlgItemMessageW(IDC_JVR_VERTICAL, TBM_GETPOS));
 			m_SetsPP.iJvrReprojection = static_cast<int>(SendDlgItemMessageW(IDC_JVR_REPROJECTION, TBM_GETPOS));

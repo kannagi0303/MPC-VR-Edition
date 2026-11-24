@@ -36,6 +36,13 @@ public:
         int64_t resultAge = 0;
     };
     SIZE TensorSize() const { return m_gpu.ModelSize(); }
+    // Depth was captured for precisely this source-content size. The LUT
+    // consumer must additionally require a matching output rectangle/frame.
+    bool MatchesColorPicture(LONG width, LONG height) const noexcept {
+        return width > 0 && height > 0 && m_modelSize.cx == width && m_modelSize.cy == height &&
+            (m_capturePicture.right - m_capturePicture.left) == width &&
+            (m_capturePicture.bottom - m_capturePicture.top) == height;
+    }
     static constexpr int64_t MaxEstimateAge = 2'000'000; // 200 ms in media time
 
     void Prepare(ID3D11Device1* device);

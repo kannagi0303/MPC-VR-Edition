@@ -32,6 +32,9 @@
 		CComPtr<ID3D11SamplerState> lutSampler;
 		CComPtr<ID3D11Buffer> constants;
 	} m_svdLut;
+	// Shared preprocessing shader, independent of either model worker.
+	CComPtr<ID3D11PixelShader> m_svdLutThumbnailShader;
+	CComPtr<ID3D11Buffer> m_svdLutThumbnailConstants;
 
 	// Experimental RAW B is intentionally independent of the production
 	// scene-based SVDLUT worker, thumbnails, grade tables and statistics.
@@ -43,6 +46,9 @@
         std::shared_ptr<const svdlut::Parameters> temporalParameters;
 		std::shared_ptr<const svdlut::Parameters> parameters;
 		std::array<float, 8 * 8 * 3> signature{};
+        // Refined B2.1 samples from the same original 256x256 thumbnail map.
+        std::array<float, 16 * 16 * 2 * 3> b2Samples{};
+        bool b2SamplesReady = false;
 		svdlut::temporal::Features colorFeatures{};
 		bool signatureReady = false;
 		bool temporalFinalized = false;
@@ -79,20 +85,36 @@
         // Only B2 uses these fields; temporal LUT regression remains untouched.
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> b2CachedView;
         REFERENCE_TIME b2CachedSourcePts = INVALID_TIME;
-        // Three fixed ORIGINAL-luma zone gains, never mixed into B1 LUT.
-        std::array<float, 3> b2CachedTone{1.0f, 1.0f, 1.0f};
-        std::array<float, 3> b2LastTone{1.0f, 1.0f, 1.0f};
+        bool b2CachedRefinedReady = false; // upgrade legacy cache after thumbnail arrives
+        // Replicated B2.1 luma participation, never mixed into B1 LUT.
+        std::array<float, 3> b2CachedTone{0.0f, 0.0f, 0.0f};
+        std::array<float, 3> b2LastTone{0.0f, 0.0f, 0.0f};
         // B2-only shot anchor, advanced once per new ORIGINAL-frame PTS.
         std::array<float, 8 * 8 * 3> b2ShotSignature{};
         REFERENCE_TIME b2ShotPts = INVALID_TIME;
         bool b2ShotValid = false;
         float b2LastSourceShiftEv = 0.0f, b2LastResidualEv = 0.0f;
         unsigned b2LastSamples = 0;
+        // SVDLUT audit: one synthetic neutral-gray input sampled through the
+        // *selected* packed LUT (CPU only, no texture readback or GPU work).
+        // Diagnostic values do NOT include B2.1/P1/P2 or the display pipeline.
+        struct GrayProbe {
+            std::array<float, 3> model{}, strengthMixed{};
+            REFERENCE_TIME pts = INVALID_TIME;
+            unsigned source = 0; // 0 raw, 1 temporal view, 2 held/replayed
+            bool valid = false;
+        } grayProbe;
         uint64_t b2Analyses = 0, b2AdjustedDraws = 0;
         uint64_t b2AnalysisTicks = 0, b2BudgetSkips = 0, b2ShotResets = 0;
         bool b2ShaderAttempted = false, b2ShaderFailed = false;
         bool b2MemoryShaderAttempted = false, b2MemoryShaderFailed = false;
         bool r1GamutShaderAttempted = false, r1GamutShaderFailed = false;
+        // Retained M1/R1/D1 legacy experiment state. P4 gray-probe must not
+        // replace fields consumed by SvdLutRawMode.inc.
+        bool m1ShaderAttempted = false, m1ShaderFailed = false;
+        bool r1M1ShaderAttempted = false, r1M1ShaderFailed = false;
+        uint64_t m1SkinDraws = 0;
+        uint64_t d1DepthDraws = 0, d1FallbackDraws = 0;
         uint64_t r1GamutDraws = 0; // alternative to B2.2, not an extra pass
         uint64_t b2MemoryDraws = 0; // selected shader draws, not classified pixels
         // Keep the actual successfully presented B2 transform when pausing.
@@ -121,7 +143,20 @@
         CComPtr<ID3D11PixelShader> b2LuminanceShader;
         CComPtr<ID3D11PixelShader> b2MemoryShader;
         CComPtr<ID3D11PixelShader> r1GamutShader;
+        CComPtr<ID3D11PixelShader> m1SkinShader;
+        CComPtr<ID3D11PixelShader> r1M1SkinShader;
 	} m_svdLutRawTest;
+
+    // P1/P2 perceptual pipeline state, previously lost when P4 carried an
+    // older projection-state include. Preserve the P4 grayProbe above.
+    struct {
+        CComPtr<ID3D11Buffer> constants;
+        CComPtr<ID3D11SamplerState> sampler;
+        CComPtr<ID3D11PixelShader> standalone, normalA, rawB;
+        bool triedStandalone = false, triedA = false, triedB = false;
+        bool failedStandalone = false, failedA = false, failedB = false;
+        uint64_t draws = 0, depthUsed = 0, depthFallback = 0;
+    } m_perceptual;
 
 	bool m_jvrShaderFailed = false;
 	Tex2D_t m_jvrSource;

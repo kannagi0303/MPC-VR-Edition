@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
 // Inside CDX11VideoProcessor private state. Keep declaration order; this fragment is not a standalone header.
 	friend class CMpcVideoRenderer;
 	bool m_bInterpolateAt50pct=true;
@@ -313,4 +313,10 @@
     void ResetFeatureStatus();
     LONG DrawFeatureStatus(ID3D11Texture2D* target);
     LONG m_statsFeatureOffset = 0;
+    // Rate-limit Statistics text formatting; drawing stays in the existing OSD pass.
+    std::wstring m_cachedStatisticsText;
+    ULONGLONG m_cachedStatisticsTick = 0;
+    unsigned m_cachedStatisticsRun = 0;
+    // Owned by this renderer, never a thread with static-DLL lifetime.
+    std::unique_ptr<edition::GpuLoadSampler> m_gpuLoadSampler;
 
