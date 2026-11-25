@@ -1,6 +1,7 @@
 # MPC Video Renderer Edition
 
 - Based on [MPC Video Renderer 0.11.1.2636](https://github.com/Aleksoid1978/VideoRenderer/releases/tag/0.11.1).
+- Edition source version: **0.2.3**.
 - **Windows x64 only.**<br>
   Works with players that support MPC Video Renderer.
 
@@ -19,15 +20,19 @@
   Choose whether to upscale or add frames first.
 - **ZipDepth**<br>
   Uses the GPU to estimate depth from video.
+- **SDR video enhancement**<br>
+  Adjust color grading, memory colors, skin tones, and adaptive contrast independently.
+- **VR projection**<br>
+  View one eye of supported side-by-side fisheye video as a flat 16:9 picture.
 
 ## Installation
 
 ### Install
 
-1. Download `MPC-VR-Edition.zip` from [Releases](https://github.com/kannagi0303/MPC-VR-Edition/releases).
+1. Download the Edition ZIP from [Releases](https://github.com/kannagi0303/MPC-VR-Edition/releases).
    Extract the whole ZIP.
 2. Run `Install_MPCVR_64.cmd` as administrator.
-3. Keep the extracted files in place.
+3. Keep `MPCVRMFG64.ax` and its `edition/` folder together.
 
 ### Uninstall
 
@@ -41,8 +46,9 @@ Run `Uninstall_MPCVR_64.cmd` as administrator.
 
 ## How It Works
 
-Choose **Direct3D 11** in the renderer settings.<br>
-Turn on the features you want under **Edition Extended**.
+In the **Renderer** tab, select **Use Direct3D 11** to use Edition features. This tab also holds video processor, scaling, HDR, and playback statistics settings. Open **Edition Extended** for DLSS, ZipDepth, video enhancement, and display information.
+
+DLSS requires a compatible NVIDIA RTX GPU and driver. DLSS SR / DLAA supports 8-bit SDR video.
 
 ### Frame generation and timing
 
@@ -54,12 +60,9 @@ The renderer can skip repeated frames when MFG can fill the gap.
 
 ### Upscaling and processing order
 
-DLSS SR upscales supported 8-bit SDR video.<br>
-If the renderer processes the video at its original resolution,<br>
-it uses DLAA to smooth edges.
+Use **DLSS SR / DLAA** to choose the largest source resolution eligible for DLSS. The target is the display-fit size. At 1:1 the renderer uses DLAA, and when upscaling it uses DLSS SR.
 
-On supported videos, DLSS SR or RTX Video Super Resolution<br>
-can run before or after MFG.<br>
+Use **Order** to select **Upscale then MFG** or **MFG then upscale**. Both orders can use DLSS SR or RTX Video Super Resolution on supported playback paths.<br>
 Upscaling first gives MFG a larger image to work with.<br>
 MFG can use the original video size when the video and output support it.<br>
 Some playback paths resize the video before MFG, even with DLSS SR and RTX VSR off.
@@ -70,7 +73,7 @@ Some playback paths resize the video before MFG, even with DLSS SR and RTX VSR o
   Start playback while the selected Extended features load.<br>
   They turn on when ready.
 - **Wait for Extended**<br>
-  Prepare MFG and DLSS SR before playback.<br>
+  Prepare enabled MFG and DLSS SR features when opening a video.<br>
   MFG starts adding frames once it has a pair of source frames.
 
 ### Depth estimation
@@ -85,6 +88,29 @@ ZipDepth uses DirectML to estimate depth on the GPU.
   Turn off depth estimation.
 
 DLSS SR, DLAA, and MFG use flat depth while an estimate is unavailable.
+
+### Video Enhancement
+
+These controls apply to supported SDR playback paths. Each has a numeric field and a slider from **0% to 100%**. Set an individual control to **0%** to bypass it.
+
+| Control | Effect |
+| --- | --- |
+| **Color Enhancement** | Applies the calibrated SVDLUT color grade. |
+| **Memory Color** | Adjusts colors such as sky and foliage. |
+| **Skin Tone** | Independently adjusts skin tones. |
+| **Adaptive Tone** | Adjusts contrast based on the current shot. |
+
+Use **Enable video enhancement** to bypass or re-enable all four effects together while retaining their saved strengths.
+
+### Display Information
+
+- **Show feature status** displays the status of DLSS SR, RTX VSR, and MFG.
+- **Show detailed Edition statistics** adds Edition diagnostics when **Show statistics** is enabled in the **Renderer** tab.
+- **Show depth overlay** displays the active ZipDepth map. **Show optical flow** draws MFG motion arrows on the picture.
+
+### VR Projection
+
+The **VR Projection** group appears when the renderer finds an `.ini` profile in `VRProfiles/` next to `MPCVRMFG64.ax`. For supported progressive SDR full side-by-side video, enable **Fisheye to flat**, choose an eye, and adjust **Vertical framing** and **Reprojection** as needed.
 
 ### Change the ZipDepth Model
 
