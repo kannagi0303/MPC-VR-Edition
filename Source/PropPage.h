@@ -37,9 +37,30 @@ class __declspec(uuid("DA46D181-07D6-441D-B314-019AEB10148A"))
 	Settings_t m_SetsPP;
 
 	int m_oldSDRDisplayNits = SDR_NITS_DEF;
-    bool m_videoEnhancement = false;
-    bool m_oldVideoEnhancement = false;
-    bool m_videoEnhancementCaptured = false;
+    int m_colorStrengths[4]{100,100,100,100};
+    int m_oldColorStrengths[4]{100,100,100,100};
+    bool m_colorCaptured[4]{};
+    bool m_editionTab=false;
+    bool m_enhancementEnabled=true, m_oldEnhancementEnabled=true, m_masterCaptured=false;
+    bool m_updatingNumeric=false;
+    bool PreviewEnhancementEnabled(bool enabled);
+    bool CommitNumericEdit(int id);
+    void SetNumericEdit(int id,int value);
+    HWND m_rendererPane = nullptr, m_extendedPane = nullptr;
+    HRESULT InitializeSettingsTabs();
+    static INT_PTR CALLBACK SettingsPaneProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+    // Keep original and Edition control call sites independent of their parent.
+    HWND ControlParent(int id) const;
+    CWindow GetDlgItem(int id) const { return CWindow(::GetDlgItem(ControlParent(id), id)); }
+    LRESULT SendDlgItemMessageW(int id, UINT msg, WPARAM wp = 0, LPARAM lp = 0) const {
+        return ::SendDlgItemMessageW(ControlParent(id), id, msg, wp, lp);
+    }
+    BOOL SetDlgItemTextW(int id, LPCWSTR text) const { return ::SetDlgItemTextW(ControlParent(id), id, text); }
+    UINT GetDlgItemInt(int id, BOOL* translated, BOOL isSigned) const { return ::GetDlgItemInt(ControlParent(id), id, translated, isSigned); }
+    BOOL CheckDlgButton(int id, UINT state) const { return ::CheckDlgButton(ControlParent(id), id, state); }
+    UINT IsDlgButtonChecked(int id) const { return ::IsDlgButtonChecked(ControlParent(id), id); }
+    void ShowSettingsTab();
+    void ResetColorStrengths();
 
 	bool m_oldJvrFlatView = false;
 	int m_oldJvrVertical = JVR_VERTICAL_DEFAULT;
@@ -70,11 +91,13 @@ private:
 	void EnableControls();
 	void UpdateJvrViewLabels();
 	void ApplyJvrPreview();
-	bool PreviewVideoEnhancement(bool enable);
+    bool PreviewColorStrength(int index,int value);
+    void UpdateColorStrengthLabel(int index,int value);
 
 	HRESULT OnConnect(IUnknown* pUnknown) override;
 	HRESULT OnDisconnect() override;
 	HRESULT OnActivate() override;
+    HRESULT OnDeactivate() override;
 	void SetDirty() {
 		if (m_bActivated && !m_bDirty) {
 			m_bDirty = TRUE;

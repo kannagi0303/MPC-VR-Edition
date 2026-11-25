@@ -3,9 +3,14 @@
 AGENTS.md
 /handoff.md
 /docs/
+/notes/
 /.references/
 /.agents/
 *.local.md
+
+# Local GPT export tools (ZIP files are already ignored below)
+/Export-Project-For-GPT.cmd
+/build-support/export-project-for-gpt.ps1
 
 # Local SDK/runtime; build-x64.cmd downloads the pinned build-only SDK
 /vendor/nvidia/

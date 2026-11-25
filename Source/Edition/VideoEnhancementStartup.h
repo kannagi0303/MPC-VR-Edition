@@ -14,13 +14,4 @@ constexpr bool MayStart(bool flushing, bool startup, bool geometry, bool buffere
     // a small contiguous reserve (80 ms or four ready frames at high refresh).
     return !mfgActive || (clockValid && (ready >= 800000 || (ready > 0 && readyFrames >= 4)));
 }
-// 250 ms media-time activation. No timers, waits, or extra GPU pass.
-constexpr float Fade(int64_t pts, int64_t start)
-{
-    if (pts <= start) return 0.0f;
-    const auto elapsed = uint64_t(pts) - uint64_t(start);
-    if (elapsed >= 2500000) return 1.0f;
-    const float t = float(elapsed) / 2500000.0f;
-    return t * t * (3.0f - 2.0f * t);
-}
 }

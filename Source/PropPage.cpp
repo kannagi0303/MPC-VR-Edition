@@ -74,6 +74,8 @@ CVRMainPPage::CVRMainPPage(LPUNKNOWN lpunk, HRESULT* phr) :
 	CBasePropertyPage(L"MainProp", lpunk, IDD_MAINPROPPAGE, IDS_MAINPROPPAGE_TITLE)
 {
 	DLog(L"CVRMainPPage()");
+    INITCOMMONCONTROLSEX controls{sizeof(INITCOMMONCONTROLSEX), ICC_TAB_CLASSES | ICC_BAR_CLASSES};
+    InitCommonControlsEx(&controls);
 }
 
 CVRMainPPage::~CVRMainPPage()
@@ -86,7 +88,7 @@ void CVRMainPPage::SetControls()
 	CheckDlgButton(IDC_CHECK1, m_SetsPP.bUseD3D11             ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK2, m_SetsPP.bShowStats            ? BST_CHECKED : BST_UNCHECKED);
 	SetEditionControls();
-	ComboBox_SelectByItemData(m_hWnd, IDC_COMBO1, m_SetsPP.iTexFormat);
+	ComboBox_SelectByItemData(m_rendererPane, IDC_COMBO1, m_SetsPP.iTexFormat);
 	CheckDlgButton(IDC_CHECK7, m_SetsPP.VPFmts.bNV12          ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK8, m_SetsPP.VPFmts.bP01x          ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK9, m_SetsPP.VPFmts.bYUY2          ? BST_CHECKED : BST_UNCHECKED);
@@ -98,18 +100,18 @@ void CVRMainPPage::SetControls()
 	CheckDlgButton(IDC_CHECK19, m_SetsPP.bVPRTXVideoHDR       ? BST_CHECKED : BST_UNCHECKED);
 
 	if (m_SetsPP.bHdrPassthrough) {
-		ComboBox_SelectByItemData(m_hWnd, IDC_COMBO10, 0);
+		ComboBox_SelectByItemData(m_rendererPane, IDC_COMBO10, 0);
 	} else if (m_SetsPP.bHdrLocalToneMapping) {
-		ComboBox_SelectByItemData(m_hWnd, IDC_COMBO10, m_SetsPP.iHdrLocalToneMappingType);
+		ComboBox_SelectByItemData(m_rendererPane, IDC_COMBO10, m_SetsPP.iHdrLocalToneMappingType);
 	} else {
-		ComboBox_SelectByItemData(m_hWnd, IDC_COMBO10, -1);
+		ComboBox_SelectByItemData(m_rendererPane, IDC_COMBO10, -1);
 	}
 
-	ComboBox_SelectByItemData(m_hWnd, IDC_COMBO_DVTM, m_SetsPP.iHdrDoviToneMappingType);
+	ComboBox_SelectByItemData(m_rendererPane, IDC_COMBO_DVTM, m_SetsPP.iHdrDoviToneMappingType);
 	CheckDlgButton(IDC_CHECK20, m_SetsPP.bHdrLocalMeasurePeak ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK18, m_SetsPP.bHdrPreferDoVi       ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_CHECK14, m_SetsPP.bConvertToSdr        ? BST_CHECKED : BST_UNCHECKED);
-	ComboBox_SelectByItemData(m_hWnd, IDC_COMBO_SDRTM, m_SetsPP.iSdrToneMappingType);
+	ComboBox_SelectByItemData(m_rendererPane, IDC_COMBO_SDRTM, m_SetsPP.iSdrToneMappingType);
 
 	SendDlgItemMessageW(IDC_COMBO7, CB_SETCURSEL, m_SetsPP.iHdrToggleDisplay, 0);
 	SendDlgItemMessageW(IDC_SLIDER1, TBM_SETPOS, 1, m_SetsPP.iHdrOsdBrightness);
@@ -213,6 +215,9 @@ HRESULT CVRMainPPage::OnActivate()
 {
 	// set m_hWnd for CWindow
 	m_hWnd = m_hwnd;
+    m_bActivated = false;
+    const HRESULT tabs = InitializeSettingsTabs();
+    if (FAILED(tabs)) return tabs;
 
 	m_pVideoRenderer->GetSettings(m_SetsPP);
 	CapturePreviewSettings();
@@ -243,10 +248,10 @@ HRESULT CVRMainPPage::OnActivate()
 	SendDlgItemMessageW(IDC_COMBO6, CB_ADDSTRING, 0, (LPARAM)L"Fixed font size");
 	SendDlgItemMessageW(IDC_COMBO6, CB_ADDSTRING, 0, (LPARAM)L"Increase font by window");
 
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO1, L"Auto 8/10-bit Integer",  0);
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO1, L"8-bit Integer",          8);
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO1, L"10-bit Integer",        10);
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO1, L"16-bit Floating Point", 16);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO1, L"Auto 8/10-bit Integer",  0);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO1, L"8-bit Integer",          8);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO1, L"10-bit Integer",        10);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO1, L"16-bit Floating Point", 16);
 
 	SendDlgItemMessageW(IDC_COMBO9, CB_ADDSTRING, 0, (LPARAM)L"Disable");
 	SendDlgItemMessageW(IDC_COMBO9, CB_ADDSTRING, 0, (LPARAM)L"Enable");
@@ -294,28 +299,28 @@ HRESULT CVRMainPPage::OnActivate()
 
 	SetDlgItemTextW(IDC_EDIT2, GetNameAndVersion());
 
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO10, L"Ignore", -1);
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO10, L"Passthrough", 0);
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO10, L"ACES", 1);
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO10, L"Reinhard", 2);
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO10, L"Hable", 3);
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO10, L"Mobius", 4);
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO10, L"BT2390", 5);
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO10, L"Spline", 7);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO10, L"Ignore", -1);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO10, L"Passthrough", 0);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO10, L"ACES", 1);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO10, L"Reinhard", 2);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO10, L"Hable", 3);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO10, L"Mobius", 4);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO10, L"BT2390", 5);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO10, L"Spline", 7);
 
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO_DVTM, L"ST 2094-10", 6);
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO_DVTM, L"Same as HDR", 0);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO_DVTM, L"ST 2094-10", 6);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO_DVTM, L"Same as HDR", 0);
 
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO_SDRTM, L"Fixed", SDRTM_Fixed);
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO_SDRTM, L"Metadata", SDRTM_Metadata);
-	ComboBox_AddStringData(m_hWnd, IDC_COMBO_SDRTM, L"Measured", SDRTM_Measured);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO_SDRTM, L"Fixed", SDRTM_Fixed);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO_SDRTM, L"Metadata", SDRTM_Metadata);
+	ComboBox_AddStringData(m_rendererPane, IDC_COMBO_SDRTM, L"Measured", SDRTM_Measured);
 
 	const HRESULT editionControls = InitializeEditionControls();
 	if (FAILED(editionControls)) return editionControls;
 	SetControls();
 
 	SetCursor(m_hWnd, IDC_ARROW);
-	SetCursor(m_hWnd, IDC_COMBO1, IDC_HAND);
+	SetCursor(m_rendererPane, IDC_COMBO1, IDC_HAND);
 
 	AddHint(IDC_CHECK5,
 		L"It works fast, but it's not always good.\n"
@@ -471,14 +476,15 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 			}
 
 			if (nID == IDC_BUTTON1) {
-				m_SetsPP.SetDefault();
-				if (!m_showJvrOptions) {
+				if (m_editionTab) m_SetsPP.SetEditionDefaults();
+                else m_SetsPP.SetNativeDefaults();
+				if (m_editionTab && !m_showJvrOptions) {
 					m_SetsPP.bJvrFlatView = m_oldJvrFlatView;
 					m_SetsPP.iJvrVertical = m_oldJvrVertical;
 					m_SetsPP.iJvrReprojection = m_oldJvrReprojection;
 					m_SetsPP.iJvrEye = m_oldJvrEye;
 				}
-                PreviewVideoEnhancement(false);
+                if (m_editionTab) ResetColorStrengths();
                 SetControls();
                 EnableControls();
 				SetDirty();
@@ -496,7 +502,7 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 				return (LRESULT)1;
 			}
 			if (nID == IDC_COMBO1) {
-				lValue = ComboBox_GetCurItemData(m_hWnd, IDC_COMBO1);
+				lValue = ComboBox_GetCurItemData(m_rendererPane, IDC_COMBO1);
 				if (lValue != m_SetsPP.iTexFormat) {
 					m_SetsPP.iTexFormat = lValue;
 					SetDirty();
@@ -563,7 +569,7 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 				return (LRESULT)1;
 			}
 			if (nID == IDC_COMBO_DVTM) {
-				lValue = ComboBox_GetCurItemData(m_hWnd, IDC_COMBO_DVTM);
+				lValue = ComboBox_GetCurItemData(m_rendererPane, IDC_COMBO_DVTM);
 				if (lValue != m_SetsPP.iHdrDoviToneMappingType) {
 					m_SetsPP.iHdrDoviToneMappingType = lValue;
 					SetDirty();
@@ -571,7 +577,7 @@ INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 				return (LRESULT)1;
 			}
 			if (nID == IDC_COMBO_SDRTM) {
-				lValue = ComboBox_GetCurItemData(m_hWnd, IDC_COMBO_SDRTM);
+				lValue = ComboBox_GetCurItemData(m_rendererPane, IDC_COMBO_SDRTM);
 				if (lValue != m_SetsPP.iSdrToneMappingType) {
 					m_SetsPP.iSdrToneMappingType = lValue;
 					SetDirty();
@@ -709,12 +715,12 @@ HWND CVRMainPPage::CreateHintWindow(HWND parent, int timePop, int timeInit, int 
 void CVRMainPPage::AddHint(int id, const LPCWSTR text)
 {
 	if (!m_hHint) {
-		m_hHint = CreateHintWindow(m_Dlg, 15000);
+		m_hHint = CreateHintWindow(m_hWnd, 15000);
 	}
 	TOOLINFOW ti;
 	ti.cbSize = sizeof(TOOLINFOW);
 	ti.uFlags = TTF_SUBCLASS | TTF_IDISHWND;
-	ti.hwnd = m_Dlg;
+	ti.hwnd = ControlParent(id);
 	ti.uId = (LPARAM)GetDlgItem(id).m_hWnd;
 	ti.lpszText = const_cast<LPWSTR>(text);
 	SendMessageW(m_hHint, TTM_ADDTOOLW, 0, (LPARAM)&ti);

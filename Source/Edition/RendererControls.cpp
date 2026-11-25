@@ -26,8 +26,10 @@
 
 std::optional<HRESULT> CMpcVideoRenderer::GetEditionBool(LPCSTR field, bool* value)
 {
+    if (!strcmp(field,"enhancementEnabled")) { CAutoLock lock(&m_RendererLock); *value=m_enhancementEnabled; return S_OK; }
+    if (!strcmp(field, "adaptiveTone")) { *value=m_adaptiveTone.load()!=0; return S_OK; }
     if (!strcmp(field, "videoEnhancement")) {
-        *value = m_videoEnhancement.load();
+        *value = m_videoEnhancement.load()!=0 || m_memoryColor.load()!=0 || m_skinTone.load()!=0;
         return S_OK;
     }
 	if (!strcmp(field, "dlssNR")) {
@@ -40,7 +42,12 @@ std::optional<HRESULT> CMpcVideoRenderer::GetEditionBool(LPCSTR field, bool* val
 
 std::optional<HRESULT> CMpcVideoRenderer::GetEditionInt(LPCSTR field, int* value)
 {
-	// Independent settings channel for the MFG page. The native MPC-VR page
+    constexpr const char* keys[]={"colorEnhancementStrength","memoryColorStrength","skinToneStrength","adaptiveToneStrength"};
+    for(int i=0;i<4;++i) if(!strcmp(field,keys[i])) {
+        CAutoLock lock(&m_RendererLock);
+        *value=m_requestedColorStrengths[i]; return S_OK;
+    }
+    // Independent settings channel for the MFG page. The native MPC-VR page
 	// owns every other Settings_t field; it must never be asked to commit MFG.
 	if (!strcmp(field, "mfgMultiplier")) {
 		CAutoLock lock(&m_RendererLock);
@@ -59,17 +66,23 @@ std::optional<HRESULT> CMpcVideoRenderer::GetEditionInt(LPCSTR field, int* value
 
 std::optional<HRESULT> CMpcVideoRenderer::SetEditionBool(LPCSTR field, bool value)
 {
-    // [VE-00 | 2026-11-24 16:39:20 +08:00] One live transaction; no registry write until Apply.
-    if (!strcmp(field, "videoEnhancement")) {
+    if (!strcmp(field,"enhancementEnabled")) {
         CAutoLock lock(&m_RendererLock);
-        if (m_videoEnhancement.exchange(value) == value) return S_FALSE;
-        if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) {
-            // Never reuse old PTS/LUTs or an already graded backbuffer after a toggle.
-            dx11->ReleaseSvdLutRawTest(true);
-            dx11->InvalidateCompletedBackBuffer();
-        }
-        if (m_filterState == State_Paused) Redraw();
+        if(m_enhancementEnabled==value) return S_FALSE;
+        m_enhancementEnabled=value;
+        ApplyEnhancementStrengths();
         return S_OK;
+    }
+    if (!strcmp(field,"adaptiveTone")) return SetEditionInt("adaptiveToneStrength",value?100:0);
+    if (!strcmp(field,"videoEnhancement")) {
+        // Legacy boolean controls the former three-member group.
+        bool changed=false;
+        for(const auto* key:{"colorEnhancementStrength","memoryColorStrength","skinToneStrength"}) {
+            const HRESULT hr=SetEditionInt(key,value?100:0).value_or(E_NOTIMPL);
+            if(FAILED(hr)) return hr;
+            changed=changed || hr==S_OK;
+        }
+        return changed ? S_OK : S_FALSE;
     }
 
 	// The settings page's two buttons for the channel's logo: they act at once, as the
@@ -114,9 +127,39 @@ std::optional<HRESULT> CMpcVideoRenderer::SetEditionBool(LPCSTR field, bool valu
 	return {};
 }
 
+// Called only under RendererLock: update all four effective values before invalidation/redraw.
+void CMpcVideoRenderer::ApplyEnhancementStrengths()
+{
+    std::atomic_int* strengths[]={&m_videoEnhancement,&m_memoryColor,&m_skinTone,&m_adaptiveTone};
+    bool changed=false, colorCross=false, toneCross=false;
+    for(int i=0;i<4;++i) {
+        const int value=m_enhancementEnabled?m_requestedColorStrengths[i]:0;
+        const int old=strengths[i]->exchange(value);
+        changed |= old!=value;
+        if(i==0) colorCross=(old==0)!=(value==0);
+        if(i==3) toneCross=(old==0)!=(value==0);
+    }
+    if(!changed) return;
+    if(auto* dx11=dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) {
+        if(toneCross) dx11->ResetAdaptiveTone();
+        if(colorCross) dx11->ReleaseSvdLutRawTest(true);
+        dx11->InvalidateCompletedBackBuffer();
+    }
+    if(m_filterState==State_Paused) Redraw();
+}
+
 std::optional<HRESULT> CMpcVideoRenderer::SetEditionInt(LPCSTR field, int value)
 {
-	// One atomic MFG setting entry point, similar to MPCVR-Plus' IExFilterConfig
+    constexpr const char* keys[]={"colorEnhancementStrength","memoryColorStrength","skinToneStrength","adaptiveToneStrength"};
+    for(int i=0;i<4;++i) if(!strcmp(field,keys[i])) {
+        if(value<0 || value>100) return E_INVALIDARG;
+        CAutoLock lock(&m_RendererLock);
+        if(m_requestedColorStrengths[i]==value) return S_FALSE;
+        m_requestedColorStrengths[i]=value;
+        ApplyEnhancementStrengths();
+        return S_OK;
+    }
+    // One atomic MFG setting entry point, similar to MPCVR-Plus' IExFilterConfig
 	// controls. Do not replace a whole Settings_t captured by another tab.
 	// A requested multiplier is durable even when the NGX runtime is unavailable.
 	if (!strcmp(field, "mfgMultiplier")) {

@@ -8,7 +8,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <Link>
-      <AdditionalDependencies>$(SolutionDir)vendor\nvidia\lib\nvsdk_ngx_s.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)vendor\nvidia\lib\nvsdk_ngx_s.lib;comctl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -25,6 +25,10 @@
     <ClCompile Include="DX11VideoProcessorMfg.cpp" />
     <ClCompile Include="DX11VideoProcessorCompletedFrames.cpp" />
     <ClCompile Include="DX11VideoProcessorSvdLut.cpp" />
+    <ClCompile Include="Edition\DX11AdaptiveTone.cpp" />
+    <ClInclude Include="Edition\AdaptiveToneShot.h" />
+    <ClInclude Include="Edition\AdaptiveToneShader.h" />
+    <ClInclude Include="Edition\AdaptiveToneResearch.h" />
     <ClCompile Include="DLSS\DlssOpticalFlow.cpp" />
     <ClCompile Include="DLSS\ZipDepthGpu.cpp" />
     <ClCompile Include="DLSS\DecodedFrameLookahead.cpp" />

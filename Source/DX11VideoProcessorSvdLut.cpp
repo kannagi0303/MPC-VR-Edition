@@ -3,11 +3,15 @@
 #include "Edition/SvdLutStrength.h"
 #include "Edition/SvdLutInput.h"
 #include "Edition/VideoEnhancementStartup.h"
+#include "Edition/AdaptiveToneShader.h"
 #include <algorithm>
 #include <cmath>
 #include <d3dcompiler.h>
 #include <new>
 #include <utility>
+#include <thread>
+#include <chrono>
+#include "Edition/OptionalColorWork.h"
 #include "Helper.h"
 #include "DX11VideoProcessor.h"
 #include "VideoRenderer.h"
@@ -24,7 +28,66 @@
 namespace {
 HRESULT CompileSvdLutOutputShader(const char* source, const D3D_SHADER_MACRO* defines, ID3DBlob** code)
 {
-    return CompileShader(std::string(SvdLutAdaptiveLumaShader) + source + SvdLutOutputShader, defines, "ps_5_0", code);
+    return CompileShader(std::string(SvdLutAdaptiveLumaShader) + (source == PerceptualColorShader ? std::string(AdaptiveToneShader) : std::string()) + source + SvdLutOutputShader, defines, "ps_5_0", code);
+}
+
+// [FA-01 | 2026-11-25 14:07 +08:00] Device-independent bytecode, once per process.
+// Only the CPU compiler runs on this job: no renderer, device, context or
+// model ownership. Like AT's existing compiler job, pin the module before
+// detaching so fast exit never joins an in-progress D3DCompile.
+struct PerceptualBytecode {
+    CComPtr<ID3DBlob> code;
+    std::atomic_bool ready{false};
+};
+const std::shared_ptr<PerceptualBytecode>& StandalonePerceptualBytecode()
+{
+    static const auto job = []() -> std::shared_ptr<PerceptualBytecode> {
+        try {
+            HMODULE module = nullptr;
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                reinterpret_cast<LPCWSTR>(&StandalonePerceptualBytecode), &module)) return {};
+            auto result = std::make_shared<PerceptualBytecode>();
+            std::thread([result] {
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                try { CompileSvdLutOutputShader(PerceptualColorShader, nullptr, &result->code); }
+                catch (...) {}
+                result->ready.store(true, std::memory_order_release);
+            }).detach();
+            return result;
+        } catch (...) { return {}; }
+    }();
+    return job;
+}
+
+// [FA-02 | 2026-11-25 14:36 +08:00] Fixed CPU bytecode is process-owned,
+// not tied to a model or video. Never capture a device/context in this job.
+struct GradeBytecode {
+    CComPtr<ID3DBlob> thumbnail, fused, luma, chroma;
+    std::atomic_bool ready{false};
+};
+const std::shared_ptr<GradeBytecode>& CachedGradeBytecode()
+{
+    static const auto job = []() -> std::shared_ptr<GradeBytecode> {
+        try {
+            HMODULE module = nullptr;
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                reinterpret_cast<LPCWSTR>(&CachedGradeBytecode), &module)) return {};
+            auto result = std::make_shared<GradeBytecode>();
+            std::thread([result] {
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                const D3D_SHADER_MACRO b[] = {{"P1_RAW_B", "1"}, {nullptr, nullptr}};
+                try {
+                    CompileShader(SvdLutThumbnailShader, nullptr, "ps_5_0", &result->thumbnail);
+                    CompileSvdLutOutputShader(PerceptualColorShader, b, &result->fused);
+                    CompileSvdLutOutputShader(SvdLutB2MemoryShader, nullptr, &result->chroma);
+                    CompileSvdLutOutputShader(SvdLutB2LuminanceShader, nullptr, &result->luma);
+                } catch (...) {}
+                result->ready.store(true, std::memory_order_release);
+            }).detach();
+            return result;
+        } catch (...) { return {}; }
+    }();
+    return job;
 }
 }
 
@@ -40,6 +103,25 @@ HRESULT svdlut::CreateGradeShader(ID3D11Device* device, ID3D11PixelShader** shad
 // The render/presenter threads never call D3DCompile for Video Enhancement.
 void svdlut::PrepareVideoEnhancementShaders(ID3D11Device* device, VideoEnhancementShaders& shaders, const std::atomic_bool& cancelled)
 {
+    const auto& cached = CachedGradeBytecode();
+    if (cached) {
+        // Only the existing model worker can wait here, never RendererLock.
+        // Normally compilation overlaps NGX/DirectML initialization and is done.
+        while (!cached->ready.load(std::memory_order_acquire)) {
+            if (cancelled.load(std::memory_order_acquire)) return;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        const auto create = [&](auto& output, const auto& code) {
+            if (code && !cancelled.load(std::memory_order_acquire))
+                device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, output.GetAddressOf());
+        };
+        create(shaders.thumbnail, cached->thumbnail);
+        create(shaders.fused, cached->fused);
+        create(shaders.chroma, cached->chroma);
+        create(shaders.luma, cached->luma);
+        return;
+    }
+    // If pin/thread creation failed, retain the old worker-only compiler path.
     const D3D_SHADER_MACRO b[] = {{"P1_RAW_B", "1"}, {nullptr, nullptr}};
     const auto prepare = [&](auto& output, const char* source, const D3D_SHADER_MACRO* defines, bool grade) {
         if (cancelled.load(std::memory_order_acquire)) return;
@@ -53,7 +135,59 @@ void svdlut::PrepareVideoEnhancementShaders(ID3D11Device* device, VideoEnhanceme
     prepare(shaders.fused, PerceptualColorShader, b, true);
     prepare(shaders.chroma, SvdLutB2MemoryShader, nullptr, true);
     prepare(shaders.luma, SvdLutB2LuminanceShader, nullptr, true);
-    prepare(shaders.standalone, PerceptualColorShader, nullptr, true);
+}
+
+// CPU work may start before the GPU admission gate. No inference, shader
+// device creation or immediate-context access on this path.
+void CDX11VideoProcessor::PrepareOptionalColorBytecode()
+{
+    if (m_fastShutdown || m_pFilter->m_bFlushing ||
+        m_pFilter->m_playbackCancel.Capture()->Cancelled() || SourceIsHDR() ||
+        m_bVPUseRTXVideoHDR || m_pPSHalfOUtoInterlace ||
+        m_currentSwapChainColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709) return;
+    if (OptionalColorSupported()) StartAdaptiveToneShader();
+    if (PerceptualEnabled()) {
+        StandalonePerceptualBytecode();
+        // On very small CPUs let the model worker request the grade cache later.
+        static const bool parallelCompile = std::thread::hardware_concurrency() >= 4;
+        if (parallelCompile && m_pFilter->m_videoEnhancement.load()) CachedGradeBytecode();
+    }
+}
+
+// Only speculative work is arbitrated here. Actual presentation, producer,
+// original-frame protection, and GPU model admission are unchanged.
+void CDX11VideoProcessor::PrimeOptionalColorFrames()
+{
+    const bool tone = OptionalColorSupported();
+    const bool ve = m_pFilter->m_videoEnhancement.load() && !m_svdLutRawTest.failed;
+    if (!tone && !ve) return;
+    const auto canPrime = [&]() {
+        if (m_completedFrames.empty() || !m_completedFence || m_fastShutdown ||
+            m_pFilter->m_bFlushing || m_pFilter->m_playbackCancel.Capture()->Cancelled() ||
+            m_completedPresentFairness.Active() || CompletedGeometryChanging() ||
+            !m_completedBatches.empty() || m_pFilter->m_completedSourceWaiting.load(std::memory_order_acquire)) return false;
+        CRefTime stream;
+        if (FAILED(m_pFilter->StreamTime(stream))) return false;
+        const auto completed = m_completedFence->GetCompletedValue();
+        if (completed == UINT64_MAX || completed > m_completedFenceValue ||
+            m_completedFrames.front().fence > completed) return false;
+        // Read pacing, never call the mutating Start()/Reset() here. Keep the
+        // normal initial 1.5 ms lead as a conservative minimum for optional work.
+        const auto submitLead = REFERENCE_TIME((std::max)(1.5, m_completedDisplayPacing.LeadMs()) * 10'000);
+        const auto slack = m_completedFrames.front().due - REFERENCE_TIME(stream) -
+            CompletedBackBufferLead(m_completedFrames.front(), submitLead);
+        return edition::color_work::MayPrime(slack, m_completedFenceValue - completed);
+    };
+    if (!canPrime()) return;
+    const bool toneFirst = edition::color_work::ToneFirst(tone, ve, m_optionalToneTurn);
+    if (tone && ve) m_optionalToneTurn = !m_optionalToneTurn;
+    if (toneFirst) {
+        PrimeAdaptiveToneFrames();
+        if (ve && canPrime()) PrimeSvdLutTemporalFrames();
+    } else {
+        if (ve) PrimeSvdLutTemporalFrames();
+        if (tone && canPrime()) PrimeAdaptiveToneFrames();
+    }
 }
 
 namespace {
@@ -135,21 +269,17 @@ bool CDX11VideoProcessor::VideoEnhancementMayStart(bool buffered)
         clock, ready.ready, ready.readyFrames);
 }
 
-float CDX11VideoProcessor::VideoEnhancementFade(REFERENCE_TIME pts) const
-{
-    const auto start = m_svdLutRawTest.activationPts;
-    return start == INVALID_TIME || pts == INVALID_TIME ? 0.0f : edition::ve::Fade(pts, start);
-}
-
 void CDX11VideoProcessor::ResetSvdLutHistory()
 {
     // Seek, flush and geometry changes invalidate all temporal LUT state.
     ResetSvdLutTemporalQueue();
+    ResetAdaptiveTone();
 }
 
 void CDX11VideoProcessor::ReleaseSvdLut(bool fast)
 {
     ResetSvdLutHistory();
+    ResetAdaptiveTone(true);
     ReleaseSvdLutRawTest(fast);
     m_perceptual.constants.Release();
     m_perceptual.sampler.Release();
@@ -236,35 +366,32 @@ HRESULT CDX11VideoProcessor::DrawCompletedSvdLut(const CompletedFrame& frame, ID
 {
     auto& b = m_svdLutRawTest;
     b.active = false;
-    if (!m_pFilter->m_videoEnhancement.load()) return S_FALSE;
-    if (b.activationPts == INVALID_TIME && !VideoEnhancementMayStart(true)) return S_FALSE;
-    const auto hr = DrawCompletedSvdLutRaw(frame, target, picture, geometryChanging);
-    if (hr == S_OK) return hr;
-    // Do not introduce perceptual colour first and then abruptly add the LUT.
-    // A genuinely unavailable model can still use the existing safe fallback.
-    if (b.activationPts == INVALID_TIME && !b.failed &&
-        b.model.GetState() != svdlut::ModelWorker::State::Failed) return S_FALSE;
+    if (!PerceptualEnabled() || m_fastShutdown || m_pFilter->m_bFlushing) return S_FALSE;
+    // [FA-01] Only LUT analysis obeys the cold model admission gate.
+    // The stateless colour shader may replace the ordinary direct blit.
+    if (m_pFilter->m_videoEnhancement.load() && (b.activationPts != INVALID_TIME || VideoEnhancementMayStart(true))) {
+        const auto hr = DrawCompletedSvdLutRaw(frame, target, picture, geometryChanging);
+        if (hr == S_OK) return hr;
+    }
     return DrawCompletedPerceptual(frame, target, picture, geometryChanging);
 }
 
-void CDX11VideoProcessor::DrawSvdLut(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME timestamp)
+void CDX11VideoProcessor::DrawSvdLut(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME timestamp,bool allowTemporalCapture)
 {
     auto& b = m_svdLutRawTest;
     b.active = false;
-    if (!m_pFilter->m_videoEnhancement.load()) return;
-    if (b.activationPts == INVALID_TIME && !VideoEnhancementMayStart(false)) return;
-    DrawSvdLutRaw(target, picture, timestamp);
-    if (!b.active && (b.activationPts != INVALID_TIME || b.failed ||
-        b.model.GetState() == svdlut::ModelWorker::State::Failed))
-        DrawPerceptual(target, picture, timestamp);
+    if (!PerceptualEnabled() || m_fastShutdown || m_pFilter->m_bFlushing) return;
+    if (m_pFilter->m_videoEnhancement.load() && (b.activationPts != INVALID_TIME || VideoEnhancementMayStart(false)))
+        DrawSvdLutRaw(target, picture, timestamp,allowTemporalCapture);
+    if (!b.active) DrawPerceptual(target, picture, timestamp);
 }
 
-// P1: no new model, readback, asynchronous task, or full-size colour pass
-// when the temporal grade is already drawing its LUT. Standalone mode replaces the normal
+// P1: no new model, readback or full-size colour pass when the temporal grade
+// is already drawing its LUT. Standalone mode replaces the normal
 // completed-frame blit where geometry permits.
 bool CDX11VideoProcessor::PerceptualEnabled() const
 {
-    return m_pFilter->m_videoEnhancement.load();
+    return m_pFilter->m_videoEnhancement.load() || m_pFilter->m_memoryColor.load() || m_pFilter->m_skinTone.load();
 }
 
 HRESULT CDX11VideoProcessor::PreparePerceptualShader(int mode)
@@ -290,11 +417,19 @@ HRESULT CDX11VideoProcessor::PreparePerceptualShader(int mode)
     auto& shader = mode == 2 ? e.rawB : e.standalone;
     if (shader) return S_OK;
     if (tried) return E_FAIL;
-    const auto* prepared = m_svdLutRawTest.model.PreparedShaders();
-    if (!prepared) return S_FALSE;
-    tried = true;
-    shader = mode == 2 ? prepared->fused.Get() : prepared->standalone.Get();
-    failed = !shader;
+    if (mode == 0) {
+        const auto& job = StandalonePerceptualBytecode();
+        if (job && !job->ready.load(std::memory_order_acquire)) return S_FALSE;
+        tried = true;
+        failed = !job || !job->code || FAILED(m_pDevice->CreatePixelShader(
+            job->code->GetBufferPointer(), job->code->GetBufferSize(), nullptr, &shader));
+    } else {
+        const auto* prepared = m_svdLutRawTest.model.PreparedShaders();
+        if (!prepared) return S_FALSE;
+        tried = true;
+        shader = prepared->fused.Get();
+        failed = !shader;
+    }
     return failed ? E_FAIL : S_OK;
 }
 
@@ -341,20 +476,21 @@ HRESULT CDX11VideoProcessor::ApplyPerceptual(const Tex2D_t& source, ID3D11Textur
             }
         }
     }
+    const float adaptiveToneWeight=BindAdaptiveTone(pts);
     const float cb[24] = {
         float(visible.left), float(visible.top),
         float(visible.Width() - 1), float(visible.Height() - 1),
         blend, float(offset.x), float(offset.y), rotated,
         tone[0], tone[1], tone[2], confidence,
-        m_pFilter->m_videoEnhancement.load() ? 1.0f : 0.0f,
-        m_pFilter->m_videoEnhancement.load() ? 1.0f : 0.0f,
+        m_pFilter->m_memoryColor.load()/100.f,
+        m_pFilter->m_skinTone.load()/100.f,
         useTone ? 1.0f : 0.0f,
         mode == 2 && useTone ? 1.0f : 0.0f,
         historyWeight, previousRotated,
-        0.01f, mode == 2 ? VideoEnhancementFade(pts) :
-            (m_svdLutRawTest.activationPts == INVALID_TIME ? 1.0f : VideoEnhancementFade(pts)),
-        // DepthTuning.w is final whole-result activation, not LUT strength.
-        BindSvdLutOutputDither(target, mode != 0), 0, 0, 0
+        // [0.2.3] Mode 2 uses the requested calibrated strength on the first valid
+        // LUT draw; no fade. D1 depth dim belongs to Color Enhancement.
+        0.01f * m_pFilter->m_videoEnhancement.load()/100.f, 1.0f,
+        BindSvdLutOutputDither(target, mode != 0 || adaptiveToneWeight>0), adaptiveToneWeight, 0, 0
     };
     CRect input(area);
     input.OffsetRect(offset);
@@ -367,6 +503,8 @@ HRESULT CDX11VideoProcessor::ApplyPerceptual(const Tex2D_t& source, ID3D11Textur
     m_pDeviceContext->PSSetSamplers(1, 1, &e.sampler.p);
     m_pDeviceContext->PSSetSamplers(2, 1, depth ? &e.sampler.p : &noSampler);
     const auto hr = TextureCopyRect(source, target, input, area, shader, e.constants, 0, false);
+    if(adaptiveToneWeight>0) UnbindAdaptiveTone();
+    if(adaptiveToneWeight>0) m_adaptiveTone.applied=hr==S_OK;
     m_pDeviceContext->PSSetShaderResources(1, 1, &noView);
     m_pDeviceContext->PSSetShaderResources(2, 1, &noView);
     m_pDeviceContext->PSSetShaderResources(3, 1, &noView);
@@ -400,8 +538,12 @@ HRESULT CDX11VideoProcessor::DrawCompletedPerceptual(const CompletedFrame& frame
             0, nullptr, {1.0f, 1.0f, 1.0f}, false, 1.0f,
             !geometryChanging && frame.picture == area);
     }
-    // Same scalable fallback as temporal SVDLUT: draw the normal picture once into
-    // an existing reusable texture, then apply the enhancement in the final draw.
+    // [FA-01] Never draw an intermediate for a not-yet-ready shader. The
+    // direct path above needs only one draw; the scaled fallback costs more.
+    if (PreparePerceptualShader(0) != S_OK ||
+        (m_svdLutRawTest.activationPts == INVALID_TIME &&
+            (m_completedPresentFairness.Active() || !VideoEnhancementMayStart(true)))) return S_FALSE;
+    // Same scalable fallback as temporal SVDLUT: reuse existing texture.
     if (FAILED(EnsureSvdLutPicture(d.Format, d.Width, d.Height))) return S_FALSE;
     const auto drawn = DrawCompletedVideo(frame, m_svdLut.picture.pTexture, picture,
         geometryChanging, &area);
@@ -420,7 +562,10 @@ void CDX11VideoProcessor::DrawPerceptual(ID3D11Texture2D* target,
     CRect visible;
     if (!SupportedSdrFormat(desc.Format) ||
         !visible.IntersectRect(picture, CRect(0, 0, desc.Width, desc.Height)) ||
-        visible.Width() < 2 || visible.Height() < 2 ||
+        visible.Width() < 2 || visible.Height() < 2) return;
+    // [FA-01] Do not copy a full picture while the compiler is still working.
+    if (PreparePerceptualShader(0) != S_OK ||
+        (m_svdLutRawTest.activationPts == INVALID_TIME && !VideoEnhancementMayStart(false)) ||
         FAILED(EnsureSvdLutPicture(desc.Format, visible.Width(), visible.Height()))) return;
     // Legacy pre-MFG path must first copy the target to a shader-readable
     // surface; this copy is not needed on the direct completed-video path.

@@ -22,7 +22,7 @@
       <AdditionalIncludeDirectories>$(SolutionDir)Source;$(SolutionDir)Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <Link><SubSystem>Console</SubSystem><AdditionalDependencies>ole32.lib;oleaut32.lib;uuid.lib;comctl32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+    <Link><SubSystem>Console</SubSystem><AdditionalDependencies>ole32.lib;oleaut32.lib;uuid.lib;comctl32.lib;user32.lib;gdi32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
   <ItemGroup><ClCompile Include="EditionPageIntegration.cpp" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -202,6 +202,9 @@ struct Settings_t {
 
 	void SetDefault() {
 		SetEditionDefaults();
+        SetNativeDefaults();
+    }
+    void SetNativeDefaults() {
 		if (IsWindows8OrGreater()) {
 			bUseD3D11                   = true;
 		} else {

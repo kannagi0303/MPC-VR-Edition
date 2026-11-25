@@ -364,19 +364,34 @@ CMpcVideoRenderer::CMpcVideoRenderer(LPUNKNOWN pUnk, HRESULT* phr)
 	if (ERROR_SUCCESS == key.Open(HKEY_CURRENT_USER, OPT_REGKEY_VIDEORENDERER, KEY_READ)) {
 		ReadSettings(key, m_Sets);
         // [VE-00 | 2026-11-24 16:39:20 +08:00] Global setting; legacy settings only migrate once.
-        DWORD ve = 0;
-        if (key.QueryDWORDValue(L"VideoEnhancement", ve) == ERROR_SUCCESS && ve <= 1) {
-            m_videoEnhancement.store(ve == 1);
-        } else {
-            DWORD mode = 0, strength = 200, preferred = 0, skin = 0;
-            if (key.QueryDWORDValue(L"SvdLutMode", mode) != ERROR_SUCCESS || mode > 3) mode = 0;
-            if (key.QueryDWORDValue(L"SvdLutBStrength", strength) != ERROR_SUCCESS || strength > 200) strength = 200;
-            if (key.QueryDWORDValue(L"PreferredColors", preferred) != ERROR_SUCCESS) preferred = 0;
-            if (key.QueryDWORDValue(L"SkinTones", skin) != ERROR_SUCCESS) skin = 0;
-            const bool legacyGrade = mode == 0 ? m_Sets.GetSvdLutStrength() != 0 :
-                (mode == 1 || mode == 2) && strength != 0;
-            m_videoEnhancement.store(legacyGrade || preferred == 1 || skin == 1);
+        DWORD at = 0, ve = 0;
+        const bool hasTone = key.QueryDWORDValue(L"AdaptiveTone", at) == ERROR_SUCCESS && at <= 1;
+        const bool hasVE = key.QueryDWORDValue(L"VideoEnhancement", ve) == ERROR_SUCCESS && ve <= 1;
+        const int legacyTone = hasTone ? int(at)*100 : 100;
+        int legacyColor = hasVE ? int(ve)*100 : 100;
+        if (!hasVE) {
+            DWORD mode=0, strength=200, preferred=0, skin=0;
+            const bool oldMode = key.QueryDWORDValue(L"SvdLutMode",mode)==ERROR_SUCCESS;
+            key.QueryDWORDValue(L"SvdLutBStrength",strength);
+            const bool oldPreferred = key.QueryDWORDValue(L"PreferredColors",preferred)==ERROR_SUCCESS;
+            const bool oldSkin = key.QueryDWORDValue(L"SkinTones",skin)==ERROR_SUCCESS;
+            if (oldMode || oldPreferred || oldSkin || m_Sets.GetSvdLutStrength()!=0)
+                legacyColor = ((mode==0 ? m_Sets.GetSvdLutStrength()!=0 : (mode==1 || mode==2) && strength!=0) || preferred==1 || skin==1) ? 100 : 0;
         }
+        const auto readStrength = [&](LPCWSTR name, int fallback) {
+            DWORD value=0;
+            return key.QueryDWORDValue(name,value)==ERROR_SUCCESS && value<=100 ? int(value) : fallback;
+        };
+        DWORD master = 1;
+        m_enhancementEnabled = key.QueryDWORDValue(L"EnhancementEnabled",master)!=ERROR_SUCCESS || master!=0;
+        m_requestedColorStrengths[0]=readStrength(L"ColorEnhancementStrength",legacyColor);
+        m_requestedColorStrengths[1]=readStrength(L"MemoryColorStrength",legacyColor);
+        m_requestedColorStrengths[2]=readStrength(L"SkinToneStrength",legacyColor);
+        m_requestedColorStrengths[3]=readStrength(L"AdaptiveToneStrength",legacyTone);
+        m_videoEnhancement.store(m_enhancementEnabled?m_requestedColorStrengths[0]:0);
+        m_memoryColor.store(m_enhancementEnabled?m_requestedColorStrengths[1]:0);
+        m_skinTone.store(m_enhancementEnabled?m_requestedColorStrengths[2]:0);
+        m_adaptiveTone.store(m_enhancementEnabled?m_requestedColorStrengths[3]:0);
 		// Upstream's registry-only tuning of the Measured method: read here and nowhere
 		// else, never written, never in a preset.
 		DWORD dw;
@@ -1350,23 +1365,33 @@ STDMETHODIMP CMpcVideoRenderer::SaveSettings()
 	// Snapshot under the renderer lock; the registry write must not hold the GPU
 	// presentation lock. Persistence does not depend on NGX initialization.
 	Settings_t snapshot;
-    DWORD videoEnhancement = 0;
+    DWORD videoEnhancement = 0, adaptiveTone = 0, memoryColor = 0, skinTone = 0, enhancementEnabled = 1;
     {
         CAutoLock lock(&m_RendererLock);
         snapshot = m_Sets;
-        videoEnhancement = m_videoEnhancement.load() ? 1u : 0u;
+        videoEnhancement = m_requestedColorStrengths[0];
+        memoryColor = m_requestedColorStrengths[1];
+        skinTone = m_requestedColorStrengths[2];
+        adaptiveTone = m_requestedColorStrengths[3];
+        enhancementEnabled = m_enhancementEnabled;
     }
 	CRegKey key;
 	const LSTATUS opened = key.Create(HKEY_CURRENT_USER, OPT_REGKEY_VIDEORENDERER);
 	if (opened != ERROR_SUCCESS) return HRESULT_FROM_WIN32(opened);
 	WriteSettings(key, snapshot);
-    // Preview is in-memory; only Apply/Save persists this one setting.
-    const auto stored = key.SetDWORDValue(L"VideoEnhancement", videoEnhancement);
-    if (stored != ERROR_SUCCESS) return HRESULT_FROM_WIN32(stored);
-    DWORD verify = DWORD(-1);
-    if (key.QueryDWORDValue(L"VideoEnhancement", verify) != ERROR_SUCCESS || verify != videoEnhancement)
-        return E_FAIL;
-	return edition::VerifySavedSettings(key, snapshot);
+    const auto storeStrength = [&](LPCWSTR name,DWORD value)->HRESULT {
+        const auto result=key.SetDWORDValue(name,value);
+        if(result!=ERROR_SUCCESS) return HRESULT_FROM_WIN32(result);
+        DWORD verify=DWORD(-1);
+        return key.QueryDWORDValue(name,verify)==ERROR_SUCCESS && verify==value ? S_OK : E_FAIL;
+    };
+    for (const auto& entry : {std::pair{L"ColorEnhancementStrength",videoEnhancement},
+        std::pair{L"MemoryColorStrength",memoryColor}, std::pair{L"SkinToneStrength",skinTone},
+        std::pair{L"AdaptiveToneStrength",adaptiveTone}, std::pair{L"EnhancementEnabled",enhancementEnabled}}) {
+        const auto hr=storeStrength(entry.first,entry.second);
+        if(FAILED(hr)) return hr;
+    }
+    return edition::VerifySavedSettings(key, snapshot);
 }
 
 // ISubRender (DX9)

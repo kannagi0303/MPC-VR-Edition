@@ -20,7 +20,7 @@ cbuffer Parameters : register(b0) {
     float4 SourceControl; // x: Normal A grade blend; y,z: source offset; w: depth rotation
     float4 B21AndDepth;   // x: B2.1 luma participation; w: valid cached-depth confidence
     float4 Enhancements;  // x: Preferred Colors; y: Skin Tones; z: B2.1; w: adaptive B2.2
-    float4 DepthTuning;   // x: previous available; y: previous rotation; z: max linear dim; w: final VE activation
+    float4 DepthTuning;   // x: previous available; y: previous rotation; z: max linear dim; w: LUT-only activation
     float4 OutputQuantization;
 };
 static const float3 YW = float3(.2126, .7152, .0722);
@@ -57,6 +57,7 @@ float3 ApplyNormalA(float3 source, float3 grade, float fade)
 // [VE-06 | 2026-11-24 16:39:20 +08:00] Skin tones, jointly weighted with preferred colours.
 float3 Enhance(float3 source, float3 grade, float depthWeight)
 {
+    if (Enhancements.x <= 0.0 && Enhancements.y <= 0.0) return grade;
     float sy = dot(source, YW);
     float3 sc = source - sy;
     float cs = length(sc);
@@ -133,7 +134,14 @@ float4 SvdLutGradeMain(float4 position)
     grade = b >= 1.0 ? grade : lerp(original, grade, b);
 #endif
 #endif
-    if (Enhancements.x <= .5 && Enhancements.y <= .5) return float4(grade, src.a);
+    // [FA-01 | 2026-11-25 14:07 +08:00] Blend only the calibrated LUT contribution.
+    // At zero activation, this equals the standalone path at the same AT/depth.
+    // At full activation the previously accepted composition is unchanged.
+#if defined(P1_RAW_B)
+    float activation = saturate(DepthTuning.w);
+    grade = activation >= 1.0 ? grade : lerp(original, grade, activation);
+#endif
+    if (Enhancements.x <= 0.0 && Enhancements.y <= 0.0 && DepthTuning.z <= 0.0) return float4(ApplyAdaptiveTone(grade,OutputQuantization.y), src.a);
     float depthWeight = 1.0;
     float farWeight = 0.0;
     if (B21AndDepth.w > .001) {
@@ -162,7 +170,11 @@ float4 SvdLutGradeMain(float4 position)
         farWeight = Smooth(.50, .68, depthValue) *
             saturate(B21AndDepth.w * 2.0) * reliability;
     }
-    float3 enhanced = Enhance(original, grade, depthWeight);
+    // [AT-05 | 2026-11-25 12:03 +08:00] Keep LUT input and B2 references original;
+    // tone-map the calibrated result before the joint preferred/skin colour stage.
+    // Family detection continues to use the original (not the altered luma).
+    float3 toned = ApplyAdaptiveTone(grade, OutputQuantization.y);
+    float3 enhanced = Enhance(original, toned, depthWeight);
     if (farWeight > .001) {
         // Keep highlights nearly intact, avoiding conspicuous sky/lighting
         // shifts. First-order sRGB derivative approximates 1%-scale linear
@@ -174,7 +186,6 @@ float4 SvdLutGradeMain(float4 position)
             step(.04045, enhanced));
         enhanced = saturate(enhanced - darken * srgbSlope);
     }
-    float activation = saturate(DepthTuning.w);
-    return float4(activation >= 1.0 ? enhanced : lerp(original, enhanced, activation), src.a);
+    return float4(enhanced, src.a);
 }
 )";

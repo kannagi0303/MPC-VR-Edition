@@ -75,8 +75,12 @@ LONG CDX11VideoProcessor::DrawFeatureStatus(ID3D11Texture2D* target)
 
 	const bool srActive = m_iVPSuperRes == SUPERRES_DLSS_SR && m_dlssSR.Active();
 	const auto processingRect = ProcessingRect();
+	const auto processingWidth = processingRect.Width();
+	const auto processingHeight = processingRect.Height();
 	const bool upscale = m_srcRectWidth > 0 && m_srcRectHeight > 0 &&
-		m_srcRectWidth < processingRect.Width() && m_srcRectHeight < processingRect.Height();
+		processingWidth > 0 && processingHeight > 0 &&
+		m_srcRectWidth < static_cast<UINT>(processingWidth) &&
+		m_srcRectHeight < static_cast<UINT>(processingHeight);
 	const bool vsrActive = m_iVPSuperRes != SUPERRES_DLSS_SR &&
 		m_VendorId == PCIV_NVIDIA && m_bVPScaling && m_bVPUseSuperRes && upscale;
 	const auto* text = CMpcVideoRenderer::FeatureStatusText(srActive, vsrActive, mfgActive);

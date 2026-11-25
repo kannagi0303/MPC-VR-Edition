@@ -112,6 +112,25 @@
         CComPtr<ID3D11PixelShader> b2MemoryShader;
 	} m_svdLutRawTest;
 
+    // [AT-03 | 2026-11-25 11:25 +08:00] Independent SDR tone state, RendererLock only.
+    struct AdaptiveToneShaderJob { CComPtr<ID3DBlob> code, sampleCode; std::atomic_bool sampleReady=false, ready=false; };
+    struct {
+        edition::adaptive_tone::Shot shot;
+        Tex2D_t thumbnail, staging;
+        CComPtr<ID3D11Buffer> curve, constants, sampleConstants;
+        CComPtr<ID3D11PixelShader> shader, sampleShader;
+        std::shared_ptr<AdaptiveToneShaderJob> job;
+        REFERENCE_TIME requestPts=INVALID_TIME, capturePts=INVALID_TIME, uploadedPts=INVALID_TIME;
+        ULONGLONG primeTick=0;
+        bool pending=false, capturePrimed=false, suspended=false, captureAfterSuspend=false;
+        bool shaderFailed=false, allowDraw=false, applied=false;
+        bool sourceComposition=false; // FA-03A: scoped to the producer draw
+        Tex2D_t sourceOutput;
+        // FA-03B: render-local upstream decision; not a persistent effect flag.
+        bool sourceToneBeforeUpscale=false;
+        std::optional<bool> srSourceToneRoute;
+    } m_adaptiveTone;
+
     // P1/P2 perceptual pipeline state, previously lost when P4 carried an
     // older projection-state include. Preserve the P4 grayProbe above.
     struct {

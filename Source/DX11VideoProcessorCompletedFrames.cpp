@@ -469,6 +469,7 @@ bool CDX11VideoProcessor::PrepareCompletedBatch(REFERENCE_TIME stream, bool orig
         target.serial = phase.serial;
         target.phase = phase.index;
         target.mfg = true;
+        target.sourceColorFinal = batch.target.sourceColorFinal;
         sampled = true;
         if (FAILED(RenderMfgVideo(surface, phase.nativeInput, target.image.pTexture, phase.timestamp,
                                   picture, batch.videoOnlyInput, previousFormat, projected)) ||
@@ -630,7 +631,9 @@ bool CDX11VideoProcessor::NextCompletedFrame(int64_t& deadline)
     // Early B-only 256x256 thumbnail capture is independent of the actual
     // display deadline. The high-priority presenter polls this callback while
     // frames are buffered, including the first frame following a seek.
-    if (!m_completedFrames.empty()) PrimeSvdLutTemporalFrames();
+    if (!m_completedFrames.empty() && !m_completedFrames.front().sourceColorFinal) {
+        PrimeOptionalColorFrames(); // FA-02: recheck actual slack between optional jobs
+    }
     if (!m_completedBatches.empty()) return true;
     if (m_completedFrames.empty()) {
         // No picture is due, but an outstanding WM_SIZE still needs a
@@ -721,8 +724,8 @@ bool CDX11VideoProcessor::PrepareCompletedBackBuffer(CompletedFrame& frame)
 
 bool CDX11VideoProcessor::CompletedGeometryChanging() const
 {
-    constexpr ULONGLONG settleMs = 500;
-    return m_resizePending || (m_completedGeometryTick && GetTickCount64() - m_completedGeometryTick < settleMs);
+    // Experimental: keep pending resize protection, but remove the fixed post-resize settling interval.
+    return m_resizePending;
 }
 
 bool CDX11VideoProcessor::PresentCompletedFrame()
@@ -844,14 +847,14 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
         m_completedFrames.push_front(std::move(frame));
         return false;
     }
-    if (hr == S_OK && m_pFilter->m_videoEnhancement.load()) {
+    if (hr == S_OK && !frame.sourceColorFinal && m_pFilter->m_videoEnhancement.load()) {
         // b.active is the grade state of the image actually used by the
         // successful Present (including a previously prepared backbuffer).
         // These counts exclude speculative pre-draws and failed DXGI retries.
         if (m_svdLutRawTest.active) ++m_svdLutRawTest.presentedGraded;
         else ++m_svdLutRawTest.presentedUngraded;
     }
-    if (hr == S_OK) RememberPresentedSvdLutB2(frame.pts, frame.fence);
+    if (hr == S_OK && !frame.sourceColorFinal) RememberPresentedSvdLutB2(frame.pts, frame.fence);
     if (hr == S_OK && frame.phase == mfg::MaxGenerated) {
         m_pFilter->ReportCompletedMediaTime(frame.pts, frame.end);
         m_pFilter->m_DrawStats.Add(GetPreciseTick());
@@ -905,7 +908,7 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
 }
 
 HRESULT CDX11VideoProcessor::DrawCompletedVideo(const CompletedFrame& frame, ID3D11Texture2D* target,
-                                                const CRect& picture, bool geometryChanging, const CRect* targetBounds)
+                                                const CRect& picture, bool geometryChanging, const CRect* targetBounds, bool toneOnSimple)
 {
     D3D11_TEXTURE2D_DESC desc{};
     target->GetDesc(&desc);
@@ -938,6 +941,10 @@ HRESULT CDX11VideoProcessor::DrawCompletedVideo(const CompletedFrame& frame, ID3
         const auto scaled = ResizeShaderPass(frame.image, target, from, to, 0, false, &m_completedResizeTexture);
         if (SUCCEEDED(scaled)) return scaled;
     }
+    // [AT-06 | 2026-11-25 12:20 +08:00] Same scaler/sampler and draw count,
+    // final target only. Never tone a VE intermediate or a screenshot here.
+    if (toneOnSimple && geometryChanging && frame.image.pShaderResource && !to.IsRectEmpty() &&
+        DrawAdaptiveTone(frame.image, target, from, to, frame.pts, &to, true) == S_OK) return S_OK;
     return TextureCopyRect(frame.image, target, from, to, m_pPS_Simple, nullptr, 0, false, true);
 }
 
@@ -947,10 +954,40 @@ HRESULT CDX11VideoProcessor::DrawCompletedBackBuffer(const CompletedFrame& frame
     auto& trace = mfg::SourceCadenceTrace();
     const bool tracing = scheduled && trace.Enabled();
     const auto started = tracing ? GetPreciseTick() : 0;
+    // [FA-03A | 2026-11-25 14:57 +08:00] Finalized originals and generated
+    // descendants already contain their color result. Resize/redraw only.
+    if(frame.sourceColorFinal) {
+        const auto hr=DrawCompletedVideo(frame,target,picture,geometryChanging);
+        if(tracing) trace.Record("completed_blit",GetPreciseTick(),frame.pts,-1,
+            frame.serial,frame.phase,0,0,0,true,m_mfgLostGenerated,hr,GetPreciseTick()-started,frame.due);
+        return hr;
+    }
     // Use one pass while the picture rectangle is changing. The normal
     // scaler can need a new intermediate texture at each transient size.
+    // [AT-03] Observe only originals; no change to production/queue/fence policy.
+    auto& at=m_adaptiveTone;
+    at.allowDraw=OptionalColorSupported(); at.applied=false;
+    if(at.allowDraw) {
+        PollAdaptiveTone(frame.pts);
+        if(frame.phase==mfg::MaxGenerated) {
+            CRect sample;
+            if(sample.IntersectRect(frame.picture,CRect(0,0,frame.image.desc.Width,frame.image.desc.Height)))
+                ObserveAdaptiveTone(frame.image,sample,frame.pts,true);
+        }
+    }
     auto hr = DrawCompletedSvdLut(frame, target, picture, geometryChanging);
-    if (hr != S_OK) hr = DrawCompletedVideo(frame, target, picture, geometryChanging);
+    if (hr != S_OK && at.allowDraw && AdaptiveToneWeight(frame.pts)>0) {
+        D3D11_TEXTURE2D_DESC d{}; target->GetDesc(&d);
+        CRect visible;
+        if(frame.picture==picture && frame.image.desc.Width==d.Width && frame.image.desc.Height==d.Height && frame.image.desc.Format==d.Format &&
+           visible.IntersectRect(picture,CRect(0,0,d.Width,d.Height))) {
+            const CRect area(0,0,d.Width,d.Height);
+            hr=DrawAdaptiveTone(frame.image,target,area,area,frame.pts,&visible);
+        }
+    }
+    if (hr != S_OK) hr = DrawCompletedVideo(frame, target, picture, geometryChanging, nullptr, at.allowDraw);
+    if(hr==S_OK && at.allowDraw && !at.applied) DrawAdaptiveToneTarget(target,picture,frame.pts);
+    at.allowDraw=false;
     if (tracing) {
         const auto finished = GetPreciseTick();
         trace.Record("completed_blit", finished, frame.pts, -1,
@@ -1042,7 +1079,7 @@ HRESULT CDX11VideoProcessor::PresentCompletedVideo(const CompletedFrame& frame, 
     }
     if (!geometryChanging && m_bVBlankBeforePresent && m_pDXGIOutput) m_pDXGIOutput->WaitForVBlank();
     // Use the actual resized video rectangle when applying the grade.
-    const CRect* outputPicture = (frame.projected || m_pFilter->m_videoEnhancement.load()) ? &picture : nullptr;
+    const CRect* outputPicture = (frame.projected || PerceptualEnabled()) ? &picture : nullptr;
     const auto presentHr = FinishMfgPresent(back, frame.pts, 0, scheduled, outputPicture, true, busyRetry);
     if (presentHr == DXGI_ERROR_WAS_STILL_DRAWING && scheduled) {
         // Retain only the identity of the buffer; do not hold a COM reference
@@ -1078,6 +1115,7 @@ void CDX11VideoProcessor::ClearCompletedFrames(bool release)
     m_completedResizeEarlyDrops = 0;
     // Seek/stop/flush invalidates asynchronous enhancement work and its PTS.
     ResetSvdLutTemporalQueue();
+    ResetAdaptiveTone();
     m_completedFrames.clear();
     m_completedFree.clear();
     m_completedLast.reset();

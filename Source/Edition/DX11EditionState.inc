@@ -28,6 +28,7 @@
 	mfg::Session m_mfg;
 	bool m_startupHasPicture = false;
 	bool m_extendedStartupPending = false;
+    bool m_optionalToneTurn = true; // FA-02: fair optional prime order
 	mfg::DecodedFrameDifference m_mfgDecodedDifference;
 	std::atomic<unsigned> m_mfgPendingRepeats{0};
 	bool m_useZipDepthSr = false;
@@ -120,6 +121,8 @@
 	bool m_mfgLastNativeInput=false;
     bool m_mfgLastPostVsrInput=false;
     bool m_mfgLastVideoOnlyInput = false;
+    std::optional<bool> m_mfgLastSourceColorFinal; // FA-03A: no pair across colour routing changes
+    bool m_mfgLastToneBeforeUpscale=false; // FA-03B: distinguish native SR input from post-SR tone
 	bool QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timestamp, bool& overlayInputHandled,
 		bool nativeInput, bool postVsrInput, bool videoOnlyInput = false, bool projected = false);
 	bool PresentMfg();
@@ -156,13 +159,13 @@
     CTex2DRing m_processingPostScale;
     Tex2D_t m_completedResizeTexture;
 
-	HRESULT CompositeMfg(const mfg::FrameSurface& surface,REFERENCE_TIME timestamp,bool nativeInput, uint64_t serial);
+	HRESULT CompositeMfg(const mfg::FrameSurface& surface,REFERENCE_TIME timestamp,bool nativeInput, uint64_t serial,bool original);
     HRESULT RenderMfgVideo(const mfg::FrameSurface& surface, bool nativeInput, ID3D11Texture2D* target,
                            REFERENCE_TIME timestamp, const CRect& targetPicture, bool videoOnlyInput,
                            bool bypassUpscale = false, bool projected = false);
     HRESULT FinishMfgPresent(ID3D11Texture2D* preparedVideo, REFERENCE_TIME timestamp, uint64_t serial,
                              bool completed = false, const CRect* pictureOverride = nullptr,
-                             bool svdLutHandled = false, bool alreadyComposited = false);
+                             bool svdLutHandled = false, bool alreadyComposited = false,bool original = true);
     void DrawMfgPresentOverlays(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME timestamp, uint64_t serial);
     struct CompletedFrame {
         Tex2D_t image;
@@ -174,6 +177,9 @@
         bool videoOnly = false;
         bool projected = false;
         bool presentRetried = false;
+        // [FA-03A | 2026-11-25 14:57 +08:00] Color is baked upstream;
+        // never analyze or grade this original or its synthetic descendants.
+        bool sourceColorFinal = false;
     };
     struct CompletedBatch {
         CompletedFrame target;
@@ -289,7 +295,7 @@
     HRESULT DrawCompletedBackBuffer(const CompletedFrame& frame, ID3D11Texture2D* target,
                                     const CRect& picture, bool geometryChanging, bool scheduled);
     HRESULT DrawCompletedVideo(const CompletedFrame& frame, ID3D11Texture2D* target, const CRect& picture,
-                               bool geometryChanging = false, const CRect* targetBounds = nullptr);
+                               bool geometryChanging = false, const CRect* targetBounds = nullptr, bool toneOnSimple = false);
 	const Tex2D_t* PrepareDepth3DPreview(const CompletedFrame& frame, const CRect& sourceRect);
 	bool EnsureDepth3DMeshResources();
     HRESULT PresentCompletedVideo(const CompletedFrame& frame, bool scheduled = false, uint64_t* preparedReadFence = nullptr);

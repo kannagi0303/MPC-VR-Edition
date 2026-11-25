@@ -1,4 +1,4 @@
-param([string]$MSBuildPath)
+param([string]$MSBuildPath, [switch]$VisualTabsOnly)
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
@@ -20,6 +20,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Renderer build failed.' }
 & $MSBuildPath (Join-Path $PSScriptRoot 'EditionPageIntegration.vcxproj') @buildArguments
 if ($LASTEXITCODE -ne 0) { throw 'Property page test build failed.' }
 
+if (-not $VisualTabsOnly) {
 # Compile the actual production source-selection method against backend doubles.
 # Source extraction avoids maintaining a second copy of the routing algorithm.
 $processingSource = [IO.File]::ReadAllText((Join-Path $projectRoot 'Source\Edition\DX11ProcessingSource.cpp'))
@@ -94,6 +95,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Processing-source test build failed.' }
 & (Join-Path $projectRoot '_bin\edition-tests\ProcessingSourceIntegration.exe')
 if ($LASTEXITCODE -ne 0) { throw 'Processing-source transition tests failed.' }
 
+}
+
 $runDirectory = Join-Path $projectRoot ('_bin\edition-tests\run-' + [guid]::NewGuid().ToString('N'))
 $withProfiles = Join-Path $runDirectory 'with-profiles'
 $withoutProfiles = Join-Path $runDirectory 'without-profiles'
@@ -104,8 +107,14 @@ Copy-Item -LiteralPath $filter -Destination (Join-Path $withProfiles 'MPCVRMFG64
 Copy-Item -LiteralPath $filter -Destination (Join-Path $withoutProfiles 'MPCVRMFG64.ax')
 Copy-Item -LiteralPath (Join-Path $projectRoot 'build-support\VRProfiles\jvrporn.ini') -Destination (Join-Path $withProfiles 'VRProfiles\jvrporn.ini')
 $test = Join-Path $projectRoot '_bin\edition-tests\EditionPageIntegration.exe'
-& $test (Join-Path $withProfiles 'MPCVRMFG64.ax') 1
+$pageArgs = @()
+if ($VisualTabsOnly) { $pageArgs += '--visual-tabs' }
+& $test (Join-Path $withProfiles 'MPCVRMFG64.ax') 1 @pageArgs
 if ($LASTEXITCODE -ne 0) { throw 'Property page tests with JVR profiles failed.' }
-& $test (Join-Path $withoutProfiles 'MPCVRMFG64.ax') 0
+& $test (Join-Path $withoutProfiles 'MPCVRMFG64.ax') 0 @pageArgs
 if ($LASTEXITCODE -ne 0) { throw 'Property page tests without JVR profiles failed.' }
-Write-Output 'Edition settings persistence, VP policy, processing-source and property page tests passed. Isolated artifacts were retained under _bin/edition-tests.'
+if ($VisualTabsOnly) {
+    Write-Output 'Visible tab/DC/background tests passed with and without VR profiles.'
+} else {
+    Write-Output 'Edition settings persistence, VP policy, processing-source and property page tests passed. Isolated artifacts were retained under _bin/edition-tests.'
+}

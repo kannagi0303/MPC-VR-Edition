@@ -24,7 +24,7 @@ HRESULT CreateGradeShader(ID3D11Device* device, ID3D11PixelShader** shader);
 // Immutable after ModelWorker publishes Ready/Failed. Device-only operations;
 // no immediate context or renderer pointer is used by the worker.
 struct VideoEnhancementShaders {
-    Microsoft::WRL::ComPtr<ID3D11PixelShader> thumbnail, fused, standalone, luma, chroma;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> thumbnail, fused, luma, chroma;
 };
 void PrepareVideoEnhancementShaders(ID3D11Device* device, VideoEnhancementShaders& shaders, const std::atomic_bool& cancelled);
 

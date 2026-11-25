@@ -115,6 +115,8 @@ std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Tex
 	const edition::VideoFrame& frame, HRESULT& hr)
 {
     if (m_pFilter->m_playbackCancel.Capture()->Cancelled()) return S_OK;
+    m_adaptiveTone.sourceToneBeforeUpscale=false; // FA-03B: each original has its own decision
+    PrepareOptionalColorBytecode(); // FA-02: CPU-only, independent of GPU warmup admission
 	const auto& [field, frameStartTime, mfgEnabledForRate, detached, completedVideoOnly,
 		second, wantsProjection, projected, projectionTicks, sourceReady,
 		frameSource, outputPicture, processingRect] = frame;
@@ -250,6 +252,7 @@ std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Tex
 		? m_rtStart + (second ? m_sampleDuration / 2 : 0)
 		: frameStartTime;
 	auto processPicture = [&](ID3D11Texture2D* target, const CRect& rect, CTex2DRing* postScale) {
+        m_adaptiveTone.sourceToneBeforeUpscale=false; // retry must not inherit a prior draw decision
 		const bool canWarm = !nativeWarmupSelected && prepareMfg && (!m_resizePending || postScale);
 		const bool ready = !nativeWarmupPending && (!canWarm || mfgReady(target));
 		m_extendedStartupPending |= playFirst && !ready;
@@ -309,7 +312,11 @@ std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Tex
 		if (QueueMfg(pictureTexture, frameStartTime, overlayInputHandled, false, false, videoOnlyInput, projected)) return S_OK;
 	} else if (sourceReady && mfgEnabledForRate && !m_resizePending && m_pFilter->m_filterState == State_Running) StopMfg(false);
 	if (!m_completedTarget && (videoOnly || projected || !m_renderRect.IsRectEmpty())) {
-		DrawSvdLut(pictureTexture, videoOnly ? processingRect : outputPicture, timestamp);
+        const auto atPicture=videoOnly ? processingRect : outputPicture;
+        BeginAdaptiveToneLegacy(pictureTexture,atPicture,timestamp);
+        DrawSvdLut(pictureTexture, atPicture, timestamp);
+        DrawAdaptiveToneTarget(pictureTexture,atPicture,timestamp);
+        m_adaptiveTone.allowDraw=false;
 	}
 	if (projected && DepthOverlayEnabled() && !overlayInputHandled) {
 		DrawDepthOverlay(pictureTexture, videoOnlyInput ? processingRect : outputPicture, timestamp);
@@ -322,6 +329,17 @@ std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Tex
 	}
 	if (m_completingSample && m_completedTarget) {
 		if (FAILED(hr)) return hr;
+        // MFG bypass/disabled/failure: finalize the same original before it
+        // becomes immutable in the completed queue. No extra copy if inactive.
+        if (m_adaptiveTone.sourceToneBeforeUpscale) {
+            m_completedTarget->sourceColorFinal=true;
+        } else if (SourceToneEligible()) {
+            auto& target=*m_completedTarget;
+            auto* corrected=PrepareSourceTone(target.image,target.picture,timestamp);
+            if(corrected && corrected!=target.image.pTexture.p)
+                m_pDeviceContext->CopyResource(target.image.pTexture,corrected);
+            target.sourceColorFinal=true;
+        }
 		if (!m_completedBatches.empty()) {
 			m_completedBatches.push_back({std::move(*m_completedTarget), {}});
 			m_completedPresenter.Wake();

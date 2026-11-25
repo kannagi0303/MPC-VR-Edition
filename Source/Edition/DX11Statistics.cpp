@@ -299,10 +299,16 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 	std::wstring level = hasVideoBuffer ? L"--" : L"Off";
 	if (hasVideoBuffer && m_completedBufferPercent) level = std::format(L"{}%", *m_completedBufferPercent);
 	const auto separator = str.size() + 1;
-	str += std::format(L"\n\nDLSS SR  {}\nVSR      {}\nMFG      {}\nZipDepth {} | Video Enhancement {} | Video buffer {}",
+	str += std::format(L"\n\nDLSS SR  {}\nVSR      {}\nMFG      {}\nZipDepth {} | Color Enhancement {} | Video buffer {}",
 		srStats, vsrStats, mfgStats, depthActive ? L"On" : L"Off", svdStats, level);
 
-	if (m_showEditionDetails) {
+
+    if (m_pFilter->m_adaptiveTone.load()) {
+        const auto& at=m_adaptiveTone;
+        str += std::format(L"\nAdaptive Tone {}% | {}", m_pFilter->m_adaptiveTone.load(), !AdaptiveToneSupported()?L"SDR required":at.shaderFailed?L"Shader unavailable":at.shot.locked<0?L"Analyzing":!at.shot.active?L"Neutral":at.applied?L"Active":L"Ready");
+        if(m_showEditionDetails) str+=std::format(L" | anchor {}/{}",at.shot.count,edition::adaptive_tone::AnchorSamples);
+    }
+    if (m_showEditionDetails) {
 		// Keep the full diagnostic counters in their owners, but do not rebuild
 		// a multi-page text dump every time Statistics is displayed.
 		str += L"\n\nGPU / timing";
@@ -364,9 +370,9 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 				std::format(L"\nZipDepth      {}", m_zipDepth.Status());
 		}
         if (PerceptualEnabled()) {
-            str += std::format(L"\nPreferred/Skin {} / {} | Depth {} used / {} fallback",
-                m_pFilter->m_videoEnhancement.load() ? L"On" : L"Off",
-                m_pFilter->m_videoEnhancement.load() ? L"On" : L"Off",
+            str += std::format(L"\nMemory/Skin {}% / {}% | Depth {} used / {} fallback",
+                m_pFilter->m_memoryColor.load(),
+                m_pFilter->m_skinTone.load(),
                 m_perceptual.depthUsed, m_perceptual.depthFallback);
             if (m_perceptual.failedStandalone || m_perceptual.failedB)
                 str += L"\nPerceptual    shader compile failed (fallback)";

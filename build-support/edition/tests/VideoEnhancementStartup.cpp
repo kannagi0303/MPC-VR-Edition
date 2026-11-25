@@ -2,9 +2,7 @@
 #include "../../../Source/Edition/VideoEnhancementStartup.h"
 #include <cassert>
 #include <iostream>
-#include <limits>
 using edition::ve::MayStart;
-using edition::ve::Fade;
 int main() {
     // No startup GPU work while flushing, NGX preparing, or geometry settling.
     for (int flag = 0; flag < 3; ++flag)
@@ -18,13 +16,6 @@ int main() {
     // Bypass and unbuffered legacy are not trapped at a fixed buffer threshold.
     assert(MayStart(false,false,false,true,true,false,false,0,0));
     assert(MayStart(false,false,false,false,false,true,false,0,0));
-    // Fade is monotonic, finite, and entirely media-time based.
-    constexpr int64_t start = 123456789;
-    assert(Fade(start,start)==0 && Fade(start-1,start)==0);
-    assert(Fade(start+1250000,start)==.5f);
-    assert(Fade(start+2500000,start)==1);
-    assert(Fade(std::numeric_limits<int64_t>::max(),std::numeric_limits<int64_t>::min())==1);
-    float prev=0;
-    for(int64_t t=0;t<=3000000;t+=1000) {float now=Fade(start+t,start);assert(now>=prev && now<=1);prev=now;}
-    std::cout << "VE cold admission + media-time fade PASS\n";
+    // EXP-FADE-0 removes the activation ramp, not the cold admission gate.
+    std::cout << "VE cold admission PASS\n";
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Video Enhancement production temporal SVDLUT path (former B).
-// Full calibrated output strength; historical shader identifiers retained for traceability.
+// User-controlled calibrated output strength; historical shader identifiers retained for traceability.
 
 void CDX11VideoProcessor::ReleaseSvdLutRawTest(bool fast)
 {
@@ -559,6 +559,9 @@ void CDX11VideoProcessor::PrimeSvdLutTemporalFrames()
         !m_completedFence || !m_pDeviceContext ||
         m_currentSwapChainColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 ||
         SourceIsHDR() || m_bVPUseRTXVideoHDR || m_pPSHalfOUtoInterlace) return;
+    // [FA-01 | 2026-11-25 14:07 +08:00] Prewarm only device-independent
+    // bytecode while frames are buffered; no GPU work and no model dependency.
+    if (!m_fastShutdown && !m_pFilter->m_bFlushing) StandalonePerceptualBytecode();
     if (b.activationPts == INVALID_TIME && !VideoEnhancementMayStart(true)) return;
     if (!b.attempted && !StartSvdLutRawTest()) return;
     if (b.model.GetState() != svdlut::ModelWorker::State::Ready) return;
@@ -577,6 +580,7 @@ void CDX11VideoProcessor::PrimeSvdLutTemporalFrames()
         [](const auto& c) { return c.pending || bool(c.input); });
     for (const auto& frame : m_completedFrames) {
         if (pending >= 2) break;
+        if (frame.sourceColorFinal) break;
         if (frame.phase != mfg::MaxGenerated || frame.pts == INVALID_TIME ||
             frame.pts < headPts || frame.pts - headPts > lookahead ||
             frame.fence > completed || !frame.image.pShaderResource) continue;
@@ -622,6 +626,7 @@ void CDX11VideoProcessor::PrefetchSvdLutRawFuture(const CompletedFrame& current,
     // At most one speculative evaluation per displayed frame. Steady-state
     // cost remains one inference per NEW frame (the next frame is reused).
     for (const auto& future : m_completedFrames) {
+        if (future.sourceColorFinal) break;
         if (future.phase != mfg::MaxGenerated || future.pts <= current.pts ||
             future.pts > current.pts + svdlut::temporal::MaximumDistancePts ||
             future.fence > finished ||
@@ -838,19 +843,20 @@ HRESULT CDX11VideoProcessor::ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Te
     const auto b2Tone = SvdLutB2ToneForView(pts, fence, lut);
     // [VE-04] Prefer the fully calibrated fallback if the fused P1 shader fails.
     // Never silently revert to an uncalibrated RAW grade.
-    ID3D11PixelShader* drawShader = b.b2MemoryShader.p;
-    if (!drawShader) drawShader = b.b2LuminanceShader.p;
+    ID3D11PixelShader* drawShader = b.b2LuminanceShader.p;
     float cb[16] = { float(visible.left), float(visible.top),
         float(visible.Width() - 1), float(visible.Height() - 1),
-        VideoEnhancementFade(pts), float(offset.x), float(offset.y), 0.0f,
+        // [EXP-FADE-0] Valid selected LUT above; no artificial startup ramp.
+        m_pFilter->m_videoEnhancement.load()/100.f, float(offset.x), float(offset.y), 0.0f,
         b2Tone[0], b2Tone[1], b2Tone[2], 0.0f, 0, 0, 0, 0 };
     CRect srcRect(area);
     srcRect.OffsetRect(offset);
     // [VE-07] Single draw: B1 -> B2.1 -> B2.2 -> preferred/skin -> output.
     HRESULT hr = ApplyPerceptual(source, target, area, visible, offset, pts, 2, lut,
-        b2Tone, true, 1.0f, allowDepth);
+        b2Tone, true, m_pFilter->m_videoEnhancement.load()/100.f, allowDepth);
     if (hr != S_OK) {
         // Safe partial fallback if the fused shader could not be compiled.
+        // Partial fallback retains the requested grade strength.
         if (!drawShader) return S_FALSE;
         cb[12] = BindSvdLutOutputDither(target);
         m_pDeviceContext->UpdateSubresource(b.constants, 0, nullptr, cb, 0, 0);
@@ -947,7 +953,7 @@ HRESULT CDX11VideoProcessor::DrawCompletedSvdLutRaw(const CompletedFrame& frame,
 }
 
 void CDX11VideoProcessor::DrawSvdLutRaw(ID3D11Texture2D* target, const CRect& picture,
-    REFERENCE_TIME pts)
+    REFERENCE_TIME pts,bool allowTemporalCapture)
 {
     auto& b = m_svdLutRawTest;
     b.active = false;
@@ -971,5 +977,5 @@ void CDX11VideoProcessor::DrawSvdLutRaw(ID3D11Texture2D* target, const CRect& pi
     m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
     m_pDeviceContext->CopySubresourceRegion(b.picture.pTexture, 0, 0, 0, 0, target, 0, &box);
     ApplySvdLutRawFrame(b.picture, target, visible, visible,
-        CPoint(-visible.left, -visible.top), pts, 0);
+        CPoint(-visible.left, -visible.top), pts, 0,allowTemporalCapture);
 }

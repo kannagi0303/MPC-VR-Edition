@@ -9,13 +9,14 @@
 #include <iostream>
 #include "../../../Source/DLSS/SvdLutShader.h"
 #include "../../../Source/DLSS/PerceptualColorShader.h"
+#include "../../../Source/Edition/AdaptiveToneShader.h"
 using Microsoft::WRL::ComPtr;
 
 bool Compile(const char* name, const char* source, const D3D_SHADER_MACRO* defines,
              unsigned bytes, bool graded)
 {
     std::string text(source);
-    if (graded) text = std::string(SvdLutAdaptiveLumaShader) + text + SvdLutOutputShader;
+    if (graded) text = std::string(SvdLutAdaptiveLumaShader) + (source == PerceptualColorShader ? std::string(AdaptiveToneShader) : std::string()) + text + SvdLutOutputShader;
     ComPtr<ID3DBlob> code, errors;
     const HRESULT hr = D3DCompile(text.data(), text.size(), name, defines, nullptr,
         "main", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
@@ -52,6 +53,7 @@ int main()
     const D3D_SHADER_MACRO b[] = {{"P1_RAW_B","1"},{nullptr,nullptr}};
     bool ok = true;
     ok &= Compile("thumbnail", SvdLutThumbnailShader, nullptr, 16, false);
+    ok &= Compile("AT thumbnail", AdaptiveToneThumbnail, nullptr, 16, false);
     ok &= Compile("A", SvdLutShader, nullptr, 48, true);
     ok &= Compile("RAW/B1", SvdLutRawShader, nullptr, 64, true);
     ok &= Compile("B2.1", SvdLutB2LuminanceShader, nullptr, 64, true);
@@ -62,5 +64,15 @@ int main()
     ok &= Compile("P1 standalone", PerceptualColorShader, nullptr, 96, true);
     ok &= Compile("P1+A", PerceptualColorShader, a, 96, true);
     ok &= Compile("P1+B", PerceptualColorShader, b, 96, true);
+    const std::string at=std::string(AdaptiveToneShader)+AdaptiveToneStandalone;
+    ComPtr<ID3DBlob> code,errors;
+    HRESULT hr=D3DCompile(at.data(),at.size(),"AT standalone",nullptr,nullptr,"main","ps_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,code.GetAddressOf(),errors.GetAddressOf());
+    if (FAILED(hr)) { std::cerr<<"FAIL AT standalone\n"; ok=false; }
+    else { ComPtr<ID3D11ShaderReflection> reflection; D3D11_SHADER_BUFFER_DESC desc{}; D3D11_SHADER_INPUT_BIND_DESC binding{};
+        ok &= SUCCEEDED(D3DReflect(code->GetBufferPointer(),code->GetBufferSize(),__uuidof(ID3D11ShaderReflection),reinterpret_cast<void**>(reflection.GetAddressOf()))) &&
+            SUCCEEDED(reflection->GetConstantBufferByName("Parameters")->GetDesc(&desc)) && desc.Size==48 &&
+            SUCCEEDED(reflection->GetConstantBufferByName("AdaptiveToneCurve")->GetDesc(&desc)) && desc.Size==1040 &&
+            SUCCEEDED(reflection->GetResourceBindingDescByName("AdaptiveToneCurve",&binding)) && binding.BindPoint==1;
+    }
     return ok ? 0 : 1;
 }

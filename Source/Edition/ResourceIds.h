@@ -36,6 +36,31 @@
 #define IDC_SVDLUT_B_STRENGTH             5039
 #define IDC_SVDLUT_B_VALUE                5040
 #define IDC_VIDEO_ENHANCEMENT             5041
+#define IDC_ADAPTIVE_TONE                 5042
+// 5043/5044 retired (White Balance).
+#define IDC_COLOR_ENHANCEMENT_VALUE       5045
+#define IDC_ADAPTIVE_TONE_VALUE           5046
+#define IDC_MEMORY_COLOR                  5047
+#define IDC_MEMORY_COLOR_VALUE            5048
+#define IDC_SKIN_TONE                     5049
+#define IDC_SKIN_TONE_VALUE               5050
+#define IDC_SETTINGS_TAB                  5051
+// 5052 retired: previous flat control marker.
+#define IDC_ENHANCEMENT_MASTER             5053
+#define IDC_VR_GROUP                       5054
+#define IDC_VR_VERTICAL_LABEL              5055
+#define IDC_VR_REPROJECTION_LABEL          5056
+#define IDC_VR_VERTICAL_PERCENT            5057
+#define IDC_VR_REPROJECTION_PERCENT        5058
+#define IDC_COLOR_LABEL                    5059
+#define IDC_MEMORY_LABEL                   5060
+#define IDC_SKIN_LABEL                     5061
+#define IDC_TONE_LABEL                     5062
+#define IDC_COLOR_PERCENT                  5063
+#define IDC_MEMORY_PERCENT                 5064
+#define IDC_SKIN_PERCENT                   5065
+#define IDC_TONE_PERCENT                   5066
+// 5067 retired: previous flat page background.
 #define IDC_SHOW_DEPTH_OVERLAY            5023
 #define IDC_JVR_FLAT_VIEW                  1372
 #define IDC_JVR_VERTICAL                   1373
@@ -280,3 +305,6 @@
 #define IDC_LOGO_MARGIN_TEXT               1368
 #define IDC_STATIC_LOGO_LIST               1369
 #define IDC_LOGO_LIST                      1370
+
+#define IDD_EDITION_RENDERER_PANE         4012
+#define IDD_EDITION_EXTENDED_PANE         4013

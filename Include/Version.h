@@ -34,6 +34,6 @@
 // Upstream reference: official MPC Video Renderer 0.11.1 release (0.11.1.2636).
 // VERSION_STR/REV_NUM above continue to describe the build's own revision.
 #define MPCVR_UPSTREAM_RELEASE_VERSION "0.11.1.2636"
-#define MPCVR_EDITION_VERSION "0.2.2"
+#define MPCVR_EDITION_VERSION "0.2.3"
 
 #define BRANCH_STR     MAKE_STR(REV_BRANCH)

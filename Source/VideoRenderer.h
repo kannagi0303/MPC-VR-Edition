@@ -108,7 +108,14 @@ private:
 	static void WriteSettings(CRegKey& key, const Settings_t& sets);
 	Settings_t m_Sets;
 	// [VE-00 | 2026-11-24 16:39:20 +08:00] Single Video Enhancement runtime setting.
-	std::atomic_bool m_videoEnhancement = false;
+	std::atomic_int m_videoEnhancement = 100; // calibrated color grade, 0..100
+    std::atomic_int m_adaptiveTone = 100;
+    std::atomic_int m_memoryColor = 100;
+    std::atomic_int m_skinTone = 100;
+    // Requested values and master are accessed under RendererLock. Effective atomics feed existing GPU paths.
+    bool m_enhancementEnabled = true;
+    int m_requestedColorStrengths[4]{100,100,100,100};
+    void ApplyEnhancementStrengths();
 
 	FILTER_STATE m_filterState = State_Stopped;
 	bool m_bFlushing = false;

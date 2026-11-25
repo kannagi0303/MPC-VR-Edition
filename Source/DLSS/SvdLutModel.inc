@@ -58,6 +58,7 @@ void CheckSvdLutTensor(const DmlBufferTensorDesc* tensor, UINT64 bytes,
 class StartupTrace {
     std::unique_ptr<void, decltype(&CloseHandle)> m_file{nullptr, CloseHandle};
     const char* m_stage = "Model file";
+    const ULONGLONG m_started = GetTickCount64();
 
 public:
     StartupTrace() noexcept
@@ -83,7 +84,9 @@ public:
     void Mark(const char* stage) noexcept
     {
         m_stage = stage;
-        Write(stage);
+        char line[256]{};
+        std::snprintf(line, sizeof(line), "+%llu ms | %s", static_cast<unsigned long long>(GetTickCount64()-m_started), stage);
+        Write(line);
     }
 
     const char* Stage() const { return m_stage; }
@@ -414,19 +417,23 @@ struct ModelWorker::Impl {
         StartupTrace trace;
         trace.Mark("Model file");
         try {
-            if (regularizeB) {
-                trace.Mark("Video Enhancement shaders");
-                PrepareVideoEnhancementShaders(renderDevice, veShaders, cancelShaderPreparation);
-                // Stop/seek never waits for shader compilation. A retired worker
-                // must not begin a new DirectML initialization after cancellation.
-                std::lock_guard guard(lock);
-                if (stopping) { finished.store(true, std::memory_order_release); return; }
+            // [FA-02 | 2026-11-25 14:36 +08:00] CPU bytecode already requested
+            // by the render path. GPU model starts at the existing admission;
+            // device shader creation follows it, without serial CPU compiling.
+            if (cancelShaderPreparation.load(std::memory_order_acquire)) {
+                finished.store(true, std::memory_order_release); return;
             }
             trace.Mark("Model file");
             Inference model(adapter, directory, trace);
+            if (cancelShaderPreparation.load(std::memory_order_acquire)) {
+                finished.store(true, std::memory_order_release); return;
+            }
             trace.Mark("SVDLUT pixel shader");
-            // Video Enhancement shaders were prepared on this worker.
-            if (!regularizeB) Check(CreateGradeShader(renderDevice, shader.GetAddressOf()));
+            if (regularizeB) PrepareVideoEnhancementShaders(renderDevice, veShaders, cancelShaderPreparation);
+            else Check(CreateGradeShader(renderDevice, shader.GetAddressOf()));
+            if (cancelShaderPreparation.load(std::memory_order_acquire)) {
+                finished.store(true, std::memory_order_release); return;
+            }
             trace.Mark("Waiting for video thumbnail");
             bool first = true;
             state.store(State::Ready, std::memory_order_release);

@@ -66,7 +66,23 @@ Tex2D_t* CDX11VideoProcessor::PrepareDlssSR(const CRect& srcRect, const CRect& d
 Tex2D_t* CDX11VideoProcessor::EvaluateDlssSR(const Tex2D_t& source, Tex2D_t& input, const CRect& sourceRect,
                                              REFERENCE_TIME timestamp, float frameTimeMs, bool* overlayInputHandled, bool depthPrepared)
 {
-	if (FAILED(TextureCopyRect(source, input.pTexture, sourceRect, sourceRect, m_pPS_Simple, nullptr, 0, false))) {
+    // [FA-03B | 2026-11-25 15:09 +08:00] Only the original-frame SR route.
+    // Input is the existing native-size FP16 NGX surface. Never grade a
+    // generated frame, or change the combined VE path until its lookahead moves.
+    const bool sourceFrame = !m_dlssSRAfterMfg;
+    const CRect native(0,0,source.desc.Width,source.desc.Height);
+    const bool sourceTone = sourceFrame && timestamp>=0 && SourceToneEligible() &&
+        sourceRect==native && input.desc.Width==source.desc.Width && input.desc.Height==source.desc.Height &&
+        input.desc.Format==DXGI_FORMAT_R16G16B16A16_FLOAT && input.pTexture &&
+        source.pTexture && source.pShaderResource && !DepthOverlayEnabled();
+    auto& tone=m_adaptiveTone;
+    if(sourceFrame) {
+        tone.sourceToneBeforeUpscale=false; // raw fallback must not inherit a prior result
+        if(tone.srSourceToneRoute && *tone.srSourceToneRoute!=sourceTone) m_dlssSR.ResetHistory();
+        tone.srSourceToneRoute=sourceTone;
+    }
+    const bool toneDrawn=sourceTone && PrepareSourceTone(source,sourceRect,timestamp,input.pTexture.p)==input.pTexture.p;
+	if (!toneDrawn && FAILED(TextureCopyRect(source, input.pTexture, sourceRect, sourceRect, m_pPS_Simple, nullptr, 0, false))) {
 		m_dlssSRInputStatus = L"source conversion failed";
 		m_dlssSR.ResetHistory();
 		return nullptr;
@@ -74,12 +90,18 @@ Tex2D_t* CDX11VideoProcessor::EvaluateDlssSR(const Tex2D_t& source, Tex2D_t& inp
 	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
 	ID3D11ShaderResourceView* empty = nullptr;
 	m_pDeviceContext->PSSetShaderResources(0, 1, &empty);
-	const bool sourceFrame = !m_dlssSRAfterMfg;
 	const bool overlay = sourceFrame && overlayInputHandled && !m_mfgMultiplier &&
 		!depthPrepared && BlendSourceDepthOverlay(input.pTexture, source.pShaderResource, sourceRect, timestamp);
-	ID3D11ShaderResourceView* cleanSource = depthPrepared || overlay ? source.pShaderResource.p : nullptr;
+    // Keep both depth consumers and SR scene detection on ungraded source.
+    // A projected source has already submitted raw depth in RenderEditionVideo.
+    if(sourceTone && !depthPrepared && (UsesZipDepthSr() || UsesZipDepthMfg()))
+        m_zipDepth.Update(m_pDevice,m_pDeviceContext,source.pShaderResource,sourceRect,sourceRect.Size(),timestamp);
+	ID3D11ShaderResourceView* cleanSource = depthPrepared || overlay || sourceTone ? source.pShaderResource.p : nullptr;
 	auto* output = m_dlssSR.Evaluate(timestamp, frameTimeMs, UsesZipDepthSr() ? &m_zipDepth : nullptr,
 		sourceFrame, cleanSource);
+    // A failed evaluation leaves normal raw fallback in charge. Only a
+    // returned SR output carries the upstream decision into MFG/Presenter.
+    if(sourceFrame) tone.sourceToneBeforeUpscale=output && sourceTone;
 	if (overlayInputHandled) *overlayInputHandled = output && overlay;
 	return output;
 }

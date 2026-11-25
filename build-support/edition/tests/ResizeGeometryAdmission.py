@@ -29,6 +29,7 @@ def main():
     parser.add_argument('--sanitize', action='store_true')
     args = parser.parse_args()
     src = SOURCE.read_text(encoding='utf-8')
+    geometry = method(src, 'bool CDX11VideoProcessor::CompletedGeometryChanging(')
     overlap = method(src, 'const char* CDX11VideoProcessor::CompletedOverlapBlock(')
     next_frame = method(src, 'bool CDX11VideoProcessor::NextCompletedFrame(')
     present = method(src, 'HRESULT CDX11VideoProcessor::PresentCompletedVideo(')
@@ -90,7 +91,7 @@ static ULONGLONG fakeTick=1000;
 static ULONGLONG GetTickCount64() { return fakeTick; }
 struct Filter { REFERENCE_TIME stream=0; bool clockOk=true; int StreamTime(CRefTime& out) {out=stream;return clockOk?0:-1;} };
 struct CDX11VideoProcessor {
-    bool m_completedBudgetKnown=true, m_extendedStartupPending=false, geometry=false,
+    bool m_completedBudgetKnown=true, m_extendedStartupPending=false,
         m_mfgOriginalPrime=false, before=true, m_resizePending=false;
     unsigned m_mfgMultiplier=2, m_SwapChainFmt=87;
     Size m_processingSize;
@@ -98,13 +99,13 @@ struct CDX11VideoProcessor {
     std::deque<Frame> m_completedFrames{Frame{}};
     Mfg m_mfg;
     uint64_t m_completedByteLimit=1000000, pendingBytes=100;
-    ULONGLONG m_resizeLastChangeTick=0;
+    ULONGLONG m_resizeLastChangeTick=0, m_completedGeometryTick=0;
     Rect m_resizeTarget, m_windowRect;
     int m_UsedSwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;
     bool commitFails=false;
     Filter filter; Filter* m_pFilter=&filter;
     unsigned commits=0;
-    bool CompletedGeometryChanging() const { return geometry; }
+    bool CompletedGeometryChanging() const;
     Rect ProcessingRect() const { return {0,0,m_processingSize.cx,m_processingSize.cy}; }
     bool UpscaleAt(UpscaleSlot) const { return before; }
     uint64_t PendingGeneratedBytes() const { return pendingBytes; }
@@ -117,12 +118,22 @@ struct CDX11VideoProcessor {
     void TryCommitResize();
     const char* Admit() const {return CompletedOverlapBlock(0,35000,20,100,100);}
 };
-''' + overlap + '\nvoid CDX11VideoProcessor::TryCommitResize() {\n' + resize_block + '\n}\n' + r'''
+''' + geometry + '\n' + overlap + '\nvoid CDX11VideoProcessor::TryCommitResize() {\n' + resize_block + '\n}\n' + r'''
 static bool same(const char* a,const char* b) {return (!a&&!b)||(a&&b&&std::strcmp(a,b)==0);}
 int main() {
+    // Compile the actual predicate: a recent geometry tick must not extend
+    // protection once the pending resize has been committed/cancelled.
+    CDX11VideoProcessor guard;
+    for (auto age : {0ULL, 1ULL, 139ULL, 140ULL, 499ULL, 500ULL, 1000ULL}) {
+        guard.m_completedGeometryTick=1000; fakeTick=1000+age;
+        guard.m_resizePending=true; assert(guard.CompletedGeometryChanging());
+        guard.m_resizePending=false; assert(!guard.CompletedGeometryChanging());
+    }
+    guard.m_completedGeometryTick=0; assert(!guard.CompletedGeometryChanging());
+    std::cout<<"Experimental pending-only geometry predicate PASS\n";
     CDX11VideoProcessor p;
     assert(!p.Admit());
-    p.geometry=true;
+    p.m_resizePending=true;
     assert(!p.Admit()); // formerly unconditionally completed_wait_batch
     p.m_completedBatches.front().target.videoOnly=false;
     assert(same(p.Admit(),"completed_wait_geometry_batch"));
@@ -170,19 +181,19 @@ int main() {
         else { x.m_completedFrames.front().due=rng()%100000; x.m_completedFrames.front().fence=rng()%30; }
         x.m_completedByteLimit=(rng()%2)?1000000:200;
         const auto a=x.Admit(); const auto calls=x.m_mfg.reserveCalls;
-        x.geometry=true;
+        x.m_resizePending=true;
         const auto b=x.Admit();
         assert(same(a,b)); assert(x.m_mfg.reserveCalls==2*calls);
         if (a) ++rejected; else ++accepted;
     }
     assert(accepted>0 && rejected>0);
-    // High-density resize timeline: every 80 ms extends the 500 ms guard.
+    // High-density resize timeline: resize stays pending throughout the interval.
     // The original policy would refuse every overlapping opportunity in the
     // interval; the new code has the identical decisions as normal geometry.
     CDX11VideoProcessor stress;
     unsigned opportunities=0;
     for (unsigned ms=0;ms<8000;ms+=16) {
-        stress.geometry=true;
+        stress.m_resizePending=true;
         assert(!stress.Admit()); ++opportunities;
     }
     // Commit only after last event settles, never just ahead of a due head;
@@ -194,6 +205,7 @@ int main() {
     r.TryCommitResize(); assert(r.commits==0 && r.m_resizePending);
     r.m_completedFrames.front().due=35001;
     r.TryCommitResize(); assert(r.commits==1 && !r.m_resizePending);
+    assert(!r.CompletedGeometryChanging());
     r.m_resizePending=true; r.m_completedFrames.clear();
     r.TryCommitResize(); assert(r.commits==2);
     r.m_resizePending=true; r.m_completedFrames.push_back(Frame{}); r.filter.clockOk=false;
@@ -215,8 +227,10 @@ int main() {
         e.TryCommitResize();assert(e.commits==1);
         fakeTick=1390; e.commitFails=true; e.TryCommitResize();
         assert(e.commits==2 && e.m_resizePending && e.m_resizeLastChangeTick==1390);
+        assert(e.CompletedGeometryChanging());
         fakeTick=1579;e.TryCommitResize();assert(e.commits==2);
         fakeTick=1580;e.commitFails=false;e.TryCommitResize();assert(e.commits==3 && !e.m_resizePending);
+        assert(!e.CompletedGeometryChanging());
     }
     CDX11VideoProcessor shrink;
     shrink.m_resizePending=true;shrink.m_resizeTarget={0,0,1280,720};

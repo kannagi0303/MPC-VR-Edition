@@ -3,6 +3,7 @@
 // Dependencies for the Edition class fragments; imported once by the renderer header.
 #include "../JvrProjection.h"
 #include "StatisticsFormat.h"
+#include "AdaptiveToneShot.h"
 
 namespace edition { struct VideoFrame; }
 

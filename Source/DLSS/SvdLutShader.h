@@ -162,7 +162,7 @@ float4 SvdLutGradeMain(float4 position)
 }
 )";
 
-// B2.1: source-adaptive independent code-luma participation.
+// B2 fallback: source-adaptive code-luma and chroma calibration, no memory/skin.
 // LUT and temporal regression remain 100% B1. No second full-screen pass.
 inline constexpr char SvdLutB2LuminanceShader[] = R"(
 Texture2D<float4> Picture : register(t0);
@@ -193,7 +193,7 @@ float4 SvdLutGradeMain(float4 position)
     float3 rb = Lut.SampleLevel(LutSampler, float3(BinUV(rgb.rb), layer + 1), 0).rgb;
     float3 gb = Lut.SampleLevel(LutSampler, float3(BinUV(rgb.gb), layer + 2), 0).rgb;
     float3 grade = saturate(rg + rb + gb);
-    float3 full = ApplyB21Luma(rgb, grade, B2Luminance.x);
+    float3 full = ApplyB22Chroma(rgb, ApplyB21Luma(rgb, grade, B2Luminance.x));
     float t = saturate(SourceControl.x);
     return float4(t >= 1.0 ? full : lerp(rgb, full, t), src.a);
 }
