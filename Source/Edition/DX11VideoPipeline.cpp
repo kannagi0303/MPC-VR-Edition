@@ -129,9 +129,6 @@ std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Tex
 				frameSource, frameSource.Size(), frameStartTime);
 		}
 	}
-	if (m_svdLut.strength && sourceReady && field == 1) {
-		CaptureSvdLut(frameStartTime, projected, second);
-	}
 	const bool warmZipDepth = (UsesZipDepthMfg() && MfgDepthSourceEligible()) ||
 		(UsesZipDepthSr() && wantSr);
 	if (field && frameStartTime != INVALID_TIME && warmZipDepth && (playFirst || mfgEnabledForRate)) {

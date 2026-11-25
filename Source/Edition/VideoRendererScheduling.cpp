@@ -367,7 +367,21 @@ std::optional<HRESULT> CMpcVideoRenderer::ReceiveCompletedSample(IMediaSample* s
 		const char* block;
 		{
 			CAutoLock state(&m_InterfaceLock);
+			// [MFG-B11 | 2026-11-25 09:55 +08:00] InterfaceLock serializes
+			// Receive attempts. Publish the actual RendererLock waiter before
+			// locking; no change to acquisition order or source retry waits.
+			auto& lockTrace = mfg::SourceCadenceTrace();
+			const auto lockStarted = lockTrace.Enabled() ? GetPreciseTick() : 0;
+			m_completedSourceWaiting.store(true, std::memory_order_release);
 			CAutoLock render(&m_RendererLock);
+			m_completedSourceWaiting.store(false, std::memory_order_release);
+			if (lockStarted) {
+				const auto lockFinished = GetPreciseTick();
+				if (lockFinished - lockStarted >= GetPreciseTicksPerSecond() / 1000) {
+					lockTrace.Record("completed_receive_lock_wait", lockFinished, valid ? pts : -1, -1,
+						0, 0, 0, 0, 0, false, 0, S_OK, lockFinished - lockStarted);
+				}
+			}
 			if (!epoch) epoch = m_completedEpoch;
 			if (ticket->Cancelled() || m_bFlushing || m_State == State_Stopped || *epoch != m_completedEpoch) return S_OK;
 			auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get());

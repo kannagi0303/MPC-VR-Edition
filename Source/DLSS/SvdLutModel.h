@@ -2,6 +2,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -20,6 +21,12 @@ constexpr unsigned GridSize = 17;
 constexpr unsigned LutLayers = 4 * 3; // Four edge combinations, with three color-pair planes each.
 using Image = std::array<float, 3 * InputPixels>;
 HRESULT CreateGradeShader(ID3D11Device* device, ID3D11PixelShader** shader);
+// Immutable after ModelWorker publishes Ready/Failed. Device-only operations;
+// no immediate context or renderer pointer is used by the worker.
+struct VideoEnhancementShaders {
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> thumbnail, fused, standalone, luma, chroma;
+};
+void PrepareVideoEnhancementShaders(ID3D11Device* device, VideoEnhancementShaders& shaders, const std::atomic_bool& cancelled);
 
 struct Parameters {
     // R/G/B output channels in RGB slots. The fourth slot is padding.
@@ -54,6 +61,7 @@ public:
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> EvaluateFrame(std::unique_ptr<Image> image);
     FrameResult EvaluateFrameWithParameters(std::unique_ptr<Image> image);
     ID3D11PixelShader* Shader() const;
+    const VideoEnhancementShaders* PreparedShaders() const;
     State GetState() const;
     std::wstring Failure() const;
 

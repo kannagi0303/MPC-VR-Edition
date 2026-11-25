@@ -35,6 +35,7 @@
 #define IDC_PREFERRED_COLORS               5038
 #define IDC_SVDLUT_B_STRENGTH             5039
 #define IDC_SVDLUT_B_VALUE                5040
+#define IDC_VIDEO_ENHANCEMENT             5041
 #define IDC_SHOW_DEPTH_OVERLAY            5023
 #define IDC_JVR_FLAT_VIEW                  1372
 #define IDC_JVR_VERTICAL                   1373

@@ -215,6 +215,11 @@ HRESULT CDX11VideoProcessor::ApplyPendingWindowResize(bool settle)
     if (settle && m_pFilter->m_filterState == State_Running &&
         GetTickCount64() - m_resizeLastChangeTick < settleMs) return S_FALSE;
 
+    // [MFG-B09 | 2026-11-24 17:51 +08:00] Reuse the existing opt-in
+    // cadence trace to measure actual commit cost, including driver calls.
+    auto& resizeTrace = mfg::SourceCadenceTrace();
+    const bool tracingResize = resizeTrace.Enabled();
+    const auto resizeStarted = tracingResize ? GetPreciseTick() : 0;
     const CRect previous = m_windowRect;
     const CRect finalRect = m_resizeTarget;
     m_completedGeometryTick = GetTickCount64();
@@ -238,6 +243,11 @@ HRESULT CDX11VideoProcessor::ApplyPendingWindowResize(bool settle)
             UpdateRenderRect();
             m_resizePending = true;
             m_resizeLastChangeTick = GetTickCount64();
+            if (tracingResize) {
+                const auto finished = GetPreciseTick();
+                resizeTrace.Record("window_resize_commit_failed", finished, -1, -1,
+                    0, 0, 0, 0, 0, false, m_mfgLostGenerated, hr, finished - resizeStarted);
+            }
             DLog(L"Deferred DXGI ResizeBuffers failed: {}", HR2Str(hr));
             return hr;
         }
@@ -245,9 +255,10 @@ HRESULT CDX11VideoProcessor::ApplyPendingWindowResize(bool settle)
     UpdateRenderRect();
     UpdateStatsByWindow();
     UpdatePostScaleTexures();
-    if (mfg::SourceCadenceTrace().Enabled()) {
-        mfg::SourceCadenceTrace().Record("window_resize_commit", GetPreciseTick(), -1, -1,
-            0, 0, 0, 0, 0, false, 0, S_OK);
+    if (tracingResize) {
+        const auto finished = GetPreciseTick();
+        resizeTrace.Record("window_resize_commit", finished, -1, -1,
+            0, 0, 0, 0, 0, false, m_mfgLostGenerated, S_OK, finished - resizeStarted);
     }
     DLog(L"Deferred DXGI resize committed: {}x{}", finalRect.Width(), finalRect.Height());
     return S_OK;

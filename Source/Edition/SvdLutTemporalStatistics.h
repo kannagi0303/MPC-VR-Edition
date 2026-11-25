@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <span>
 
+// [VE-02 | 2026-11-24 16:39:20 +08:00] Temporal LUT statistics (former B1).
 namespace svdlut::temporal {
 inline constexpr size_t NeighborsEachSide = 5;
 inline constexpr int64_t MaximumDistancePts = 250 * 10000; // 250 ms in 100 ns units

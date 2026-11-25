@@ -5,11 +5,65 @@
 #include <cstdint>
 
 namespace edition {
+// [MFG-B11 | 2026-11-25 09:55 +08:00] Present / producer fairness.
+// A measured slow successful Present can monopolize the renderer schedule
+// even with DO_NOT_WAIT. Keep a short hysteresis in PRESENT COUNTS, not a
+// timer or queue-empty reset. One producer admission credit per slow present.
+class CompletedPresentFairness {
+public:
+    bool Observe(double elapsedMs, double refreshMs) {
+        if (!(refreshMs >= 1.0 && refreshMs <= 1000.0)) {
+            Reset();
+            return false;
+        }
+        const bool slow = elapsedMs >= refreshMs * 0.5;
+        handoffUntil_ = 0;
+        credit_ = slow;
+        if (slow) fastRemaining_ = 4;
+        else if (fastRemaining_) --fastRemaining_;
+        return slow;
+    }
+    bool Active() const { return fastRemaining_ != 0; }
+    bool WithinRefresh(int64_t remaining, double refreshMs) const {
+        return refreshMs >= 1.0 && refreshMs <= 1000.0 &&
+            remaining > -refreshMs * 10'000.0;
+    }
+    bool MayAdmit(int64_t remaining, double refreshMs, bool frontReady) const {
+        return Active() && credit_ && frontReady && WithinRefresh(remaining, refreshMs);
+    }
+    // The presenter may schedule one bounded source turn on its existing
+    // timer. Only an actual input lock waiter can use it; no lock-held sleep.
+    void OfferSourceTurn(int64_t deadline) { handoffUntil_ = credit_ ? deadline : 0; }
+    int64_t SourceTurnUntil(int64_t now, bool waiting) const {
+        return credit_ && waiting && handoffUntil_ > now ? handoffUntil_ : 0;
+    }
+    void ConsumeAdmission() { credit_ = false; handoffUntil_ = 0; }
+    void Reset() { fastRemaining_ = 0; ConsumeAdmission(); }
+private:
+    unsigned fastRemaining_ = 0;
+    bool credit_ = false;
+    int64_t handoffUntil_ = 0;
+};
+
 class CompletedBufferPolicy {
 public:
     static constexpr int64_t InitialLeadMs = 2000;
     static constexpr int64_t StartupLeadMs = 250;
     static constexpr unsigned FrameLimit = 256;
+
+    // [MFG-B08 | 2026-11-24 17:28 +08:00] Resize bank-pressure recovery.
+    // Retire ready batches normally. An unfinished synthetic phase is not a
+    // reason to sacrifice cadence while the contiguous ready queue can cover
+    // another producer retry. Use the existing startup reserve as an emergency
+    // floor, not a new buffer target. No wait, extra GPU work, or timer.
+    template<class Prepare, class ReadyTime>
+    static bool TryResizeBankRecovery(Prepare&& prepare, ReadyTime&& readyTime,
+                                      int64_t emergencyReserve)
+    {
+        if (prepare(false)) return true;
+        if (readyTime() >= emergencyReserve) return false;
+        return prepare(true);
+    }
 
     static uint64_t MemoryReserve(uint64_t budget)
     {

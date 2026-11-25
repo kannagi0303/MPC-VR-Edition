@@ -4,40 +4,16 @@
 	int m_jvrEye = 0;
 	jvr::ViewTransform m_jvrView;
 	std::array<float, 16> m_jvrUploadedConstants{};
-	struct SvdLutScene {
-		REFERENCE_TIME start;
-		bool submitted = false;
-		bool fadeIn = false;
-		Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
-	};
-	struct {
-		svdlut::ModelWorker model;
-		std::unique_ptr<svdlut::Image> input;
-		std::deque<SvdLutScene> scenes;
-		std::array<float, 8 * 8 * 3> signature{};
-		std::array<float, 8 * 8 * 3> cutSignature{};
-		REFERENCE_TIME captured = INVALID_TIME;
-		REFERENCE_TIME possibleCut = INVALID_TIME;
-		REFERENCE_TIME inference = INVALID_TIME;
-		REFERENCE_TIME transitionStart = INVALID_TIME;
-		REFERENCE_TIME nextCapture = INVALID_TIME;
-		int strength = 0;
-		bool attempted = false;
-		bool failed = false;
-		bool hasSignature = false;
-		bool active = false;
-		bool waitingForBuffer = false;
-		bool clearViewSupported = false;
-		Tex2D_t picture, nativeThumbnail, thumbnail, staging;
-		CComPtr<ID3D11SamplerState> lutSampler;
-		CComPtr<ID3D11Buffer> constants;
-	} m_svdLut;
-	// Shared preprocessing shader, independent of either model worker.
+    // Shared standalone colour fallback surface; no retired A model worker.
+    struct {
+        bool clearViewSupported = false; // preserve existing Temporal B clear policy
+        Tex2D_t picture;
+    } m_svdLut;
+	// Shared FP32 preprocessing shader.
 	CComPtr<ID3D11PixelShader> m_svdLutThumbnailShader;
 	CComPtr<ID3D11Buffer> m_svdLutThumbnailConstants;
 
-	// Experimental RAW B is intentionally independent of the production
-	// scene-based SVDLUT worker, thumbnails, grade tables and statistics.
+	// Video Enhancement temporal analysis state (former B).
 	struct SvdLutRawFrame {
 		REFERENCE_TIME pts = INVALID_TIME;
 		uint64_t fence = 0;
@@ -53,7 +29,7 @@
 		bool signatureReady = false;
 		bool temporalFinalized = false;
 	};
-	// Only Temporal B uses these asynchronous readback slots. Map(DO_NOT_WAIT)
+	// Video Enhancement uses these asynchronous readback slots. Map(DO_NOT_WAIT)
 	// never stalls the presenter. Resources are owned by the renderer thread.
 	struct SvdLutTemporalCapture {
 		Tex2D_t staging;
@@ -81,7 +57,7 @@
         REFERENCE_TIME heldPts = INVALID_TIME;
         bool heldSignatureReady = false;
         uint64_t appliedDraws = 0, missedResult = 0;
-        // B2.1 is an optional, strictly post-B1 scene-brightness correction.
+        // B2.1 is a fixed, strictly post-B1 adaptive luma correction.
         // Only B2 uses these fields; temporal LUT regression remains untouched.
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> b2CachedView;
         REFERENCE_TIME b2CachedSourcePts = INVALID_TIME;
@@ -108,14 +84,6 @@
         uint64_t b2AnalysisTicks = 0, b2BudgetSkips = 0, b2ShotResets = 0;
         bool b2ShaderAttempted = false, b2ShaderFailed = false;
         bool b2MemoryShaderAttempted = false, b2MemoryShaderFailed = false;
-        bool r1GamutShaderAttempted = false, r1GamutShaderFailed = false;
-        // Retained M1/R1/D1 legacy experiment state. P4 gray-probe must not
-        // replace fields consumed by SvdLutRawMode.inc.
-        bool m1ShaderAttempted = false, m1ShaderFailed = false;
-        bool r1M1ShaderAttempted = false, r1M1ShaderFailed = false;
-        uint64_t m1SkinDraws = 0;
-        uint64_t d1DepthDraws = 0, d1FallbackDraws = 0;
-        uint64_t r1GamutDraws = 0; // alternative to B2.2, not an extra pass
         uint64_t b2MemoryDraws = 0; // selected shader draws, not classified pixels
         // Keep the actual successfully presented B2 transform when pausing.
         // The original-frame signature ring may roll over by the time the
@@ -136,15 +104,12 @@
 		uint64_t temporalFrames = 0, temporalUsed = 0, temporalRejected = 0, temporalFuture = 0, prefetched = 0, earlyPrimed = 0;
 		unsigned lastWindow = 0;
 		bool attempted = false, failed = false, active = false;
-		Tex2D_t thumbnail, staging, picture;
+        REFERENCE_TIME activationPts = INVALID_TIME; // VE-08: first successfully presented grade
+		Tex2D_t thumbnail, picture;
 		CComPtr<ID3D11SamplerState> sampler;
 		CComPtr<ID3D11Buffer> constants;
-		CComPtr<ID3D11PixelShader> shader;
         CComPtr<ID3D11PixelShader> b2LuminanceShader;
         CComPtr<ID3D11PixelShader> b2MemoryShader;
-        CComPtr<ID3D11PixelShader> r1GamutShader;
-        CComPtr<ID3D11PixelShader> m1SkinShader;
-        CComPtr<ID3D11PixelShader> r1M1SkinShader;
 	} m_svdLutRawTest;
 
     // P1/P2 perceptual pipeline state, previously lost when P4 carried an
@@ -152,9 +117,9 @@
     struct {
         CComPtr<ID3D11Buffer> constants;
         CComPtr<ID3D11SamplerState> sampler;
-        CComPtr<ID3D11PixelShader> standalone, normalA, rawB;
-        bool triedStandalone = false, triedA = false, triedB = false;
-        bool failedStandalone = false, failedA = false, failedB = false;
+        CComPtr<ID3D11PixelShader> standalone, rawB;
+        bool triedStandalone = false, triedB = false;
+        bool failedStandalone = false, failedB = false;
         uint64_t draws = 0, depthUsed = 0, depthFallback = 0;
     } m_perceptual;
 

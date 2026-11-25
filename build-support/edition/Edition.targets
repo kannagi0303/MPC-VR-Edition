@@ -46,6 +46,7 @@
     <ClInclude Include="DLSS\SvdLutShader.h" />
     <ClInclude Include="Edition\SvdLutInput.h" />
     <ClInclude Include="Edition\SvdLutB2AdaptiveLuma.h" />
+    <ClInclude Include="Edition\VideoEnhancementStartup.h" />
     <ClInclude Include="DLSS\ZipDepthPack.h" />
     <ClInclude Include="DLSS\ZipDepthGpuShaders.h" />
     <ClInclude Include="DLSS\ZipDepthTemporalShaders.h" />
@@ -99,6 +100,7 @@
     <ClCompile Include="Edition\VideoProcessorStatistics.cpp" />
     <ClInclude Include="Edition\DX11Dependencies.h" />
     <ClInclude Include="Edition\StatisticsFormat.h" />
+    <ClInclude Include="Edition\CompletedBufferAudit.h" />
     <ClCompile Include="Edition\RendererWindow.cpp" />
   </ItemGroup>
 </Project>

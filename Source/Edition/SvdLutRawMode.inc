@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Separate experimental SVDLUT path B. Included by DX11VideoProcessorSvdLut.cpp.
-// RAW/Temporal B use an independent 0..200 output-strength mix; B1 timing/LUT model stay unchanged.
+// Video Enhancement production temporal SVDLUT path (former B).
+// Full calibrated output strength; historical shader identifiers retained for traceability.
 
 void CDX11VideoProcessor::ReleaseSvdLutRawTest(bool fast)
 {
@@ -35,14 +35,10 @@ void CDX11VideoProcessor::ReleaseSvdLutRawTest(bool fast)
     b.b2AnalysisTicks = b.b2BudgetSkips = b.b2ShotResets = 0;
     b.b2ShaderAttempted = b.b2ShaderFailed = false;
     b.b2MemoryShaderAttempted = b.b2MemoryShaderFailed = false;
-    b.r1GamutShaderAttempted = b.r1GamutShaderFailed = false;
-    b.m1ShaderAttempted = b.m1ShaderFailed = false;
-    b.r1M1ShaderAttempted = b.r1M1ShaderFailed = false;
-    b.m1SkinDraws = b.d1DepthDraws = b.d1FallbackDraws = 0;
     b.b2MemoryDraws = 0;
-    b.r1GamutDraws = 0;
     b.heldPts = INVALID_TIME;
     b.heldSignatureReady = false;
+    b.activationPts = INVALID_TIME;
     b.appliedDraws = b.missedResult = 0;
     b.presentedGraded = b.presentedUngraded = 0;
     b.skippedCapture = b.reusedGrade = b.ungraded = 0;
@@ -51,18 +47,14 @@ void CDX11VideoProcessor::ReleaseSvdLutRawTest(bool fast)
     b.lastWindow = 0;
     b.attempted = b.failed = b.active = false;
     b.thumbnail.Release();
-    b.staging.Release();
     b.picture.Release();
     b.sampler.Release();
     b.constants.Release();
-    b.shader.Release();
     b.b2LuminanceShader.Release();
     b.b2MemoryShader.Release();
-    b.r1GamutShader.Release();
-    b.m1SkinShader.Release();
-    b.r1M1SkinShader.Release();
 }
 
+// [VE-01 | 2026-11-24 16:39:20 +08:00] SVDLUT model initialization (reference graph).
 bool CDX11VideoProcessor::StartSvdLutRawTest()
 {
     auto& b = m_svdLutRawTest;
@@ -80,16 +72,10 @@ HRESULT CDX11VideoProcessor::PrepareSvdLutRawResources()
     HRESULT hr = b.thumbnail.CheckCreate(m_pDevice, ThumbFormat,
         ThumbSize, ThumbSize, Tex2D_DefaultShaderRTarget);
     if (FAILED(hr)) return hr;
-    if (!m_pFilter->m_svdLutTemporal.load()) {
-        hr = b.staging.CheckCreate(m_pDevice, ThumbFormat,
-            ThumbSize, ThumbSize, Tex2D_StagingRead);
-        if (FAILED(hr)) return hr;
-    }
     if (!b.constants) {
         D3D11_BUFFER_DESC cb{};
         cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        // First eight floats are B1-identical; the third float4 is read only
-        // by the independently enabled B2 shader.
+        // Keep the validated B2 shader constant-buffer layout.
         cb.ByteWidth = 16 * sizeof(float);
         hr = m_pDevice->CreateBuffer(&cb, nullptr, &b.constants);
         if (FAILED(hr)) return hr;
@@ -103,86 +89,20 @@ HRESULT CDX11VideoProcessor::PrepareSvdLutRawResources()
         hr = m_pDevice->CreateSamplerState(&desc, &b.sampler);
         if (FAILED(hr)) return hr;
     }
-    if (!b.shader) {
-        CComPtr<ID3DBlob> code;
-        hr = CompileSvdLutOutputShader(SvdLutRawShader, nullptr, &code);
-        if (FAILED(hr)) return hr;
-        hr = m_pDevice->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &b.shader);
-        if (FAILED(hr)) return hr;
-    }
-    // B2 shader compilation is a one-time opt-in setup operation, never a
-    // per-pixel-draw retry. Failure silently retains the intact B1 shader,
-    // but is visible in Edition details.
-    if (m_pFilter->m_svdLutTemporal.load() && m_pFilter->m_svdLutB2Luminance.load() &&
-        !b.b2ShaderAttempted) {
+    // Shader preparation belongs to ModelWorker, never RendererLock.
+    const auto* prepared = b.model.PreparedShaders();
+    if (!prepared || !prepared->thumbnail) return E_FAIL;
+    if (!b.b2ShaderAttempted) {
         b.b2ShaderAttempted = true;
-        CComPtr<ID3DBlob> code;
-        HRESULT compiled = CompileSvdLutOutputShader(SvdLutB2LuminanceShader, nullptr, &code);
-        if (SUCCEEDED(compiled))
-            compiled = m_pDevice->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(),
-                nullptr, &b.b2LuminanceShader);
-        b.b2ShaderFailed = FAILED(compiled);
+        b.b2LuminanceShader = prepared->luma.Get();
+        b.b2ShaderFailed = !b.b2LuminanceShader;
     }
-    // M2: compile the selected M1 variant FIRST, so an M1-only test does
-    // not also compile a base B2.2/R1 shader that will never be drawn.
-    // On failure, the already-existing B2.2/R1 fallback is compiled below.
-    // Both paths keep the same LUT and single drawing pass.
-    if (m_pFilter->m_svdLutTemporal.load() && m_pFilter->m_svdLutM1Skin.load() &&
-        (m_pFilter->m_svdLutB2Memory.load() || m_pFilter->m_svdLutR1Gamut.load())) {
-        const bool r1 = m_pFilter->m_svdLutR1Gamut.load();
-        bool& attempted = r1 ? b.r1M1ShaderAttempted : b.m1ShaderAttempted;
-        bool& failed = r1 ? b.r1M1ShaderFailed : b.m1ShaderFailed;
-        auto& shader = r1 ? b.r1M1SkinShader : b.m1SkinShader;
-        if (!attempted) {
-            attempted = true;
-            static const D3D_SHADER_MACRO m1Defines[] = {
-                {"SVDLUT_M1_SKIN_GUARD", "1"}, {nullptr, nullptr}
-            };
-            static const D3D_SHADER_MACRO r1m1Defines[] = {
-                {"SVDLUT_R1_CONTINUOUS", "1"},
-                {"SVDLUT_M1_SKIN_GUARD", "1"}, {nullptr, nullptr}
-            };
-            CComPtr<ID3DBlob> code;
-            HRESULT compiled = CompileSvdLutOutputShader(SvdLutB2MemoryShader,
-                r1 ? r1m1Defines : m1Defines, &code);
-            if (SUCCEEDED(compiled))
-                compiled = m_pDevice->CreatePixelShader(code->GetBufferPointer(),
-                    code->GetBufferSize(), nullptr, &shader);
-            failed = FAILED(compiled);
-        }
-    }
-    // Avoid compiling BOTH base and guarded variants at first enable.
-    // A disabled M1 compiles the original variant when needed; an M1 compile
-    // failure still compiles the original variant on this same Prepare call.
-    const bool needB2Memory = m_pFilter->m_svdLutTemporal.load() &&
-        m_pFilter->m_svdLutB2Memory.load() && !m_pFilter->m_svdLutR1Gamut.load() &&
-        (!m_pFilter->m_svdLutM1Skin.load() || b.m1ShaderFailed);
-    if (needB2Memory && !b.b2MemoryShaderAttempted) {
+    if (!b.b2MemoryShaderAttempted) {
         b.b2MemoryShaderAttempted = true;
-        CComPtr<ID3DBlob> code;
-        HRESULT compiled = CompileSvdLutOutputShader(SvdLutB2MemoryShader, nullptr, &code);
-        if (SUCCEEDED(compiled))
-            compiled = m_pDevice->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(),
-                nullptr, &b.b2MemoryShader);
-        b.b2MemoryShaderFailed = FAILED(compiled);
+        b.b2MemoryShader = prepared->chroma.Get();
+        b.b2MemoryShaderFailed = !b.b2MemoryShader;
     }
-    // Opt-in R1 compiles only once. The same HLSL, constants, LUT and draw
-    // path are used; a shader macro replaces just the gamut continuity rules.
-    const bool needR1Gamut = m_pFilter->m_svdLutTemporal.load() &&
-        m_pFilter->m_svdLutR1Gamut.load() &&
-        (!m_pFilter->m_svdLutM1Skin.load() || b.r1M1ShaderFailed);
-    if (needR1Gamut && !b.r1GamutShaderAttempted) {
-        b.r1GamutShaderAttempted = true;
-        static const D3D_SHADER_MACRO r1Defines[] = {
-            {"SVDLUT_R1_CONTINUOUS", "1"}, {nullptr, nullptr}
-        };
-        CComPtr<ID3DBlob> code;
-        HRESULT compiled = CompileSvdLutOutputShader(SvdLutB2MemoryShader, r1Defines, &code);
-        if (SUCCEEDED(compiled))
-            compiled = m_pDevice->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(),
-                nullptr, &b.r1GamutShader);
-        b.r1GamutShaderFailed = FAILED(compiled);
-    }
+    if (!prepared->fused && !b.b2MemoryShader && !b.b2LuminanceShader) return E_FAIL;
     return S_OK;
 }
 
@@ -238,6 +158,7 @@ void CDX11VideoProcessor::ResetSvdLutTemporalQueue()
     b.b2Presented = {};
     b.heldPts = INVALID_TIME;
     b.heldSignatureReady = false;
+    b.activationPts = INVALID_TIME;
     b.lastWindow = 0;
 }
 
@@ -306,11 +227,9 @@ void CDX11VideoProcessor::PollSvdLutTemporalQueue()
         if (frame != b.frames.end()) {
             frame->signature = ReadSignature(static_cast<const uint8_t*>(map.pData), map.RowPitch);
             frame->signatureReady = true;
-            if (m_pFilter->m_svdLutB2Luminance.load()) {
-                frame->b2Samples = svdlut::b2::refined::ReadSamples(
-                    static_cast<const uint8_t*>(map.pData), map.RowPitch);
-                frame->b2SamplesReady = true;
-            }
+            frame->b2Samples = svdlut::b2::refined::ReadSamples(
+                static_cast<const uint8_t*>(map.pData), map.RowPitch);
+            frame->b2SamplesReady = true;
             capture.input = ReadSvdLutImage(static_cast<const uint8_t*>(map.pData), map.RowPitch);
         }
         m_pDeviceContext->Unmap(capture.staging.pTexture, 0);
@@ -339,6 +258,7 @@ void CDX11VideoProcessor::PollSvdLutTemporalQueue()
         if (!oldest || capture.pts < oldest->pts) oldest = &capture;
     }
     if (!oldest) return;
+    if (b.activationPts == INVALID_TIME && !VideoEnhancementMayStart(oldest->fence != 0)) return;
     const auto frame = std::find_if(b.frames.begin(), b.frames.end(), [&](const auto& f) {
         return f.pts == oldest->pts && f.fence == oldest->fence;
     });
@@ -369,6 +289,7 @@ CDX11VideoProcessor::SvdLutRawFrame* CDX11VideoProcessor::QueueSvdLutTemporalFra
     // A redraw, retry, or future prefetch must never cause a second inference.
     for (auto& entry : b.frames)
         if (entry.pts == pts && entry.fence == fence) return &entry;
+    if (b.activationPts == INVALID_TIME && !VideoEnhancementMayStart(fence != 0)) return nullptr;
     // Admission control protects the Completed Video Buffer. Under pressure,
     // skip optional *LUT inference*, never a decoded/original video frame.
     // Allow an idle worker to recover even if the buffer remains shallow.
@@ -531,67 +452,11 @@ ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutTemporalReadyView(REFERENCE
     return nullptr;
 }
 
-CDX11VideoProcessor::SvdLutRawFrame* CDX11VideoProcessor::EvaluateSvdLutRawFrame(const Tex2D_t& source,
-    const CRect& sample, REFERENCE_TIME pts, uint64_t fence)
-{
-    auto& b = m_svdLutRawTest;
-    const bool temporal = m_pFilter->m_svdLutTemporal.load();
-    // Never count a pause redraw or Present retry as a new model inference.
-    for (auto& entry : b.frames)
-        if (entry.pts == pts && entry.fence == fence && entry.view) return &entry;
-
-    auto& entry = b.frames[b.frameSlot];
-    b.frameSlot = (b.frameSlot + 1) % b.frames.size();
-    entry = {};
-    entry.pts = pts;
-    entry.fence = fence;
-    ++b.requests;
-    const auto started = GetPreciseTick();
-    m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
-    if (FAILED(RenderSvdLutThumbnail(source, b.thumbnail.pTexture, sample))) return nullptr;
-    m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
-    m_pDeviceContext->CopyResource(b.staging.pTexture, b.thumbnail.pTexture);
-    D3D11_MAPPED_SUBRESOURCE map{};
-    if (FAILED(m_pDeviceContext->Map(b.staging.pTexture, 0, D3D11_MAP_READ, 0, &map))) return nullptr;
-    // Statistical content signature is for detecting genuine illumination/
-    // shot discontinuities, independent of scene LUT selection in mode A.
-    if (temporal) {
-        entry.signature = ReadSignature(static_cast<const uint8_t*>(map.pData), map.RowPitch);
-        if (m_pFilter->m_svdLutB2Luminance.load()) {
-            entry.b2Samples = svdlut::b2::refined::ReadSamples(
-                static_cast<const uint8_t*>(map.pData), map.RowPitch);
-            entry.b2SamplesReady = true;
-        }
-    }
-    auto input = ReadSvdLutImage(static_cast<const uint8_t*>(map.pData), map.RowPitch);
-    m_pDeviceContext->Unmap(b.staging.pTexture, 0);
-    if (!input) return nullptr;
-
-    const auto infer = GetPreciseTick();
-    if (temporal) {
-        auto result = b.model.EvaluateFrameWithParameters(std::move(input));
-        entry.view = std::move(result.view);
-        entry.parameters = std::move(result.parameters);
-    } else {
-        entry.view = b.model.EvaluateFrame(std::move(input));
-    }
-    if (!entry.view) return nullptr;
-    if (temporal && entry.parameters) {
-        constexpr size_t Values = sizeof(svdlut::Parameters::lut) / sizeof(float);
-        const auto packed = std::span<const float>(&entry.parameters->lut[0][0], Values);
-        if (!svdlut::temporal::BuildColorFeatures(packed, entry.colorFeatures)) return nullptr;
-    }
-    const auto end = GetPreciseTick();
-    ++b.completed;
-    b.modelTicks += end - infer;
-    b.stageTicks += end - started;
-    return &entry;
-}
-
+// [VE-02 | 2026-11-24 16:39:20 +08:00] Original-frame LUT selection / temporal statistics.
 ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutRawViewForFrame(SvdLutRawFrame& current)
 {
     auto& b = m_svdLutRawTest;
-    if (!current.view || !m_pFilter->m_svdLutTemporal.load() || !current.parameters)
+    if (!current.view || !current.parameters)
         return current.view.Get();
     if (current.temporalFinalized) return current.temporalView ? current.temporalView.Get() : current.view.Get();
     // Only freeze a *resolved* transform. A one-sample RAW fallback must not
@@ -689,12 +554,12 @@ ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutRawViewForFrame(SvdLutRawFr
 void CDX11VideoProcessor::PrimeSvdLutTemporalFrames()
 {
     auto& b = m_svdLutRawTest;
-    if (!m_pFilter->m_svdLutRaw.load() || !m_pFilter->m_svdLutTemporal.load() ||
-        m_pFilter->m_svdLutOff.load() || m_pFilter->m_svdLutBStrength.load() == 0 ||
+    if (!m_pFilter->m_videoEnhancement.load() ||
         b.failed || m_completedFrames.empty() ||
         !m_completedFence || !m_pDeviceContext ||
         m_currentSwapChainColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 ||
         SourceIsHDR() || m_bVPUseRTXVideoHDR || m_pPSHalfOUtoInterlace) return;
+    if (b.activationPts == INVALID_TIME && !VideoEnhancementMayStart(true)) return;
     if (!b.attempted && !StartSvdLutRawTest()) return;
     if (b.model.GetState() != svdlut::ModelWorker::State::Ready) return;
     if (FAILED(PrepareSvdLutRawResources())) { b.failed = true; return; }
@@ -739,7 +604,7 @@ void CDX11VideoProcessor::PrefetchSvdLutRawFuture(const CompletedFrame& current,
     bool geometryChanging)
 {
     auto& b = m_svdLutRawTest;
-    if (!m_pFilter->m_svdLutTemporal.load() || !m_completedFence ||
+    if (!m_pFilter->m_videoEnhancement.load() || !m_completedFence ||
         m_completedFrames.empty() || geometryChanging) return;
     CRefTime stream;
     if (FAILED(m_pFilter->StreamTime(stream)) ||
@@ -780,6 +645,7 @@ void CDX11VideoProcessor::PrefetchSvdLutRawFuture(const CompletedFrame& current,
 // view and temporal LUT are not altered; no additional GPU readback/inference.
 // Calibration happens at most once for each (source PTS, selected LUT view).
 // MFG-generated frames reuse the nearest ORIGINAL frame's source samples.
+// [VE-03 | 2026-11-24 16:39:20 +08:00] Source-conditioned luma participation and temporal release.
 std::array<float, 3> CDX11VideoProcessor::SvdLutB2ToneForView(REFERENCE_TIME pts,
     uint64_t fence, ID3D11ShaderResourceView* selected)
 {
@@ -893,21 +759,19 @@ void CDX11VideoProcessor::RememberPresentedSvdLutB2(REFERENCE_TIME pts, uint64_t
 {
     auto& b = m_svdLutRawTest;
     b.b2Presented = {};
-    if (!m_pFilter->m_svdLutRaw.load() || !m_pFilter->m_svdLutTemporal.load() ||
-        m_pFilter->m_svdLutOff.load() ||
-        (!m_pFilter->m_svdLutB2Luminance.load() && !m_pFilter->m_svdLutB2Memory.load() &&
-         !m_pFilter->m_svdLutR1Gamut.load() && !PerceptualEnabled()) ||
-        !b.active) return;
+    if (!m_pFilter->m_videoEnhancement.load() || !b.active) return;
     // The cached pre-draw may be presented without an additional draw.
     // Match both original PTS and original fence before Present changes it.
     for (const auto& record : b.b2DrawRecords) {
         if (record.pts == pts && record.fence == fence && record.view) {
             b.b2Presented = record;
+            if (b.activationPts == INVALID_TIME) b.activationPts = pts;
             break;
         }
     }
 }
 
+// [VE-07 | 2026-11-24 16:39:20 +08:00] Full calibrated temporal grade, then fused perceptual composition.
 HRESULT CDX11VideoProcessor::ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Texture2D* target,
     const CRect& area, const CRect& visible, CPoint offset, REFERENCE_TIME pts, uint64_t fence,
     bool allowTemporalCapture, bool allowDepth)
@@ -916,32 +780,17 @@ HRESULT CDX11VideoProcessor::ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Te
     CRect sampled(visible);
     sampled.OffsetRect(offset);
     ID3D11ShaderResourceView* lut = nullptr;
-    const bool b2LumEnabled = m_pFilter->m_svdLutTemporal.load() &&
-        m_pFilter->m_svdLutB2Luminance.load();
-    const bool b2MemoryEnabled = m_pFilter->m_svdLutTemporal.load() &&
-        m_pFilter->m_svdLutB2Memory.load();
-    const bool r1GamutEnabled = m_pFilter->m_svdLutTemporal.load() &&
-        m_pFilter->m_svdLutR1Gamut.load();
-    const bool m1SkinEnabled = m_pFilter->m_svdLutTemporal.load() &&
-        m_pFilter->m_svdLutM1Skin.load() && (b2MemoryEnabled || r1GamutEnabled);
-    const bool b2Enabled = b2LumEnabled || b2MemoryEnabled || r1GamutEnabled ||
-        m1SkinEnabled || PerceptualEnabled();
     // A redraw after Pause is NOT a new original frame. Preserve the actual
     // presented LUT and gain, even when CompletedLast's fence has changed.
     // Do not enqueue a second model job for a paused redraw.
-    const bool pausedB2Replay = b2Enabled && m_pFilter->m_filterState == State_Paused &&
+    const bool pausedB2Replay = m_pFilter->m_filterState == State_Paused &&
         b.b2Presented.pts == pts && bool(b.b2Presented.view);
     if (pausedB2Replay) {
         lut = b.b2Presented.view.Get();
-    } else if (m_pFilter->m_svdLutTemporal.load()) {
+    } else {
         PollSvdLutTemporalQueue();
         if (allowTemporalCapture) QueueSvdLutTemporalFrame(source, sampled, pts, fence);
         lut = SvdLutTemporalReadyView(pts, fence);
-    } else {
-        // Unmodified synchronous RAW B: deliberately measures model throughput.
-        auto* entry = EvaluateSvdLutRawFrame(source, sampled, pts, fence);
-        if (!entry) return S_FALSE;
-        lut = SvdLutRawViewForFrame(*entry);
     }
     if (!lut) {
         if (m_bShowStats && m_showEditionDetails) b.grayProbe = {};
@@ -951,7 +800,7 @@ HRESULT CDX11VideoProcessor::ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Te
     // for a real pixel readback: it probes neutral sRGB(236,236,236) against
     // the CPU copy of the exact LUT bound to the pixel shader at this draw.
     // Opt-in through already existing Show statistics + Edition details.
-    if (m_bShowStats && m_showEditionDetails && m_pFilter->m_svdLutTemporal.load()) {
+    if (m_bShowStats && m_showEditionDetails) {
         b.grayProbe = {};
         std::shared_ptr<const svdlut::Parameters> parameters;
         unsigned sourceKind = 0;
@@ -976,7 +825,7 @@ HRESULT CDX11VideoProcessor::ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Te
             constexpr size_t Count = sizeof(svdlut::Parameters::lut) / sizeof(float);
             const auto packed = std::span<const float>(&parameters->lut[0][0], Count);
             const auto graded = svdlut::b2::ApplyB1(packed, input);
-            const float t = edition::svdstrength::BBlend(m_pFilter->m_svdLutBStrength.load());
+            const float t = 1.0f;
             auto& probe = b.grayProbe;
             probe.model = graded;
             for (size_t channel = 0; channel < 3; ++channel)
@@ -986,109 +835,54 @@ HRESULT CDX11VideoProcessor::ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Te
             probe.valid = true;
         }
     }
-    std::array<float, 3> b2Tone{1.0f, 1.0f, 1.0f};
-    ID3D11PixelShader* drawShader = b.shader;
-    if (b2LumEnabled) {
-        b2Tone = SvdLutB2ToneForView(pts, fence, lut);
-        if (b.b2LuminanceShader)
-            drawShader = b.b2LuminanceShader;
-    }
-    // Colour protection must also work by itself (B2.1 unchecked). The
-    // constants are then identity, so the same shader does not change tone.
-    if (b2MemoryEnabled && b.b2MemoryShader)
-        drawShader = b.b2MemoryShader;
-    // R1 takes precedence when both toggles are checked, so turning R1 off
-    // immediately returns to the user-approved B2.2 implementation.
-    if (r1GamutEnabled && b.r1GamutShader)
-        drawShader = b.r1GamutShader;
-    // M1 replaces (not layers on top of) the selected B2.2/R1 shader.
-    // Compile failure keeps the last known-good variant and is visible in OSD.
-    if (m1SkinEnabled) {
-        if (r1GamutEnabled && b.r1M1SkinShader)
-            drawShader = b.r1M1SkinShader;
-        else if (!r1GamutEnabled && b.m1SkinShader)
-            drawShader = b.m1SkinShader;
-    }
-    // D1 shares the existing M1 shader + draw. Require an exact, unscaled
-    // source-content rectangle: no guessed letterbox/SR/projected coordinate
-    // transform. Gracefully skip depth when geometry or PTS is untrustworthy.
-    const bool d1Requested = m1SkinEnabled && m_pFilter->m_svdLutD1Depth.load() &&
-        (drawShader == b.m1SkinShader.p || drawShader == b.r1M1SkinShader.p);
-    ID3D11ShaderResourceView* depthView = nullptr;
-    float depthStrength = 0.0f, depthRotated = 0.0f;
-    if (d1Requested && allowDepth && (UsesZipDepthSr() || UsesZipDepthMfg()) &&
-        visible == area && offset == CPoint(0, 0) &&
-        m_zipDepth.MatchesColorPicture(visible.Width(), visible.Height())) {
-        const auto estimate = m_zipDepth.ForFrame(pts); // only an existing cache, NO inference
-        const auto age = pts - estimate.pts;
-        if (estimate.view && age >= 0 && age < 1'900'000) {
-            // Full strength until 90 ms, then fade toward zero by 190 ms.
-            // Prevent an abrupt hard gate on irregular/video-generated PTS.
-            depthStrength = .75f * (std::min)(1.0f,
-                float(1'900'000 - age) / 1'000'000.0f);
-            depthView = estimate.view;
-            depthRotated = estimate.rotated ? 1.0f : 0.0f;
-        }
-    }
+    const auto b2Tone = SvdLutB2ToneForView(pts, fence, lut);
+    // [VE-04] Prefer the fully calibrated fallback if the fused P1 shader fails.
+    // Never silently revert to an uncalibrated RAW grade.
+    ID3D11PixelShader* drawShader = b.b2MemoryShader.p;
+    if (!drawShader) drawShader = b.b2LuminanceShader.p;
     float cb[16] = { float(visible.left), float(visible.top),
         float(visible.Width() - 1), float(visible.Height() - 1),
-        edition::svdstrength::BBlend(m_pFilter->m_svdLutBStrength.load()),
-        float(offset.x), float(offset.y), depthRotated,
-        b2Tone[0], b2Tone[1], b2Tone[2], depthStrength, 0, 0, 0, 0 };
+        VideoEnhancementFade(pts), float(offset.x), float(offset.y), 0.0f,
+        b2Tone[0], b2Tone[1], b2Tone[2], 0.0f, 0, 0, 0, 0 };
     CRect srcRect(area);
     srcRect.OffsetRect(offset);
-    // P1 takes precedence over the legacy repair experiments. The new
-    // Preferred/Skin branches are independent of B2.2/R1 and share this draw.
-    HRESULT hr = S_FALSE;
-    if (PerceptualEnabled())
-        hr = ApplyPerceptual(source, target, area, visible, offset, pts, 2, lut,
-            b2Tone, b2LumEnabled, edition::svdstrength::BBlend(m_pFilter->m_svdLutBStrength.load()), allowDepth);
+    // [VE-07] Single draw: B1 -> B2.1 -> B2.2 -> preferred/skin -> output.
+    HRESULT hr = ApplyPerceptual(source, target, area, visible, offset, pts, 2, lut,
+        b2Tone, true, 1.0f, allowDepth);
     if (hr != S_OK) {
-        // Compile failure / disabled P1: preserve the previously tested shader.
+        // Safe partial fallback if the fused shader could not be compiled.
+        if (!drawShader) return S_FALSE;
         cb[12] = BindSvdLutOutputDither(target);
         m_pDeviceContext->UpdateSubresource(b.constants, 0, nullptr, cb, 0, 0);
         m_pDeviceContext->PSSetShaderResources(1, 1, &lut);
-        if (depthView) m_pDeviceContext->PSSetShaderResources(2, 1, &depthView);
         m_pDeviceContext->PSSetSamplers(1, 1, &b.sampler.p);
-        if (depthView) m_pDeviceContext->PSSetSamplers(2, 1, &b.sampler.p);
         hr = TextureCopyRect(source, target, srcRect, area, drawShader,
             b.constants, 0, false);
         ID3D11ShaderResourceView* clear = nullptr;
         ID3D11SamplerState* clearSampler = nullptr;
         m_pDeviceContext->PSSetShaderResources(1, 1, &clear);
         m_pDeviceContext->PSSetShaderResources(4, 1, &clear);
-        if (depthView) m_pDeviceContext->PSSetShaderResources(2, 1, &clear);
         m_pDeviceContext->PSSetSamplers(1, 1, &clearSampler);
-        if (depthView) m_pDeviceContext->PSSetSamplers(2, 1, &clearSampler);
     }
     b.failed = FAILED(hr);
-    if (SUCCEEDED(hr) && d1Requested) {
-        if (depthView && depthStrength > .001f) ++b.d1DepthDraws;
-        else ++b.d1FallbackDraws;
+    b.active = hr == S_OK;
+    if (b.active) {
+        ++b.appliedDraws;
+        // Legacy path has no completed-frame present record. Start from the
+        // successful draw's media time, without adding a present/wait hook.
+        if (!fence && b.activationPts == INVALID_TIME && m_pFilter->m_filterState == State_Running)
+            b.activationPts = pts;
     }
-    b.active = SUCCEEDED(hr);
-    if (b.active && m_pFilter->m_svdLutTemporal.load()) ++b.appliedDraws;
-    if (b.active && b2Enabled) {
+    if (b.active) {
         auto& record = b.b2DrawRecords[b.b2DrawSlot++ % b.b2DrawRecords.size()];
         record.pts = pts;
         record.fence = fence;
         record.view = lut;
-        const bool usedTone = (PerceptualEnabled() && b2LumEnabled) ||
-            drawShader == b.b2LuminanceShader.p ||
-            ((drawShader == b.b2MemoryShader.p || drawShader == b.r1GamutShader.p ||
-              drawShader == b.m1SkinShader.p || drawShader == b.r1M1SkinShader.p) &&
-             b2LumEnabled);
-        record.tone = usedTone ? b2Tone :
-            std::array<float, 3>{1.0f, 1.0f, 1.0f};
-        if (usedTone) {
-            svdlut::b2::Tone test{};
-            test.gains = b2Tone;
-            if (svdlut::b2::Adjusted(test)) ++b.b2AdjustedDraws;
-        }
-        if (drawShader == b.b2MemoryShader.p) ++b.b2MemoryDraws;
-        if (drawShader == b.r1GamutShader.p) ++b.r1GamutDraws;
-        if (drawShader == b.m1SkinShader.p || drawShader == b.r1M1SkinShader.p)
-            ++b.m1SkinDraws;
+        record.tone = b2Tone;
+        svdlut::b2::Tone test{};
+        test.gains = b2Tone;
+        if (svdlut::b2::Adjusted(test)) ++b.b2AdjustedDraws;
+        if (drawShader && drawShader == b.b2MemoryShader.p) ++b.b2MemoryDraws;
     }
     return hr;
 }
@@ -1098,7 +892,7 @@ HRESULT CDX11VideoProcessor::DrawCompletedSvdLutRaw(const CompletedFrame& frame,
 {
     auto& b = m_svdLutRawTest;
     b.active = false;
-    if (!target || m_pFilter->m_svdLutBStrength.load() == 0 || b.failed || frame.pts == INVALID_TIME ||
+    if (!m_pFilter->m_videoEnhancement.load() || !target || b.failed || frame.pts == INVALID_TIME ||
         m_currentSwapChainColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 ||
         SourceIsHDR() || m_bVPUseRTXVideoHDR || m_pPSHalfOUtoInterlace) return S_FALSE;
     if (!b.attempted && !StartSvdLutRawTest()) return S_FALSE;
@@ -1110,11 +904,8 @@ HRESULT CDX11VideoProcessor::DrawCompletedSvdLutRaw(const CompletedFrame& frame,
     CRect visible;
     if (!SupportedSdrFormat(d.Format) || !visible.IntersectRect(picture, area) ||
         visible.Width() < 2 || visible.Height() < 2) return S_FALSE;
-    if (m_pFilter->m_svdLutTemporal.load()) {
-        const bool pausedB2Replay =
-            (m_pFilter->m_svdLutB2Luminance.load() || m_pFilter->m_svdLutB2Memory.load() ||
-             m_pFilter->m_svdLutR1Gamut.load() || PerceptualEnabled()) &&
-            m_pFilter->m_filterState == State_Paused &&
+    {
+        const bool pausedB2Replay = m_pFilter->m_filterState == State_Paused &&
             b.b2Presented.pts == frame.pts && bool(b.b2Presented.view);
         if (!pausedB2Replay) {
             PollSvdLutTemporalQueue();
@@ -1160,7 +951,7 @@ void CDX11VideoProcessor::DrawSvdLutRaw(ID3D11Texture2D* target, const CRect& pi
 {
     auto& b = m_svdLutRawTest;
     b.active = false;
-    if (!target || m_pFilter->m_svdLutBStrength.load() == 0 || b.failed || pts == INVALID_TIME ||
+    if (!m_pFilter->m_videoEnhancement.load() || !target || b.failed || pts == INVALID_TIME ||
         m_currentSwapChainColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 ||
         SourceIsHDR() || m_bVPUseRTXVideoHDR || m_pPSHalfOUtoInterlace) return;
     if (!b.attempted && !StartSvdLutRawTest()) return;

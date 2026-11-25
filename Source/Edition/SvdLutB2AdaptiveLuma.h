@@ -5,6 +5,7 @@
 // W3C SetLum/ClipColor principle with Rec.709 coefficients (not W3C's RGB weights).
 // Keep the model and B1 LUT immutable. CPU and GPU use the same math.
 #include "SvdLutB2Refined.h"
+// [VE-03 | 2026-11-24 16:39:20 +08:00] Adaptive luma participation (former B2.1).
 namespace svdlut::b2::luma {
 using RGB = std::array<float, 3>;
 inline constexpr float MaximumParticipation = .25f;

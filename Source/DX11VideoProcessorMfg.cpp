@@ -435,10 +435,6 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
         m_mfgLowMotionActive = m_mfgLowMotionStreak == EnterSavingAfter && m_mfgQuietFlowCredit > 0;
         if (difference == mfg::FrameDifference::Cut) {
             if (UsesZipDepthSr() || UsesZipDepthMfg()) m_zipDepth.MarkSceneCut(timestamp);
-            if (m_svdLut.strength) {
-                BeginSvdLutScene(timestamp);
-                CaptureSvdLut(timestamp, projected, m_FieldDrawn == 2);
-            }
         }
         if (difference == mfg::FrameDifference::Cut || m_mfgRepeatHold || (repeatPending && !repeatBridge)) {
             m_mfg.ResetHistory();

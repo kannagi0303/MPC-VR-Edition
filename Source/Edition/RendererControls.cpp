@@ -26,36 +26,8 @@
 
 std::optional<HRESULT> CMpcVideoRenderer::GetEditionBool(LPCSTR field, bool* value)
 {
-	if (!strcmp(field, "svdLutOff")) {
-		*value = m_svdLutOff.load();
-		return S_OK;
-	}
-	if (!strcmp(field, "svdLutRaw")) {
-		*value = m_svdLutRaw.load();
-		return S_OK;
-	}
-	if (!strcmp(field, "svdLutTemporal")) {
-		*value = m_svdLutTemporal.load();
-		return S_OK;
-	}
-    if (!strcmp(field, "svdLutB2Luminance")) {
-        *value = m_svdLutB2Luminance.load();
-        return S_OK;
-    }
-    if (!strcmp(field, "svdLutB2Memory")) {
-        *value = m_svdLutB2Memory.load();
-        return S_OK;
-    }
-    if (!strcmp(field, "svdLutR1Gamut")) {
-        *value = m_svdLutR1Gamut.load();
-        return S_OK;
-    }
-    if (!strcmp(field, "preferredColors")) {
-        *value = m_preferredColors.load();
-        return S_OK;
-    }
-    if (!strcmp(field, "skinTones")) {
-        *value = m_skinTones.load();
+    if (!strcmp(field, "videoEnhancement")) {
+        *value = m_videoEnhancement.load();
         return S_OK;
     }
 	if (!strcmp(field, "dlssNR")) {
@@ -68,10 +40,6 @@ std::optional<HRESULT> CMpcVideoRenderer::GetEditionBool(LPCSTR field, bool* val
 
 std::optional<HRESULT> CMpcVideoRenderer::GetEditionInt(LPCSTR field, int* value)
 {
-    if (!strcmp(field, "svdLutBStrength")) {
-        *value = m_svdLutBStrength.load();
-        return S_OK;
-    }
 	// Independent settings channel for the MFG page. The native MPC-VR page
 	// owns every other Settings_t field; it must never be asked to commit MFG.
 	if (!strcmp(field, "mfgMultiplier")) {
@@ -91,72 +59,18 @@ std::optional<HRESULT> CMpcVideoRenderer::GetEditionInt(LPCSTR field, int* value
 
 std::optional<HRESULT> CMpcVideoRenderer::SetEditionBool(LPCSTR field, bool value)
 {
-    if (!strcmp(field, "preferredColors") || !strcmp(field, "skinTones")) {
+    // [VE-00 | 2026-11-24 16:39:20 +08:00] One live transaction; no registry write until Apply.
+    if (!strcmp(field, "videoEnhancement")) {
         CAutoLock lock(&m_RendererLock);
-        auto& flag = !strcmp(field, "preferredColors") ? m_preferredColors : m_skinTones;
-        if (flag.exchange(value) == value) return S_FALSE;
-        if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get()))
-            dx11->InvalidateCompletedBackBuffer();
-        if (m_filterState == State_Paused) Redraw();
-        return S_OK;
-    }
-    if (!strcmp(field, "svdLutR1Gamut")) {
-        CAutoLock lock(&m_RendererLock);
-        if (m_svdLutR1Gamut.exchange(value) == value) return S_FALSE;
-        if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get()))
-            dx11->InvalidateCompletedBackBuffer();
-        if (m_filterState == State_Paused) Redraw();
-        return S_OK;
-    }
-    if (!strcmp(field, "svdLutB2Memory")) {
-        CAutoLock lock(&m_RendererLock);
-        if (m_svdLutB2Memory.exchange(value) == value) return S_FALSE;
-        if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get()))
-            dx11->InvalidateCompletedBackBuffer();
-        if (m_filterState == State_Paused) Redraw();
-        return S_OK;
-    }
-    if (!strcmp(field, "svdLutB2Luminance")) {
-        CAutoLock lock(&m_RendererLock);
-        if (m_svdLutB2Luminance.exchange(value) == value) return S_FALSE;
+        if (m_videoEnhancement.exchange(value) == value) return S_FALSE;
         if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) {
-            // Do not reset B1 model/history or the completed video queue.
+            // Never reuse old PTS/LUTs or an already graded backbuffer after a toggle.
+            dx11->ReleaseSvdLutRawTest(true);
             dx11->InvalidateCompletedBackBuffer();
         }
         if (m_filterState == State_Paused) Redraw();
         return S_OK;
     }
-    if (!strcmp(field, "svdLutOff")) {
-        CAutoLock lock(&m_RendererLock);
-        if (m_svdLutOff.exchange(value) == value) return S_FALSE;
-        if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) {
-            // Off only bypasses SVDLUT; do not change Normal A's stored strength.
-            dx11->InvalidateCompletedBackBuffer();
-        }
-        if (m_filterState == State_Paused) Redraw();
-        return S_OK;
-    }
-	if (!strcmp(field, "svdLutTemporal")) {
-		CAutoLock lock(&m_RendererLock);
-		if (m_svdLutTemporal.exchange(value) == value) return S_FALSE;
-		if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) {
-			dx11->ReleaseSvdLutRawTest(true);
-			dx11->InvalidateCompletedBackBuffer();
-		}
-		if (m_filterState == State_Paused) Redraw();
-		return S_OK;
-	}
-	if (!strcmp(field, "svdLutRaw")) {
-		CAutoLock lock(&m_RendererLock);
-		if (m_svdLutRaw.exchange(value) == value) return S_FALSE;
-		if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) {
-			dx11->ResetSvdLutHistory();
-			dx11->ReleaseSvdLutRawTest(true);
-			dx11->InvalidateCompletedBackBuffer();
-		}
-		if (m_filterState == State_Paused) Redraw();
-		return S_OK;
-	}
 
 	// The settings page's two buttons for the channel's logo: they act at once, as the
 	// preset buttons do, with no Apply.
@@ -202,30 +116,6 @@ std::optional<HRESULT> CMpcVideoRenderer::SetEditionBool(LPCSTR field, bool valu
 
 std::optional<HRESULT> CMpcVideoRenderer::SetEditionInt(LPCSTR field, int value)
 {
-    if (!strcmp(field, "svdLutBStrengthPreview")) {
-        if (value < 0 || value > 200) return E_INVALIDARG;
-        CAutoLock lock(&m_RendererLock);
-        if (m_svdLutBStrength.exchange(value) == value) return S_FALSE;
-        if (m_svdLutRaw.load() && !m_svdLutOff.load()) {
-            if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get()))
-                dx11->InvalidateCompletedBackBuffer();
-            if (m_filterState == State_Paused) Redraw();
-        }
-        // No model/history reset and no SaveSettings() during preview.
-        return S_OK;
-    }
-	if (!strcmp(field, "svdLutStrengthPreview")) {
-		if (value < 0 || value > SVDLUT_STRENGTH_MAX) return E_INVALIDARG;
-		CAutoLock lock(&m_RendererLock);
-		if (value == m_Sets.GetSvdLutStrength()) return S_FALSE;
-		m_Sets.SetSvdLutStrength(value);
-		if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get())) {
-			dx11->SetSvdLutStrength(value);
-			if (m_filterState == State_Paused) Redraw();
-		}
-		return S_OK;
-	}
-
 	// One atomic MFG setting entry point, similar to MPCVR-Plus' IExFilterConfig
 	// controls. Do not replace a whole Settings_t captured by another tab.
 	// A requested multiplier is durable even when the NGX runtime is unavailable.

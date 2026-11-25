@@ -105,7 +105,6 @@ CDX11VideoProcessor::EditionConfiguration CDX11VideoProcessor::ConfigureEdition(
 		m_mfgMultiplier = mfgMultiplier;
 		m_mfgAutoEpoch = m_mfgAutoLastPts = -1;
 	}
-	SetSvdLutStrength(config.GetSvdLutStrength());
 	if (jvrModeChanged) ResetSvdLutHistory();
 	if (m_useZipDepthSr != config.bUseZipDepthSr) m_dlssSR.ResetHistory();
 	if (m_useZipDepthMfg != config.bUseZipDepthMfg || m_adaptiveMfgDepth != config.bAdaptiveMfgDepth)
@@ -213,7 +212,6 @@ void CDX11VideoProcessor::InitializeEdition(Settings_t& config)
 	ConfigureJvrProjection(config);
 	m_mfgMultiplier=(config.bUseD3D11 ? config.iMfgMultiplier : 0);m_rtVideoDelay=config.iVideoDelay*10000LL;
     m_mfgProcessingMode = config.iMfgProcessingMode <= 1 ? config.iMfgProcessingMode : 0;
-	m_svdLut.strength = config.GetSvdLutStrength();
 	m_useZipDepthSr = config.bUseZipDepthSr;
 	m_useZipDepthMfg = config.bUseZipDepthMfg;
 	m_adaptiveMfgDepth = config.bAdaptiveMfgDepth;

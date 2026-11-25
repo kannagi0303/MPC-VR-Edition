@@ -382,6 +382,8 @@ struct ModelWorker::Impl {
     std::condition_variable wake;
     std::unique_ptr<Image> input;
     ComPtr<ID3D11PixelShader> shader;
+    VideoEnhancementShaders veShaders;
+    std::atomic_bool cancelShaderPreparation{false};
     ComPtr<ID3D11ShaderResourceView> result;
     std::shared_ptr<const Parameters> resultParameters;
     uint64_t generation = 0;
@@ -394,6 +396,7 @@ struct ModelWorker::Impl {
         {
             std::lock_guard guard(lock);
             stopping = true;
+            cancelShaderPreparation.store(true, std::memory_order_release);
             input.reset();
         }
         wake.notify_all();
@@ -411,9 +414,19 @@ struct ModelWorker::Impl {
         StartupTrace trace;
         trace.Mark("Model file");
         try {
+            if (regularizeB) {
+                trace.Mark("Video Enhancement shaders");
+                PrepareVideoEnhancementShaders(renderDevice, veShaders, cancelShaderPreparation);
+                // Stop/seek never waits for shader compilation. A retired worker
+                // must not begin a new DirectML initialization after cancellation.
+                std::lock_guard guard(lock);
+                if (stopping) { finished.store(true, std::memory_order_release); return; }
+            }
+            trace.Mark("Model file");
             Inference model(adapter, directory, trace);
             trace.Mark("SVDLUT pixel shader");
-            Check(CreateGradeShader(renderDevice, shader.GetAddressOf()));
+            // Video Enhancement shaders were prepared on this worker.
+            if (!regularizeB) Check(CreateGradeShader(renderDevice, shader.GetAddressOf()));
             trace.Mark("Waiting for video thumbnail");
             bool first = true;
             state.store(State::Ready, std::memory_order_release);
@@ -591,6 +604,12 @@ FrameResult ModelWorker::EvaluateFrameWithParameters(std::unique_ptr<Image> imag
 ID3D11PixelShader* ModelWorker::Shader() const
 {
     return GetState() == State::Ready ? m_impl->shader.Get() : nullptr;
+}
+
+const VideoEnhancementShaders* ModelWorker::PreparedShaders() const
+{
+    const auto state = GetState();
+    return state == State::Ready || state == State::Failed ? &m_impl->veShaders : nullptr;
 }
 
 ModelWorker::State ModelWorker::GetState() const

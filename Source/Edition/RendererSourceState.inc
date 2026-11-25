@@ -31,6 +31,10 @@
 	double m_completedSegmentRate = 1.0;
 	bool m_schedulingCompletedSample = false;
 	uint64_t m_completedEpoch = 0;
+	// [MFG-B11 | 2026-11-25 09:55 +08:00] Receive owns InterfaceLock
+	// while publishing this renderer-lock waiter. Presenter reads it only
+	// to schedule a bounded, lock-free handoff after a measured slow Present.
+	std::atomic<bool> m_completedSourceWaiting{false};
 	std::optional<HRESULT> ReceiveCompletedSample(IMediaSample* sample);
 	std::atomic<bool> m_completedEndOfStream{false};
 	HRESULT EndOfStream() override;

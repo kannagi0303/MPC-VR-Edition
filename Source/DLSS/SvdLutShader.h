@@ -24,6 +24,7 @@ float4 main(float4 position : SV_POSITION) : SV_TARGET
 // B2.1 SetLum/ClipColor-style gamut-safe code-luma replacement.
 // A participation of 1 is the existing, completely unmodified B1 path.
 inline constexpr char SvdLutAdaptiveLumaShader[] = R"(
+// [VE-03 | 2026-11-24 16:39:20 +08:00] Luma composition (former B2.1).
 float3 ApplyB21Luma(float3 source, float3 grade, float participation)
 {
     if (participation >= 1.0) return grade;
@@ -42,6 +43,7 @@ float3 ApplyB21Luma(float3 source, float3 grade, float participation)
 // the source at B2.1's output Y'. ACES-style rational knee, NOT ACES gamut
 // mapping. Both endpoints are already in gamut at the same Y', so their
 // convex combination preserves that anchor without per-channel clipping.
+// [VE-04 | 2026-11-24 16:39:20 +08:00] Source-adaptive chroma (former B2.2).
 float3 ApplyB22Chroma(float3 source, float3 calibrated)
 {
     const float3 weights = float3(.2126, .7152, .0722);

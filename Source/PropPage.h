@@ -37,27 +37,9 @@ class __declspec(uuid("DA46D181-07D6-441D-B314-019AEB10148A"))
 	Settings_t m_SetsPP;
 
 	int m_oldSDRDisplayNits = SDR_NITS_DEF;
-	int m_oldSvdLutStrength = 0;
-    int m_svdLutBStrength = 200;
-    int m_oldSvdLutBStrength = 200;
-    bool m_svdLutBPreviewed = false;
-	bool m_svdLutPreviewed = false;
-	bool m_svdLutOff = false;
-	bool m_oldSvdLutOff = false;
-	bool m_svdLutRaw = false;
-	bool m_oldSvdLutRaw = false;
-	bool m_svdLutTemporal = false;
-	bool m_oldSvdLutTemporal = false;
-    bool m_svdLutB2Luminance = false;
-    bool m_oldSvdLutB2Luminance = false;
-    bool m_svdLutB2Memory = false;
-    bool m_oldSvdLutB2Memory = false;
-    bool m_svdLutR1Gamut = false;
-    bool m_oldSvdLutR1Gamut = false;
-    bool m_skinTones = false;
-    bool m_oldSkinTones = false;
-    bool m_preferredColors = false;
-    bool m_oldPreferredColors = false;
+    bool m_videoEnhancement = false;
+    bool m_oldVideoEnhancement = false;
+    bool m_videoEnhancementCaptured = false;
 
 	bool m_oldJvrFlatView = false;
 	int m_oldJvrVertical = JVR_VERTICAL_DEFAULT;
@@ -88,17 +70,7 @@ private:
 	void EnableControls();
 	void UpdateJvrViewLabels();
 	void ApplyJvrPreview();
-	void UpdateSvdLutLabel();
-	void PreviewSvdLutStrength(int strength);
-    void PreviewSvdLutBStrength(int strength);
-	void PreviewSvdLutOff(bool off);
-	void PreviewSvdLutRaw(bool raw);
-	void PreviewSvdLutTemporal(bool temporal);
-    void PreviewSvdLutB2Luminance(bool enable);
-    void PreviewSvdLutB2Memory(bool enable);
-    void PreviewSvdLutR1Gamut(bool enable);
-    void PreviewSkinTones(bool enable);
-    void PreviewPreferredColors(bool enable);
+	bool PreviewVideoEnhancement(bool enable);
 
 	HRESULT OnConnect(IUnknown* pUnknown) override;
 	HRESULT OnDisconnect() override;

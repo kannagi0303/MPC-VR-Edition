@@ -25,6 +25,7 @@ class MemoryRenderer final : public IVideoRenderer, public IExFilterConfig {
 public:
     Settings_t settings;
     unsigned saves = 0;
+    bool videoEnhancement = false;
     HRESULT saveResult = S_OK;
     STDMETHODIMP QueryInterface(REFIID id, void** out) override {
         if (!out) return E_POINTER;
@@ -46,7 +47,10 @@ public:
     STDMETHODIMP LoadPreset(int, Settings_t&) override { return S_FALSE; }
     STDMETHODIMP GetPresetInfo(int, LPWSTR, int, int*) override { return S_FALSE; }
     STDMETHODIMP SetPresetInfo(int, LPCWSTR, int) override { return E_NOTIMPL; }
-    STDMETHODIMP Flt_GetBool(LPCSTR, bool*) override { return E_NOTIMPL; }
+    STDMETHODIMP Flt_GetBool(LPCSTR field, bool* value) override {
+        if (std::strcmp(field, "videoEnhancement")) return E_NOTIMPL;
+        *value = videoEnhancement; return S_OK;
+    }
     STDMETHODIMP Flt_GetInt(LPCSTR, int*) override { return E_NOTIMPL; }
     STDMETHODIMP Flt_GetInt64(LPCSTR, __int64*) override { return E_NOTIMPL; }
     STDMETHODIMP Flt_GetDouble(LPCSTR, double*) override { return E_NOTIMPL; }
@@ -60,11 +64,11 @@ public:
         std::memcpy(*value, name, sizeof(name)); return S_OK;
     }
     STDMETHODIMP Flt_GetBin(LPCSTR, LPVOID*, unsigned*) override { return E_NOTIMPL; }
-    STDMETHODIMP Flt_SetBool(LPCSTR, bool) override { return E_NOTIMPL; }
-    STDMETHODIMP Flt_SetInt(LPCSTR field, int value) override {
-        if (std::strcmp(field, "svdLutStrengthPreview")) return E_NOTIMPL;
-        settings.SetSvdLutStrength(value); return S_OK;
+    STDMETHODIMP Flt_SetBool(LPCSTR field, bool value) override {
+        if (std::strcmp(field, "videoEnhancement")) return E_NOTIMPL;
+        videoEnhancement = value; return S_OK;
     }
+    STDMETHODIMP Flt_SetInt(LPCSTR, int) override { return E_NOTIMPL; }
     STDMETHODIMP Flt_SetInt64(LPCSTR, __int64) override { return E_NOTIMPL; }
     STDMETHODIMP Flt_SetDouble(LPCSTR, double) override { return E_NOTIMPL; }
     STDMETHODIMP Flt_SetString(LPCSTR, LPWSTR, int) override { return E_NOTIMPL; }
@@ -99,7 +103,7 @@ struct Page {
         renderer.settings.bJvrFlatView = true;
         renderer.settings.iJvrVertical = 17;
         renderer.settings.iJvrEye = 1;
-        renderer.settings.SetSvdLutStrength(25);
+        renderer.settings.SetSvdLutStrength(25); // retired ABI slot; must not control VE
         using GetFactory = HRESULT(WINAPI*)(REFCLSID, REFIID, void**);
         const auto factoryEntry = reinterpret_cast<GetFactory>(GetProcAddress(module, "DllGetClassObject"));
         Require(factoryEntry != nullptr, "Missing class factory export");
@@ -128,7 +132,11 @@ struct Page {
         Check(object->Activate(host, &bounds, FALSE), "Cannot activate real page");
         active = true;
         window = GetWindow(host, GW_CHILD);
-        Require(window && GetDlgItem(window, IDC_SVDLUT_STRENGTH), "Resource include lost Edition controls");
+        Require(window && GetDlgItem(window, IDC_VIDEO_ENHANCEMENT), "Resource include lost Video Enhancement");
+        for (int id : {IDC_SVDLUT_STRENGTH, IDC_SVDLUT_MODE, IDC_SVDLUT_B_STRENGTH,
+                       IDC_SVDLUT_B2_LUMINANCE, IDC_SVDLUT_B2_MEMORY, IDC_SVDLUT_R1_GAMUT,
+                       IDC_PREFERRED_COLORS, IDC_SKIN_TONES})
+            Require(!GetDlgItem(window, id), "Retired experiment control still exposed");
     }
     void Deactivate() { Check(object->Deactivate(), "Cannot deactivate page"); active = false; }
     void Cancel() { Deactivate(); Check(object->SetObjects(0, nullptr), "Cannot disconnect page"); connected = false; }
@@ -157,8 +165,8 @@ struct Page {
 void Run(HMODULE module, bool profiles) {
     {
         Page page(module);
-        page.Slider(IDC_SVDLUT_STRENGTH, 55);
-        Require(page.renderer.settings.GetSvdLutStrength() == 55 && page.renderer.saves == 0, "Strength preview saved or failed");
+        page.Click(IDC_VIDEO_ENHANCEMENT, true);
+        Require(page.renderer.videoEnhancement && page.renderer.saves == 0, "VE preview saved or failed");
         if (profiles) {
             page.Slider(IDC_JVR_VERTICAL, 15);
             page.Select(IDC_JVR_EYE, 0);
@@ -174,29 +182,29 @@ void Run(HMODULE module, bool profiles) {
         Require(page.renderer.saves == 1 && settings.iMfgMultiplier == 7 && settings.bDlssSR &&
             settings.iDlssSRSourceLimit == DLSSSR_SOURCE_1080p && settings.bUseZipDepthSr && !settings.bUseZipDepthMfg &&
             settings.iMfgProcessingMode == 1 && settings.bWaitForExtendedStartup, "Apply lost Edition fields");
-        page.Slider(IDC_SVDLUT_STRENGTH, 80);
+        page.Click(IDC_VIDEO_ENHANCEMENT, false);
         if (profiles) page.Slider(IDC_JVR_VERTICAL, -20);
         page.Cancel();
-        Require(settings.GetSvdLutStrength() == 55 && settings.iJvrVertical == (profiles ? 15 : 17), "Cancel did not restore applied preview");
+        Require(page.renderer.videoEnhancement && settings.iJvrVertical == (profiles ? 15 : 17), "Cancel did not restore applied preview");
     }
     {
         Page page(module);
-        page.Slider(IDC_SVDLUT_STRENGTH, 65);
+        page.Click(IDC_VIDEO_ENHANCEMENT, true);
         page.Deactivate(); page.Activate();
         page.Cancel();
-        Require(page.renderer.settings.GetSvdLutStrength() == 25, "Reactivation lost strength rollback checkpoint");
+        Require(!page.renderer.videoEnhancement, "Reactivation lost VE rollback checkpoint");
     }
     {
         Page page(module);
         page.renderer.saveResult = E_FAIL;
-        page.Slider(IDC_SVDLUT_STRENGTH, 75);
+        page.Click(IDC_VIDEO_ENHANCEMENT, true);
         Require(page.object->Apply() == E_FAIL, "Apply hid save failure");
         page.Cancel();
-        Require(page.renderer.settings.GetSvdLutStrength() == 25, "Failed save advanced rollback checkpoint");
+        Require(!page.renderer.videoEnhancement, "Failed save advanced VE rollback checkpoint");
     }
     {
         Page page(module);
-        page.Slider(IDC_SVDLUT_STRENGTH, 45);
+        page.Click(IDC_VIDEO_ENHANCEMENT, true);
         SendDlgItemMessageW(page.window, IDC_ZIPDEPTH_MODE, CB_SETCURSEL, -1, 0);
         Require(page.object->Apply() == E_INVALIDARG && page.renderer.saves == 0, "Invalid selection was committed");
         page.Cancel();

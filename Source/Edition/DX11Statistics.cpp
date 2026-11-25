@@ -25,6 +25,7 @@
 #include "VideoRenderer.h"
 #include "Mfg/CadenceTrace.h"
 #include "Edition/GpuLoadSampler.h"
+#include "Edition/CompletedBufferAudit.h"
 
 void CDX11VideoProcessor::RecordEditionVsr(const CRect& input, const CRect& output, bool afterMfg)
 {
@@ -49,12 +50,14 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 		m_mfgRateTick = 0;
 		m_mfgDxgiHasBaseline = false;
 		m_mfgDxgiAvailable = false;
+		m_mfgDxgiStatus = L"baseline";
 	}
 
 	std::wstring mfgStats = L"Off";
 	const wchar_t* mfgReason = nullptr;
 	double outputFps = 0.0, skippedPerSec = 0.0;
 	std::optional<double> displayFps;
+	const wchar_t* dxgiStatus = L"inactive";
 	if (m_mfgMultiplier) {
 		if (MfgSourceMeetsDisplayRate()) {
 			mfgReason = L"Source meets display refresh";
@@ -75,6 +78,11 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 				const double frequency=double(GetPreciseTicksPerSecond());
 				if (!m_mfgRateTick || rateTick<m_mfgRateTick) {
 					m_mfgRateTick=rateTick;
+					m_mfgDxgiStatus = L"baseline";
+					if (mfg::SourceCadenceTrace().Enabled()) {
+						mfg::SourceCadenceTrace().Record("mfg_dxgi_status_rate_reset", rateTick, -1, -1,
+							0, 0, 0, 0, 0, false, m_mfgLostGenerated, S_OK);
+					}
 					m_mfgRateReal=real;
 					m_mfgRateGenerated=generated;
 					m_mfgRateFallback=fallback;
@@ -135,23 +143,55 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 						(m_bExclusiveScreen || m_UsedSwapEffect==DXGI_SWAP_EFFECT_FLIP_DISCARD ||
 						 m_UsedSwapEffect==DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL);
 					const HRESULT statsHr=supported?m_pDXGISwapChain1->GetFrameStatistics(&dxgi):E_FAIL;
+					// [MFG-B10 | 2026-11-24 23:56 +08:00] Record WHY the advisory
+					// DXGI rate is invalid, including failures, without changing its calculation.
+					const auto previousCount = m_mfgDxgiLastPresentCount;
+					const bool hadBaseline = m_mfgDxgiHasBaseline;
+					const char* dxgiEvent = "mfg_dxgi_status_unsupported";
+					m_mfgDxgiStatus = L"unsupported";
 					if(SUCCEEDED(statsHr)) {
-							if (mfg::SourceCadenceTrace().Enabled()) {
-								mfg::SourceCadenceTrace().Record("mfg_dxgi_sample", rateTick, -1, -1,
-									dxgi.PresentCount, dxgi.PresentRefreshCount, dxgi.SyncRefreshCount, 0,
-									dxgi.SyncQPCTime.QuadPart, false, m_mfgLostGenerated, statsHr);
-							}
+						if (mfg::SourceCadenceTrace().Enabled()) {
+							mfg::SourceCadenceTrace().Record("mfg_dxgi_sample", rateTick, -1, -1,
+								dxgi.PresentCount, dxgi.PresentRefreshCount, dxgi.SyncRefreshCount, 0,
+								dxgi.SyncQPCTime.QuadPart, false, m_mfgLostGenerated, statsHr);
+						}
 						if(m_mfgDxgiHasBaseline && dxgi.PresentCount>=m_mfgDxgiLastPresentCount) {
 							const double rate=double(dxgi.PresentCount-m_mfgDxgiLastPresentCount)/seconds;
 							const double displayHz=m_dRefreshPeriodMs>0.0?1000.0/m_dRefreshPeriodMs:0.0;
 							// DXGI stats can be discontinuous on mode changes / some display paths.
 							// Never report an impossible scan-out rate as a measurement.
 							m_mfgDxgiAvailable=displayHz>0.0 && rate<=displayHz*1.2+1.0;
-							if(m_mfgDxgiAvailable) m_mfgDxgiDisplayFps=rate;
-						} else m_mfgDxgiAvailable=false;
+							if(m_mfgDxgiAvailable) {
+								m_mfgDxgiDisplayFps=rate;
+								dxgiEvent = "mfg_dxgi_status_valid";
+								m_mfgDxgiStatus = L"valid";
+							} else if (displayHz <= 0.0) {
+								dxgiEvent = "mfg_dxgi_status_refresh_unknown";
+								m_mfgDxgiStatus = L"refresh unknown";
+							} else {
+								dxgiEvent = "mfg_dxgi_status_rate_rejected";
+								m_mfgDxgiStatus = L"rate rejected";
+							}
+						} else {
+							m_mfgDxgiAvailable=false;
+							dxgiEvent = hadBaseline ? "mfg_dxgi_status_count_reversed" : "mfg_dxgi_status_baseline";
+							m_mfgDxgiStatus = hadBaseline ? L"count reversed" : L"baseline";
+						}
 						m_mfgDxgiLastPresentCount=dxgi.PresentCount;
 						m_mfgDxgiHasBaseline=true;
-					} else {m_mfgDxgiHasBaseline=false;m_mfgDxgiAvailable=false;}
+					} else {
+						m_mfgDxgiHasBaseline=false;m_mfgDxgiAvailable=false;
+						if (supported) {
+							const bool disjoint = statsHr == DXGI_ERROR_FRAME_STATISTICS_DISJOINT;
+							dxgiEvent = disjoint ? "mfg_dxgi_status_disjoint" : "mfg_dxgi_status_api_failed";
+							m_mfgDxgiStatus = disjoint ? L"disjoint" : L"API failed";
+						}
+					}
+					if (mfg::SourceCadenceTrace().Enabled()) {
+						mfg::SourceCadenceTrace().Record(dxgiEvent, rateTick, -1, -1,
+							dxgi.PresentCount, previousCount, dxgi.PresentRefreshCount, dxgi.SyncRefreshCount,
+							dxgi.SyncQPCTime.QuadPart, hadBaseline, m_mfgLostGenerated, statsHr, rateTick - m_mfgRateTick);
+					}
 					m_mfgRateTick=rateTick;
 					m_mfgRateReal=real;
 					m_mfgRateGenerated=generated;
@@ -161,6 +201,7 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 				outputFps=m_mfgActualFps;
 				skippedPerSec=m_mfgSkippedPerSec;
 				if (m_mfgDxgiAvailable) displayFps = m_mfgDxgiDisplayFps;
+				dxgiStatus = m_mfgDxgiStatus;
 			}
 			if (m_mfg.InputSize().cx && sourceFps > 0.0 && outputFps > 0.0) {
 				mfgStats = std::format(L"{} -> {} fps", edition::CompactNumber(sourceFps), edition::CompactNumber(outputFps));
@@ -185,24 +226,20 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 	const bool srDepthUsed = UsesZipDepthSr() && depth.srEvaluations && (!running || now - depth.lastSrUseTick <= 1000);
 	const bool mfgDepthUsed = UsesZipDepthMfg() && depth.mfgSubmissions && (!running || now - depth.lastMfgUseTick <= 1000);
 	const bool depthActive = (srDepthUsed || mfgDepthUsed) && !m_zipDepth.CoolingDown(now);
-	const bool svdOff = m_pFilter->m_svdLutOff.load();
-    const bool svdRaw = !svdOff && m_pFilter->m_svdLutRaw.load();
-	const bool svdTemporal = svdRaw && m_pFilter->m_svdLutTemporal.load();
+    const bool svdOff = !m_pFilter->m_videoEnhancement.load();
+    const bool svdRaw = !svdOff;
+    const bool svdTemporal = svdRaw;
     const bool svdBUnsupported = svdRaw && (SourceIsHDR() || m_bVPUseRTXVideoHDR ||
-        m_currentSwapChainColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 ||
-        m_pPSHalfOUtoInterlace);
-	const auto svdStats = (svdOff || (svdRaw && m_pFilter->m_svdLutBStrength.load() == 0)) ? L"Off" : svdRaw
-        ? (svdBUnsupported ? L"B (SDR color path required)" :
-            svdTemporal ? (m_svdLutRawTest.completed ?
-                std::format(L"Temporal B1 {}%", m_pFilter->m_svdLutBStrength.load()) : L"Temporal B1 (loading)") :
-            m_svdLutRawTest.active ? std::format(L"RAW B {}%", m_pFilter->m_svdLutBStrength.load()) : L"B (loading)")
-		: (m_svdLut.strength && m_svdLut.active ? std::format(L"{}%", m_svdLut.strength) : L"Off");
+        m_currentSwapChainColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 || m_pPSHalfOUtoInterlace);
+    const auto svdStats = svdOff ? L"Off" : svdBUnsupported ? L"SDR required" :
+        (m_svdLutRawTest.failed || m_svdLutRawTest.model.GetState() == svdlut::ModelWorker::State::Failed) ? L"Fallback" :
+        m_svdLutRawTest.active ? L"Active" : L"Preparing";
 
 	const bool hasVideoBuffer = m_completedLast || CompletedFramesPending();
 	const bool refreshBufferStats = hasVideoBuffer && running &&
 		(!m_completedBufferStatsTick || now - m_completedBufferStatsTick >= edition::BufferLowWatermark::SampleIntervalMs);
 	CRefTime bufferStream;
-	const bool needDepthPts = m_showEditionDetails && running && (zipDepthEnabled || m_svdLut.strength);
+	const bool needDepthPts = m_showEditionDetails && running && (zipDepthEnabled || !svdOff);
 	const bool hasStreamTime = (refreshBufferStats || needDepthPts) && SUCCEEDED(m_pFilter->StreamTime(bufferStream));
 	const int64_t playbackPts = needDepthPts && hasStreamTime ? REFERENCE_TIME(bufferStream) - m_rtVideoDelay : -1;
 
@@ -221,6 +258,39 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 			}
 			if (time.nonIncreasing) m_completedBufferStats += std::format(L"\nBuffer order  {} out of order", time.nonIncreasing);
 		}
+		// [MFG-B10 | 2026-11-24 23:56 +08:00] Independent diagnostic upper bound.
+		// Same queue and fence snapshot; no policy reads this result. Signaled
+		// frames after a gap are not necessarily safe continuous playback.
+		auto& bufferTrace = mfg::SourceCadenceTrace();
+		if (m_showEditionDetails || bufferTrace.Enabled()) {
+			const auto audit = edition::AuditCompletedBuffer(m_completedFrames, time.fence, time.readyFrames);
+			using Cutoff = edition::CompletedBufferAudit::Cutoff;
+			const wchar_t* cutoff = L"none";
+			const char* cutoffEvent = "buffer_cutoff_none";
+			switch (audit.cutoff) {
+			case Cutoff::Order: cutoff = L"order"; cutoffEvent = "buffer_cutoff_order"; break;
+			case Cutoff::Fence: cutoff = L"fence"; cutoffEvent = "buffer_cutoff_fence"; break;
+			case Cutoff::OrderAndFence: cutoff = L"order+fence"; cutoffEvent = "buffer_cutoff_both"; break;
+			case Cutoff::NoFence: cutoff = L"no valid fence"; cutoffEvent = "buffer_cutoff_no_fence"; break;
+			default: break;
+			}
+			const auto signaledAhead = audit.signaledFrames ? (std::max)(REFERENCE_TIME(0), audit.signaledEnd - REFERENCE_TIME(bufferStream)) : 0;
+			if (m_showEditionDetails) {
+				m_completedBufferStats += std::format(L"\nBuffer audit  Signaled {} ms ({}) | Cut {} | Batch {}",
+					signaledAhead / 10000, audit.signaledFrames, cutoff, m_completedBatches.size());
+			}
+			if (bufferTrace.Enabled()) {
+				const auto tick = GetPreciseTick();
+				const mfg::CadenceTrace::CompletedQueue queue{m_completedFrames.size(), m_completedBatches.size(),
+					audit.queuedEnd, m_completedDisplayPacing.LeadMs(), m_completedDisplayPacing.LeadMs(), m_completedDisplayPacing.Samples()};
+				bufferTrace.Record("buffer_audit", tick, audit.readyEnd, bufferStream,
+					time.fence, unsigned(time.readyFrames), unsigned(time.queuedFrames), unsigned(audit.signaledFrames),
+					audit.queuedEnd, CompletedGeometryChanging(), m_mfgLostGenerated, S_OK, 0, audit.signaledEnd, &queue);
+				bufferTrace.Record(cutoffEvent, tick, audit.priorDue, bufferStream, audit.cutoffFence,
+					unsigned(audit.cutoffIndex), time.nonIncreasing, *m_completedBufferPercent, audit.cutoffDue,
+					displayFps.has_value(), m_mfgLostGenerated, S_OK, 0, target);
+			}
+		}
 		m_completedStatsDrops = {};
 		m_completedCadence.ClearWindow();
 		m_completedBufferStatsTick = now;
@@ -229,7 +299,7 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 	std::wstring level = hasVideoBuffer ? L"--" : L"Off";
 	if (hasVideoBuffer && m_completedBufferPercent) level = std::format(L"{}%", *m_completedBufferPercent);
 	const auto separator = str.size() + 1;
-	str += std::format(L"\n\nDLSS SR  {}\nVSR      {}\nMFG      {}\nZipDepth {} | SVDLUT {} | Video buffer {}",
+	str += std::format(L"\n\nDLSS SR  {}\nVSR      {}\nMFG      {}\nZipDepth {} | Video Enhancement {} | Video buffer {}",
 		srStats, vsrStats, mfgStats, depthActive ? L"On" : L"Off", svdStats, level);
 
 	if (m_showEditionDetails) {
@@ -270,13 +340,15 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 		const bool mfgActive = !mfgReason && m_mfgMultiplier && m_mfg.InputSize().cx;
 		if (mfgActive || m_completedPresentWaitable) {
 			str += L"\nPresent       ";
-			str += displayFps ? std::format(L"DXGI {} fps", edition::CompactNumber(*displayFps)) : L"DXGI n/a";
+			str += displayFps ? std::format(L"DXGI {} fps", edition::CompactNumber(*displayFps)) : std::format(L"DXGI n/a ({})", dxgiStatus);
 			if (skippedPerSec >= 0.1)
 				str += std::format(L" | {} skipped/s", edition::CompactNumber(skippedPerSec));
 		}
 		if (hasVideoBuffer) {
 			str.append(m_completedBufferStats);
 		}
+		if (m_completedResizeEarlyDrops)
+			str += std::format(L"\nMFG resize    {} early drops", m_completedResizeEarlyDrops);
 		const auto lostOriginals = m_mfgLostReal.load(std::memory_order_relaxed);
 		if (lostOriginals > m_editionOriginalDropsBase)
 			str += std::format(L"\nOriginal drops {}", lostOriginals - m_editionOriginalDropsBase);
@@ -293,15 +365,15 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 		}
         if (PerceptualEnabled()) {
             str += std::format(L"\nPreferred/Skin {} / {} | Depth {} used / {} fallback",
-                m_pFilter->m_preferredColors.load() ? L"On" : L"Off",
-                m_pFilter->m_skinTones.load() ? L"On" : L"Off",
+                m_pFilter->m_videoEnhancement.load() ? L"On" : L"Off",
+                m_pFilter->m_videoEnhancement.load() ? L"On" : L"Off",
                 m_perceptual.depthUsed, m_perceptual.depthFallback);
-            if (m_perceptual.failedStandalone || m_perceptual.failedA || m_perceptual.failedB)
+            if (m_perceptual.failedStandalone || m_perceptual.failedB)
                 str += L"\nPerceptual    shader compile failed (fallback)";
         }
 		if (svdRaw) {
 			const auto& b = m_svdLutRawTest;
-			str += std::format(L"\nSVDLUT B      {}/{} analyzed | {} graded | {} ungraded",
+			str += std::format(L"\nVE temporal   {}/{} analyzed | {} graded | {} ungraded",
 				b.completed, b.requests, b.presentedGraded, b.presentedUngraded);
             if (svdTemporal && b.grayProbe.valid) {
                 const auto& probe = b.grayProbe;
@@ -318,20 +390,16 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
             } else if (svdTemporal) {
                 str += L"\nB1 gray 236   n/a (selected LUT data unavailable)";
             }
-            if (svdTemporal && m_pFilter->m_svdLutB2Luminance.load() && b.b2Analyses) {
-                str += std::format(L"\nB2.1 analysis  {:.1f}% luma | {:.2f} EV candidate shift",
+            if (svdTemporal && b.b2Analyses) {
+                str += std::format(L"\nVE luma         {:.1f}% luma | {:.2f} EV candidate shift",
                     b.b2LastTone[0] * 100.0f, b.b2LastSourceShiftEv);
             }
-			if (m_pFilter->m_svdLutB2Memory.load() && b.b2MemoryShaderFailed)
-				str += L"\nB2 memory     shader compile failed";
-			if (m_pFilter->m_svdLutR1Gamut.load() && b.r1GamutShaderFailed)
-				str += L"\nR1 gamut      shader compile failed (fallback)";
-			if (m_pFilter->m_svdLutB2Luminance.load() && b.b2ShaderFailed)
-				str += L"\nB2.1          shader compile failed";
+			if (b.b2MemoryShaderFailed)
+				str += L"\nVE chroma     shader compile failed";
+			if (b.b2ShaderFailed)
+				str += L"\nVE luma       shader compile failed";
 			if (b.model.GetState() == svdlut::ModelWorker::State::Failed || b.failed)
-				str += std::format(L"\nSVDLUT error  {}", SvdLutStatus());
-		} else if (!svdOff && m_svdLut.strength && !m_svdLut.active) {
-			str += std::format(L"\nSVDLUT        {}", SvdLutStatus());
+				str += std::format(L"\nVE model error {}", SvdLutStatus());
 		}
 	}
 

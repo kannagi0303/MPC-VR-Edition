@@ -67,7 +67,21 @@ const char* CDX11VideoProcessor::CompletedAdmissionBlock(REFERENCE_TIME due, std
             // Give one queue head priority per input sample. After it leaves,
             // allow work in the submit margin while the next head's PTS is still ahead.
             if (!deferredFrameFence) deferredFrameFence = front.fence;
-            if (front.fence == *deferredFrameFence || remaining <= 0) return "completed_wait_present_deadline";
+            if (front.fence == *deferredFrameFence || remaining <= 0) {
+                // [MFG-B11 | 2026-11-25 09:55 +08:00] A successful slow
+                // Present earns one normal input admission opportunity. Only
+                // the head-deadline gate is relaxed, for a ready fixed-canvas
+                // head less than one refresh late. All resource/overlap gates
+                // below remain authoritative; consume credit on target acquire.
+                if (!CompletedFairProducerCanvas() || !m_completedPresentFairness.MayAdmit(
+                    remaining, m_dRefreshPeriodMs, completed != UINT64_MAX && front.fence <= completed))
+                    return "completed_wait_present_deadline";
+                auto& trace = mfg::SourceCadenceTrace();
+                if (trace.Enabled()) {
+                    trace.Record("completed_fair_deadline_open", GetPreciseTick(), due, stream,
+                        front.serial, front.phase, 0, 0, 0, false, m_mfgLostGenerated, S_OK, 0, front.due);
+                }
+            }
         }
     }
     if (completed == UINT64_MAX) return "completed_wait_device_removed";
@@ -84,19 +98,21 @@ const char* CDX11VideoProcessor::CompletedAdmissionBlock(REFERENCE_TIME due, std
         if (block && m_completedResizeRecovery.load(std::memory_order_relaxed) && m_mfg.AsyncProducer() &&
             (std::strcmp(block, "completed_wait_mfg_slots") == 0 ||
              std::strcmp(block, "completed_wait_mfg_bank") == 0)) {
-            // B08 is a resize-recovery escape only. Seek/flush resets the arm,
-            // so seek prebuffering follows the GitHub stable bank/pending path.
-            // Do not decide MFG startup from the Ready-buffer percentage:
-            // seek naturally starts with zero Ready and must still generate.
-            // A recyclable NGX bank is an optional enhancement resource, not
-            // ownership of the original frame. When bank pressure prevents
-            // receiving another source, retire the oldest buffered batch now.
-            // Ready synthetic phases are still rendered; unfinished ones are
-            // discarded, while the independent original snapshot is enqueued.
-            // Without this escape, a pending generated phase can block the
-            // entire batch until the ORIGINAL's deadline, and the queue can
-            // drain even though source/GPU processing has sufficient capacity.
-            PrepareCompletedBatch(stream, true);
+            // [MFG-B08 | 2026-11-24 17:28 +08:00] Preserve the resize-only
+            // safety net, but don't force a pending batch out just because
+            // its bank is occupied. Normally compose ready phases first.
+            // If the GPU is still producing, yield to the existing retry
+            // path while contiguous ready video covers the startup reserve.
+            // Only short reserve + actual bank/slot pressure may invoke the
+            // original-first emergency path. A slow post-resize drain still
+            // has this escape even long after the geometry settling window.
+            // The Ready threshold is NOT a startup condition or a new target.
+            if (!edition::CompletedBufferPolicy::TryResizeBankRecovery(
+                    [this, &stream](bool originalPriority) {
+                        return PrepareCompletedBatch(stream, originalPriority);
+                    },
+                    [this, &stream]() { return GetCompletedBufferTime(stream).ready; },
+                    CompletedStartupLead)) return block;
             // Re-check GPU completion, capacity, and bank ownership after
             // rendering any ready phases and enqueuing the protected original.
             // A forced batch is not permission to exceed the fence budget.
@@ -129,8 +145,24 @@ const char* CDX11VideoProcessor::CompletedOverlapBlock(REFERENCE_TIME stream, RE
                                                        uint64_t committed, uint64_t nextFrameBytes) const
 {
     if (!m_completedBudgetKnown) return "completed_wait_budget_unknown";
-    if (m_extendedStartupPending || CompletedGeometryChanging() || !m_mfgMultiplier || m_mfgOriginalPrime)
+    if (m_extendedStartupPending || !m_mfgMultiplier || m_mfgOriginalPrime)
         return "completed_wait_batch";
+    // [MFG-B09 | 2026-11-24 17:51 +08:00] Geometry is a presenter
+    // transition, not a producer transition, when ALL pending batches own
+    // the current fixed processing canvas. Keep the former guard for legacy
+    // window-sized targets, genuine format/canvas changes and mixed queues.
+    // Never relax the bank, fence, budget or presentation-deadline checks below.
+    if (CompletedGeometryChanging()) {
+        const bool independent = m_processingSize.cx > 0 && m_processingSize.cy > 0 &&
+            std::all_of(m_completedBatches.begin(), m_completedBatches.end(), [this](const auto& batch) {
+                const auto& target = batch.target;
+                const auto& desc = target.image.desc;
+                return target.videoOnly && target.picture == ProcessingRect() &&
+                    desc.Width == UINT(m_processingSize.cx) && desc.Height == UINT(m_processingSize.cy) &&
+                    desc.Format == m_SwapChainFmt;
+            });
+        if (!independent) return "completed_wait_geometry_batch";
+    }
     const bool beforeMfgSecondBatch = m_completedBatches.size() == 1 &&
         UpscaleAt(UpscaleSlot::BeforeMfg) && m_mfg.AsyncProducer();
     const size_t reservedBanks = beforeMfgSecondBatch ? 0 : 1;
@@ -244,6 +276,7 @@ HRESULT CDX11VideoProcessor::PrepareCompletedTarget()
         return E_FAIL;
     }
     m_completedTarget.emplace(std::move(target));
+    m_completedPresentFairness.ConsumeAdmission();
     return S_OK;
 }
 
@@ -398,7 +431,10 @@ bool CDX11VideoProcessor::PrepareCompletedBatch(REFERENCE_TIME stream, bool orig
         auto* dropCount = &m_completedStatsDrops.other;
         HRESULT result = S_FALSE;
         if (surface.pending) {
-            drop = phase.presentationTime <= stream ? "completed_drop_ngx_late" : "completed_drop_ngx_original_due";
+            const bool resizeEarly = originalPriority && phase.presentationTime > stream;
+            if (resizeEarly) ++m_completedResizeEarlyDrops;
+            drop = phase.presentationTime <= stream ? "completed_drop_ngx_late" :
+                resizeEarly ? "completed_drop_ngx_resize_recovery" : "completed_drop_ngx_original_due";
             dropCount = &m_completedStatsDrops.ngxLate;
         } else if (phase.presentationTime <= stream) {
             drop = "completed_drop_compose_late";
@@ -471,6 +507,64 @@ bool CDX11VideoProcessor::PrepareCompletedBatch(REFERENCE_TIME stream, bool orig
     return true;
 }
 
+// [MFG-B11 | 2026-11-25 09:55 +08:00] Keep the new fairness path
+// on the same fixed-canvas contract as B09. Never move GPU work across the
+// RendererLock or use a window-dependent batch in an exceptional service turn.
+bool CDX11VideoProcessor::CompletedFairProducerCanvas() const
+{
+    if (m_extendedStartupPending || m_completedFailed || !m_mfgMultiplier ||
+        !m_mfg.AsyncProducer() || m_processingSize.cx <= 0 || m_processingSize.cy <= 0 ||
+        (m_mfgEffectiveMultiplier.load(std::memory_order_relaxed) < 2 && m_completedBatches.empty()))
+        return false;
+    const auto matches = [this](const CompletedFrame& target) {
+        const auto& desc = target.image.desc;
+        return target.videoOnly && target.picture == ProcessingRect() &&
+            desc.Width == UINT(m_processingSize.cx) && desc.Height == UINT(m_processingSize.cy) &&
+            desc.Format == m_SwapChainFmt;
+    };
+    return (m_completedFrames.empty() || matches(m_completedFrames.front())) &&
+        std::all_of(m_completedBatches.begin(), m_completedBatches.end(),
+            [&](const auto& batch) { return matches(batch.target); });
+}
+
+bool CDX11VideoProcessor::TryServiceCompletedProducer()
+{
+    // Called only under RendererLock; at most ONE normal batch per turn.
+    // No forced retirement, no waiting for the NGX fence, no new allocation
+    // policy. In particular don't hold the renderer for another full refresh
+    // simply because the previous Present used the entire submit window.
+    if (m_completedBatches.empty() || !m_completedFence || !CompletedFairProducerCanvas() ||
+        m_pFilter->m_filterState != State_Running || m_pFilter->m_bFlushing ||
+        m_pFilter->m_playbackCancel.Capture()->Cancelled()) return false;
+    CRefTime stream;
+    if (FAILED(m_pFilter->StreamTime(stream))) return false;
+    const auto completed = m_completedFence->GetCompletedValue();
+    if (completed == UINT64_MAX || completed > m_completedFenceValue) return false;
+    const auto& batch = m_completedBatches.front();
+    const auto count = (std::max)(size_t(1), batch.phases.size());
+    if (count > 8 || m_completedFenceValue - completed > 8 - count ||
+        count > 256 || m_completedFrames.size() > 256 - count) return false;
+    RefreshCompletedMemoryBudget(completed);
+    const auto committed = GetCompletedPoolUsage(completed).Committed();
+    const auto extra = TextureBytes(batch.target.image.desc) * (count - 1);
+    if (committed > m_completedByteLimit || extra > m_completedByteLimit - committed) return false;
+    const auto started = GetPreciseTick();
+    if (!PrepareCompletedBatch(stream)) return false;
+    auto& trace = mfg::SourceCadenceTrace();
+    if (trace.Enabled()) {
+        const auto finished = GetPreciseTick();
+        const mfg::CadenceTrace::CompletedQueue queue{
+            m_completedFrames.size(), m_completedBatches.size(),
+            m_completedFrames.empty() ? -1 : m_completedFrames.back().due,
+            m_completedDisplayPacing.LeadMs(), m_completedDisplayPacing.LeadMs(),
+            m_completedDisplayPacing.Samples()};
+        trace.Record("completed_fair_compose", finished, -1, stream,
+            0, 0, 0, 0, 0, false, m_mfgLostGenerated, m_completedFailed ? E_FAIL : S_OK,
+            finished - started, -1, &queue);
+    }
+    return true;
+}
+
 bool CDX11VideoProcessor::NextCompletedFrame(int64_t& deadline)
 {
     if (m_pFilter->m_completedEndOfStream) m_pFilter->TryCompleteBufferedEndOfStream();
@@ -482,14 +576,57 @@ bool CDX11VideoProcessor::NextCompletedFrame(int64_t& deadline)
     struct Unlock { CCritSec& lock; ~Unlock() { lock.Unlock(); } } unlock{m_pFilter->m_RendererLock};
     if (m_pFilter->m_filterState != State_Running || m_pFilter->m_bFlushing || !m_pDXGISwapChain1)
         return false;
+    // [MFG-B11 | 2026-11-25 09:55 +08:00] A high-priority presenter may
+    // immediately reacquire RendererLock after a blocking Present. Offer a
+    // single existing-timer turn to an actual input waiter, not an idle
+    // delay after every frame. Never extend this deadline on repeated wakes.
+    const auto sourceTurn = m_completedPresentFairness.SourceTurnUntil(deadline,
+        m_pFilter->m_completedSourceWaiting.load(std::memory_order_acquire));
+    if (sourceTurn && !m_completedFrames.empty() && CompletedFairProducerCanvas() && m_completedFence) {
+        CRefTime handoffStream;
+        const auto completed = m_completedFence->GetCompletedValue();
+        if (SUCCEEDED(m_pFilter->StreamTime(handoffStream)) &&
+            m_completedPresentFairness.MayAdmit(m_completedFrames.front().due - REFERENCE_TIME(handoffStream),
+                m_dRefreshPeriodMs, completed != UINT64_MAX && m_completedFrames.front().fence <= completed)) {
+            auto& trace = mfg::SourceCadenceTrace();
+            if (trace.Enabled()) {
+                trace.Record("completed_fair_source_turn", GetPreciseTick(), m_completedFrames.front().pts, handoffStream,
+                    m_completedFrames.front().serial, m_completedFrames.front().phase, 0, 0, sourceTurn,
+                    false, m_mfgLostGenerated, S_OK);
+            }
+            deadline = sourceTurn;
+            return true;
+        }
+    }
     // Complete a deferred window resize on the presentation worker's own
     // schedule, not only during PresentCompletedVideo(). A pending resize can
     // otherwise outlive the last queued frame, and the worker would sleep
     // indefinitely while geometry-dependent admission remains restricted.
     // The 140-ms interval is measured from the last window change.
     constexpr ULONGLONG resizeSettleMs = 140;
-    if (m_resizePending && GetTickCount64() - m_resizeLastChangeTick >= resizeSettleMs)
-        ApplyPendingWindowResize();
+    if (m_resizePending && GetTickCount64() - m_resizeLastChangeTick >= resizeSettleMs) {
+        // [MFG-B09 | 2026-11-24 17:51 +08:00] Prefer a safe gap before
+        // the next display deadline; never resize inside scheduled Present.
+        // [MFG-B12 | 2026-11-25 10:11 +08:00] DXGI_SCALING_NONE cannot
+        // fill an expanded client with the old smaller flip buffer. A due
+        // head must not defer the settled expansion forever, especially
+        // during B11's slow-Present episode. Keep the 140 ms last-event
+        // coalescing and allow up to 50 ms EXTRA scheduling deferral only.
+        // Attempt once through the existing serialized resize path; failure
+        // re-arms its existing retry backoff. Shrink/legacy policy unchanged.
+        constexpr ULONGLONG expansionMaxDeferralMs = 50;
+        const bool expandingFlip =
+            (m_UsedSwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
+             m_UsedSwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL) &&
+            (m_resizeTarget.Width() > m_windowRect.Width() ||
+             m_resizeTarget.Height() > m_windowRect.Height());
+        const bool expansionDue = expandingFlip &&
+            GetTickCount64() - m_resizeLastChangeTick >= resizeSettleMs + expansionMaxDeferralMs;
+        CRefTime resizeStream;
+        if (expansionDue || m_completedFrames.empty() || FAILED(m_pFilter->StreamTime(resizeStream)) ||
+            m_completedFrames.front().due - REFERENCE_TIME(resizeStream) > CompletedSubmitLead() + 20'000)
+            ApplyPendingWindowResize();
+    }
     // Early B-only 256x256 thumbnail capture is independent of the actual
     // display deadline. The high-priority presenter polls this callback while
     // frames are buffered, including the first frame following a seek.
@@ -571,25 +708,11 @@ bool CDX11VideoProcessor::PrepareCompletedBackBuffer(CompletedFrame& frame)
     const auto readFence = ++m_completedFenceValue;
     if (SUCCEEDED(m_completedContext->Signal(m_completedFence, readFence))) {
         frame.backBufferReadFence = readFence;
-        // A speculative pre-draw without a Temporal B LUT must not lock an
-        // ungraded backbuffer into the actual present. The worker may finish
-        // before the present deadline, in which case redraw once with the LUT.
-        // Normal A and RAW B retain the original pre-draw behavior.
-        const bool temporalB = m_pFilter->m_svdLutRaw.load() && m_pFilter->m_svdLutTemporal.load() &&
-            !m_pFilter->m_svdLutOff.load();
-        const bool gradeMayArrive = temporalB && (
-            // After start/seek the model may still be loading: even without a
-            // submitted thumbnail, do not cache an ungraded speculative draw
-            // as the final image of the new segment.
-            (!m_svdLutRawTest.heldView &&
-                m_svdLutRawTest.model.GetState() != svdlut::ModelWorker::State::Failed) ||
-            m_svdLutRawTest.inFlight ||
-            std::any_of(m_svdLutRawTest.captures.begin(), m_svdLutRawTest.captures.end(),
-                [](const auto& capture) { return capture.pending || bool(capture.input); }));
-        // Retry the present-time drawing only when there is real pending LUT
-        // work. Avoid a redundant full-resolution redraw during cold startup
-        // when neither a GPU readback nor model evaluation is in progress.
-        m_completedBackBuffer.drawn = SUCCEEDED(hr) && (!gradeMayArrive || m_svdLutRawTest.active);
+        // [VE-08 | 2026-11-24 17:09 +08:00] A successful draw is final for this frame.
+        // Never redraw merely because an optional LUT could arrive before Present.
+        // Preserve the display estimator, resize recovery and producer admission.
+        const bool temporalB = m_pFilter->m_videoEnhancement.load();
+        m_completedBackBuffer.drawn = SUCCEEDED(hr);
         m_completedBackBuffer.graded = temporalB && SUCCEEDED(hr) && m_svdLutRawTest.active;
     }
     m_pDeviceContext->Flush();
@@ -625,7 +748,18 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
     }
     // A waitable signal can be delayed by DWM, e.g. during occlusion. Once
     // due, try nonblocking Present even without the signal so playback can recover.
-    if (!TryCompletedPresentPermit() && remaining > 0) return false;
+    if (!TryCompletedPresentPermit()) {
+        // [MFG-B11 | 2026-11-25 09:55 +08:00] During a measured slow-Present
+        // episode, prefer the real waitable permit even after the PTS is due.
+        // Service ready producer work or release RendererLock via the existing
+        // 1 ms retry. A missing signal must not stall display indefinitely:
+        // at one refresh late retain the previous DO_NOT_WAIT escape path.
+        if (m_completedPresentFairness.Active() && CompletedFairProducerCanvas() &&
+            m_completedPresentFairness.WithinRefresh(remaining, m_dRefreshPeriodMs)) {
+            return TryServiceCompletedProducer();
+        }
+        if (remaining > 0) return false;
+    }
     const auto completed = m_completedFence->GetCompletedValue();
     if (completed == UINT64_MAX) {
         ClearCompletedFrames(false);
@@ -710,8 +844,7 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
         m_completedFrames.push_front(std::move(frame));
         return false;
     }
-    if (hr == S_OK && m_pFilter->m_svdLutRaw.load() &&
-        m_pFilter->m_svdLutTemporal.load() && !m_pFilter->m_svdLutOff.load()) {
+    if (hr == S_OK && m_pFilter->m_videoEnhancement.load()) {
         // b.active is the grade state of the image actually used by the
         // successful Present (including a previously prepared backbuffer).
         // These counts exclude speculative pre-draws and failed DXGI retries.
@@ -748,6 +881,25 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
         frame.fence = readFence;
         if (m_completedLast) RecycleCompletedFrame(std::move(*m_completedLast));
         m_completedLast = std::move(frame);
+    }
+    // [MFG-B11 | 2026-11-25 09:55 +08:00] The ordinary presenter only
+    // composes in the gap BEFORE a future deadline (or on an empty queue).
+    // A driver Present taking almost one refresh removes that gap indefinitely.
+    // Give normal composition a turn immediately after a slow successful
+    // Present, with the presented frame's ownership already settled. This is
+    // safe even if the next head is due; never drain the queue to create a gap.
+    if (hr == S_OK && CompletedFairProducerCanvas()) {
+        const auto elapsedMs = double(finished - started) * 1000.0 / GetPreciseTicksPerSecond();
+        if (m_completedPresentFairness.Observe(elapsedMs, m_dRefreshPeriodMs)) {
+            TryServiceCompletedProducer();
+            // At most the existing 1 ms retry interval, outside RendererLock.
+            // NextCompletedFrame uses it only while an actual source waiter
+            // exists, the next head is ready, and less than one refresh late.
+            m_completedPresentFairness.OfferSourceTurn(int64_t(GetPreciseTick()) +
+                int64_t(GetPreciseTicksPerSecond() / 1000));
+        }
+    } else {
+        m_completedPresentFairness.Reset();
     }
     return true;
 }
@@ -813,7 +965,11 @@ HRESULT CDX11VideoProcessor::PresentCompletedVideo(const CompletedFrame& frame, 
     // window changes coalesced instead of forcing ResizeBuffers on every
     // presentation. While the final size is still settling, remap the current
     // destination rectangle into the last committed back buffer.
-    ApplyPendingWindowResize();
+    // [MFG-B09 | 2026-11-24 17:51 +08:00] Scheduled playback commits
+    // geometry in NextCompletedFrame, before choosing the next deadline.
+    // Never perform a second resize attempt inside an already-due Present.
+    // Paused/external redraws retain their existing resize behavior.
+    if (!scheduled) ApplyPendingWindowResize();
     if (preparedReadFence) *preparedReadFence = 0;
     CComPtr<ID3D11Texture2D> back;
     auto hr = m_pDXGISwapChain1->GetBuffer(0, IID_PPV_ARGS(&back));
@@ -872,15 +1028,13 @@ HRESULT CDX11VideoProcessor::PresentCompletedVideo(const CompletedFrame& frame, 
     if (busyRetry) {
         // The prior attempt already composed the final video + OSD. Preserve
         // the grade state recorded for that exact image in presentation stats.
-        if (m_pFilter->m_svdLutRaw.load() && m_pFilter->m_svdLutTemporal.load() &&
-            !m_pFilter->m_svdLutOff.load()) m_svdLutRawTest.active = preparedGraded;
+        if (m_pFilter->m_videoEnhancement.load()) m_svdLutRawTest.active = preparedGraded;
         if (preparedReadFence) *preparedReadFence = frame.backBufferReadFence;
     } else if (prepared) {
         // A cached backbuffer was already graded (or left ungraded) earlier.
         // Do not let a later speculative draw overwrite the successful
         // Present's graded/ungraded counter with an unrelated b.active value.
-        if (m_pFilter->m_svdLutRaw.load() && m_pFilter->m_svdLutTemporal.load() &&
-            !m_pFilter->m_svdLutOff.load()) m_svdLutRawTest.active = preparedGraded;
+        if (m_pFilter->m_videoEnhancement.load()) m_svdLutRawTest.active = preparedGraded;
         if (preparedReadFence) *preparedReadFence = frame.backBufferReadFence;
     } else {
         hr = DrawCompletedBackBuffer(frame, back, picture, geometryChanging, scheduled);
@@ -888,7 +1042,7 @@ HRESULT CDX11VideoProcessor::PresentCompletedVideo(const CompletedFrame& frame, 
     }
     if (!geometryChanging && m_bVBlankBeforePresent && m_pDXGIOutput) m_pDXGIOutput->WaitForVBlank();
     // Use the actual resized video rectangle when applying the grade.
-    const CRect* outputPicture = (frame.projected || m_svdLut.strength) ? &picture : nullptr;
+    const CRect* outputPicture = (frame.projected || m_pFilter->m_videoEnhancement.load()) ? &picture : nullptr;
     const auto presentHr = FinishMfgPresent(back, frame.pts, 0, scheduled, outputPicture, true, busyRetry);
     if (presentHr == DXGI_ERROR_WAS_STILL_DRAWING && scheduled) {
         // Retain only the identity of the buffer; do not hold a COM reference
@@ -897,8 +1051,7 @@ HRESULT CDX11VideoProcessor::PresentCompletedVideo(const CompletedFrame& frame, 
         m_completedBackBuffer.frameFence = frame.fence;
         m_completedBackBuffer.picture = picture;
         m_completedBackBuffer.drawn = true;
-        m_completedBackBuffer.graded = m_pFilter->m_svdLutRaw.load() &&
-            m_pFilter->m_svdLutTemporal.load() && !m_pFilter->m_svdLutOff.load() && m_svdLutRawTest.active;
+        m_completedBackBuffer.graded = m_pFilter->m_videoEnhancement.load() && m_svdLutRawTest.active;
         m_completedBackBuffer.busyRetryReady = true;
         m_completedBackBuffer.busyRetryBuffer = back.p;
     }
@@ -922,16 +1075,9 @@ void CDX11VideoProcessor::ClearCompletedFrames(bool release)
     // A new timeline (Seek/Flush/NewSegment) is not a resize recovery.
     // Restore the stable MFG bank admission behavior from its first frame.
     m_completedResizeRecovery.store(false, std::memory_order_relaxed);
-    if (m_pFilter->m_svdLutRaw.load()) {
-        if (m_pFilter->m_svdLutTemporal.load()) {
-            // Seek/stop/flush invalidates asynchronous B work and its PTS.
-            ResetSvdLutTemporalQueue();
-        } else {
-            m_svdLutRawTest.frames = {};
-            m_svdLutRawTest.frameSlot = 0;
-            m_svdLutRawTest.lastWindow = 0;
-        }
-    }
+    m_completedResizeEarlyDrops = 0;
+    // Seek/stop/flush invalidates asynchronous enhancement work and its PTS.
+    ResetSvdLutTemporalQueue();
     m_completedFrames.clear();
     m_completedFree.clear();
     m_completedLast.reset();
@@ -939,6 +1085,7 @@ void CDX11VideoProcessor::ClearCompletedFrames(bool release)
     m_completedTarget.reset();
     m_completedGroups.Clear();
     m_completedDisplayPacing.Reset();
+    m_completedPresentFairness.Reset();
     m_completedBufferStatsTick = 0;
     m_completedBufferPercent.reset();
     m_completedBufferLow = {};

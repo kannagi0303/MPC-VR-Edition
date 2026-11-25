@@ -97,6 +97,8 @@
 	bool m_mfgDxgiHasBaseline=false,m_mfgDxgiAvailable=false;
 	unsigned m_mfgDxgiLastPresentCount=0;
 	double m_mfgDxgiDisplayFps=0.0;
+	// [MFG-B10 | 2026-11-24 23:56 +08:00] Statistics only, protected by m_mfgRateLock.
+	const wchar_t* m_mfgDxgiStatus = L"baseline";
 	// Wall-clock stage timing includes GPU waits; it is NOT GPU execution time.
 	std::atomic<uint64_t> m_mfgVideoCount{0},m_mfgVideoTicks{0};
 	std::atomic<uint64_t> m_mfgGenerateCount{0},m_mfgGenerateTicks{0};
@@ -131,9 +133,12 @@
     CRect m_resizeTarget;
     ULONGLONG m_resizeLastChangeTick = 0;
     ULONGLONG m_completedGeometryTick = 0;
-    // Arm B08's original-first pressure escape only for a real window resize.
+    // [MFG-B08 | 2026-11-24 17:28 +08:00] Real resize arms a dormant safety
+    // net, not a forced-retirement mode. Each bank-pressure attempt must pass
+    // the normal-compose / low-ready gate; keep it available for delayed drain.
     // Cleared by ClearCompletedFrames on Seek/Flush/NewSegment.
     std::atomic<bool> m_completedResizeRecovery{false};
+    uint64_t m_completedResizeEarlyDrops = 0; // per completed timeline; diagnostic only
     HANDLE m_completedPresentWaitable = nullptr;
     bool m_completedPresentPermit = false;
     HRESULT CreateEditionWindowedSwapChain(DXGI_SWAP_CHAIN_DESC1& desc);
@@ -181,6 +186,7 @@
     bool m_fastShutdown = false;
     mfg::LiveFlowGroups m_completedGroups;
     mfg::DisplaySubmitPacing m_completedDisplayPacing;
+    edition::CompletedPresentFairness m_completedPresentFairness;
     std::deque<CompletedFrame> m_completedFrames;
     struct CompletedBackBuffer {
         uint64_t frameFence = 0;
@@ -272,6 +278,8 @@
     void RecycleCompletedFrame(CompletedFrame&& frame);
     bool QueueCompletedFrame(CompletedFrame&& frame);
     bool PrepareCompletedBatch(REFERENCE_TIME stream, bool originalPriority = false);
+    bool CompletedFairProducerCanvas() const;
+    bool TryServiceCompletedProducer();
     bool NextCompletedFrame(int64_t& deadline);
     bool PresentCompletedFrame();
     REFERENCE_TIME CompletedSubmitLead();

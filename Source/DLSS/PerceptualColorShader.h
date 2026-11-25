@@ -20,7 +20,7 @@ cbuffer Parameters : register(b0) {
     float4 SourceControl; // x: Normal A grade blend; y,z: source offset; w: depth rotation
     float4 B21AndDepth;   // x: B2.1 luma participation; w: valid cached-depth confidence
     float4 Enhancements;  // x: Preferred Colors; y: Skin Tones; z: B2.1; w: adaptive B2.2
-    float4 DepthTuning;   // x: previous available; y: previous rotation; z: max linear dim
+    float4 DepthTuning;   // x: previous available; y: previous rotation; z: max linear dim; w: final VE activation
     float4 OutputQuantization;
 };
 static const float3 YW = float3(.2126, .7152, .0722);
@@ -53,6 +53,8 @@ float3 ApplyNormalA(float3 source, float3 grade, float fade)
 // Proactive enhancement, rather than a hue-drift protection clamp.
 // Preserve incoming brightness (B2.1's result if enabled); adapt chroma
 // in the source's existing hue family without forcing any universal skin tone.
+// [VE-05 | 2026-11-24 16:39:20 +08:00] Preferred colours (sky/foliage).
+// [VE-06 | 2026-11-24 16:39:20 +08:00] Skin tones, jointly weighted with preferred colours.
 float3 Enhance(float3 source, float3 grade, float depthWeight)
 {
     float sy = dot(source, YW);
@@ -66,7 +68,9 @@ float3 Enhance(float3 source, float3 grade, float depthWeight)
     float mid = Smooth(.11, .27, sy) * (1.0 - Smooth(.83, .96, sy));
     float moderate = Smooth(.055, .13, cs) * (1.0 - Smooth(.34, .48, cs));
     float weight = mid * moderate;
+    // [VE-06] Source-family skin weight; no semantic segmentation.
     float skin = Enhancements.y * Smooth(.87, .985, dot(axis, skinAxis));
+    // [VE-05] Source-family foliage/sky weights.
     float plant = Enhancements.x * Smooth(.86, .985, dot(axis, foliageAxis));
     float sky = Enhancements.x * Smooth(.87, .985, dot(axis, skyAxis));
     float selected = skin + plant + sky;
@@ -170,6 +174,7 @@ float4 SvdLutGradeMain(float4 position)
             step(.04045, enhanced));
         enhanced = saturate(enhanced - darken * srgbSlope);
     }
-    return float4(enhanced, src.a);
+    float activation = saturate(DepthTuning.w);
+    return float4(activation >= 1.0 ? enhanced : lerp(original, enhanced, activation), src.a);
 }
 )";
