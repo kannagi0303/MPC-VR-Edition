@@ -234,7 +234,7 @@ void CVRMainPPage::SetEditionControls()
 	UpdateJvrViewLabels();
 
 	CheckDlgButton(IDC_MFG_MULTIPLIER, m_SetsPP.iMfgMultiplier >= 2 ? BST_CHECKED : BST_UNCHECKED);
-	ComboBox_SelectByItemData(m_extendedPane, IDC_ZIPDEPTH_MODE, edition::ZipDepthModeFromSettings(m_SetsPP));
+	ComboBox_SelectByItemData(m_extendedPane, IDC_DEPTH_MODE, edition::DepthModeFromSettings(m_SetsPP));
 	CheckDlgButton(IDC_SHOW_MFG_MOTION, m_SetsPP.bShowMfgMotion ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(IDC_ENHANCEMENT_MASTER,m_enhancementEnabled?BST_CHECKED:BST_UNCHECKED);
     for(int i=0;i<4;++i) {
@@ -271,9 +271,10 @@ void CVRMainPPage::EnableEditionControls()
 	GetDlgItem(IDC_MFG_MULTIPLIER).EnableWindow(m_SetsPP.bUseD3D11 && IsWindows10OrGreater());
 	GetDlgItem(IDC_MFG_PROCESSING_MODE).EnableWindow(bMfgEnabled);
 	const BOOL canUseDlssSR = m_SetsPP.bUseD3D11 && IsWindows10OrGreater();
-	GetDlgItem(IDC_EDITION_STATS_DETAILS).EnableWindow(m_SetsPP.bUseD3D11);
+	GetDlgItem(IDC_MFG_FEATURE_BADGES).EnableWindow(m_SetsPP.bUseD3D11);
+	GetDlgItem(IDC_EDITION_STATS_DETAILS).EnableWindow(m_SetsPP.bUseD3D11 && m_SetsPP.bShowFeatureBadges);
 	const bool srEnabled = canUseDlssSR && m_SetsPP.bDlssSR;
-	GetDlgItem(IDC_ZIPDEPTH_MODE).EnableWindow(canUseDlssSR);
+	GetDlgItem(IDC_DEPTH_MODE).EnableWindow(canUseDlssSR);
     GetDlgItem(IDC_ENHANCEMENT_MASTER).EnableWindow(canUseDlssSR && m_masterCaptured);
     for(int i=0;i<4;++i) {
         const bool enabled=canUseDlssSR && m_enhancementEnabled && m_colorCaptured[i];
@@ -386,10 +387,10 @@ HRESULT CVRMainPPage::InitializeEditionControls()
 	ComboBox_AddStringData(m_extendedPane, IDC_EXTENDED_STARTUP, L"Play first", 0);
 	ComboBox_AddStringData(m_extendedPane, IDC_EXTENDED_STARTUP, L"Wait for Extended", 1);
 
-	ComboBox_AddStringData(m_extendedPane, IDC_ZIPDEPTH_MODE, L"Both", ZIPDEPTH_Both);
-	ComboBox_AddStringData(m_extendedPane, IDC_ZIPDEPTH_MODE, L"DLSS SR Only", ZIPDEPTH_DlssSrOnly);
-	ComboBox_AddStringData(m_extendedPane, IDC_ZIPDEPTH_MODE, L"MFG Only", ZIPDEPTH_MfgOnly);
-	ComboBox_AddStringData(m_extendedPane, IDC_ZIPDEPTH_MODE, L"Disable", ZIPDEPTH_Disable);
+	ComboBox_AddStringData(m_extendedPane, IDC_DEPTH_MODE, L"Both", ZIPDEPTH_Both);
+	ComboBox_AddStringData(m_extendedPane, IDC_DEPTH_MODE, L"DLSS SR Only", ZIPDEPTH_DlssSrOnly);
+	ComboBox_AddStringData(m_extendedPane, IDC_DEPTH_MODE, L"MFG Only", ZIPDEPTH_MfgOnly);
+	ComboBox_AddStringData(m_extendedPane, IDC_DEPTH_MODE, L"Disable", ZIPDEPTH_Disable);
 
 	// The public MFG setting is now a checkbox. The internal Auto cadence
 	// algorithm remains unchanged (Off=0, Auto=7).
@@ -412,22 +413,23 @@ void CVRMainPPage::AddEditionHints()
 		L"Play first: Show video while Extended features load.\n"
 		L"Wait for Extended: Prepare enabled features before playback.\n"
 		L"Applies when you open a video.");
-	AddHint(IDC_ZIPDEPTH_MODE,
-		L"Choose which Extended path receives ZipDepth.\n"
-		L"Both (default), DLSS SR Only, MFG Only, or Disable.");
+	AddHint(IDC_DEPTH_MODE,
+		L"Depth estimation is disabled by default.\n"
+		L"For non-commercial scientific research or academic development, choose where to use the model.\n"
+		L"See RESEARCH-ONLY.txt and LICENSE-Apple-DepthPro2.txt in the package.");
     AddHint(IDC_ENHANCEMENT_MASTER,L"Enable or bypass all four video enhancements without changing their saved strengths.");
     AddHint(IDC_VIDEO_ENHANCEMENT,L"SDR calibrated SVDLUT color grade. 0% off; 100% full calibrated effect.");
     AddHint(IDC_MEMORY_COLOR,L"Independent SDR preferred sky and foliage colors.");
     AddHint(IDC_SKIN_TONE,L"Independent SDR skin tone enhancement.");
     AddHint(IDC_ADAPTIVE_TONE,L"Independent SDR adaptive shot contrast.");
 	AddHint(IDC_SHOW_DEPTH_OVERLAY,
-		L"Show the active ZipDepth map as a diagnostic overlay.");
+		L"Show the active depth map as a diagnostic overlay.");
 	AddHint(IDC_SHOW_MFG_MOTION,
 		L"Draw MFG motion arrows on the final picture.\n"
 		L"Arrows point from the current source frame to the previous source frame.");
 	AddHint(IDC_MFG_FEATURE_BADGES,
-		L"Show DLSS SR, VSR and MFG status.\n"
-		L"Keep it visible while paused. Show it for 5 seconds after starting, resuming or resizing.");
+		L"Add Edition information to the on-screen statistics.\n"
+		L"When statistics are hidden, briefly show active DLSS SR, VSR and MFG as a corner badge.");
 	AddHint(IDC_EDITION_STATS_DETAILS, L"Show Edition playback diagnostics when Show statistics is enabled.");
 	AddHint(IDC_MFG_MULTIPLIER,
 		L"Enable automatic DLSS Multi Frame Generation (Auto).\n"
@@ -461,9 +463,9 @@ HRESULT CVRMainPPage::ReadEditionControls()
 		const LONG_PTR jvrEye = ComboBox_GetCurItemData(m_extendedPane, IDC_JVR_EYE);
 		if (jvrEye != CB_ERR) m_SetsPP.iJvrEye = static_cast<int>(jvrEye);
 	}
-	const LRESULT zipDepthMode = ComboBox_GetCurItemData(m_extendedPane, IDC_ZIPDEPTH_MODE);
-	if (zipDepthMode < ZIPDEPTH_Both || zipDepthMode > ZIPDEPTH_Disable) return E_INVALIDARG;
-	edition::ApplyZipDepthMode(m_SetsPP, static_cast<int>(zipDepthMode));
+	const LRESULT depthMode = ComboBox_GetCurItemData(m_extendedPane, IDC_DEPTH_MODE);
+	if (depthMode < ZIPDEPTH_Both || depthMode > ZIPDEPTH_Disable) return E_INVALIDARG;
+	edition::ApplyDepthMode(m_SetsPP, static_cast<int>(depthMode));
 	m_SetsPP.bShowMfgMotion = IsDlgButtonChecked(IDC_SHOW_MFG_MOTION) == BST_CHECKED;
 	m_SetsPP.bShowDepthOverlay = IsDlgButtonChecked(IDC_SHOW_DEPTH_OVERLAY) == BST_CHECKED;
     // Retired A strength is kept only for Settings_t ABI / old preset compatibility.
@@ -504,6 +506,21 @@ void CVRMainPPage::CommitPreviewSettings()
 
 bool CVRMainPPage::OnEditionMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+    // MPC-BE reactivates and invalidates the containing sheet on Apply.
+    // The outer page clips its children, so ordinary ancestor invalidation
+    // does not automatically invalidate the tab, footer or selected pane.
+    // Propagate that paint to each visible child subtree, asynchronously;
+    // never invalidate the outer page from its own paint or recreate panes.
+    if (uMsg == WM_PAINT && m_hWnd && ::GetUpdateRect(m_hWnd, nullptr, FALSE)) {
+        for (HWND child = ::GetWindow(m_hWnd, GW_CHILD); child;
+            child = ::GetWindow(child, GW_HWNDNEXT)) {
+            if (::IsWindowVisible(child)) {
+                ::RedrawWindow(child, nullptr, nullptr,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+            }
+        }
+        return false; // Let the native dialog procedure consume WM_PAINT.
+    }
     if(uMsg==WM_NOTIFY && lParam) {
         const auto* header=reinterpret_cast<const NMHDR*>(lParam);
         if(header->idFrom==IDC_SETTINGS_TAB && header->code==TCN_SELCHANGE) {
@@ -566,6 +583,7 @@ bool CVRMainPPage::OnEditionMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 			}
 			if (nID == IDC_MFG_FEATURE_BADGES) {
 				m_SetsPP.bShowFeatureBadges = IsDlgButtonChecked(IDC_MFG_FEATURE_BADGES) == BST_CHECKED;
+				EnableEditionControls();
 				SetDirty();
 				return (LRESULT)1;
 			}
@@ -580,10 +598,10 @@ bool CVRMainPPage::OnEditionMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 			}
 		}
 		if (action == CBN_SELCHANGE) {
-			if (nID == IDC_ZIPDEPTH_MODE) {
+			if (nID == IDC_DEPTH_MODE) {
 				const LRESULT mode = ComboBox_GetCurItemData(m_extendedPane, nID);
 				if (mode >= ZIPDEPTH_Both && mode <= ZIPDEPTH_Disable) {
-					edition::ApplyZipDepthMode(m_SetsPP, static_cast<int>(mode));
+					edition::ApplyDepthMode(m_SetsPP, static_cast<int>(mode));
 					EnableControls();
 					SetDirty();
 				}

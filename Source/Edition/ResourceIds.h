@@ -17,13 +17,10 @@
 #define IDC_DLSS_SR_SOURCE_LIMIT      5013
 #define IDC_EDITION_STATS_DETAILS     5014
 #define IDC_MFG_LOW_MOTION                5020
-#define IDC_USE_ZIPDEPTH_MFG              5021
-#define IDC_USE_ZIPDEPTH_SR               5024
-#define IDC_ADAPTIVE_MFG_DEPTH            5025
 #define IDC_SHOW_MFG_MOTION               5026
 #define IDC_EXTENDED_STARTUP              5027
 #define IDC_DEPTH_3D_PREVIEW              5028
-#define IDC_ZIPDEPTH_MODE                 5029
+#define IDC_DEPTH_MODE                 5029
 #define IDC_SVDLUT_STRENGTH               5030
 #define IDC_SVDLUT_VALUE                  5031
 #define IDC_SVDLUT_RAW                    5032

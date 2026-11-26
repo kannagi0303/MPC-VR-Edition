@@ -1,4 +1,4 @@
-# MPC Video Renderer Edition
+# MPC Video Renderer Edition 0.3.0
 
 - **Windows x64 only.**<br>
   Use a player that supports MPC Video Renderer.
@@ -26,7 +26,7 @@ To switch back, uninstall Edition and register the original again.
 ### Update or Move
 
 1. Close the player.
-2. Back up any custom `edition/zipdepth.dmlpack`.
+2. Keep a copy of your custom VR profiles and any permitted research model files.
 3. Replace the package files.
 
 If you move the package, uninstall it from the old folder first.<br>
@@ -51,13 +51,15 @@ Use **Edition Extended** to turn on the features you want.
 - **Startup**<br>
   **Play first** starts video while Extended features load. This is the default.<br>
   **Wait for Extended** prepares the selected features before playback.
-- **ZipDepth**<br>
+- **Depth use**<br>
   Choose **Both**, **DLSS SR Only**, **MFG Only**, or **Disable**.<br>
-  **Both** is the default. Features use flat depth while an estimate is unavailable.
-- **Show feature status**<br>
-  Shows which DLSS or RTX VSR features are active.
+  **Disable** is the default. Select another mode only for permitted research.
+- **Show Edition information**<br>
+  Adds a compact summary to **Show statistics** or a brief corner badge when statistics are hidden.
+- **Include detailed diagnostics**<br>
+  Adds GPU, depth, and buffer diagnostics to the summary.
 - **Show depth overlay**<br>
-  Blends the grayscale depth map into the video before DLSS processing.
+  Shows the current source depth map when available.
 - **Show optical flow**<br>
   Draws MFG motion arrows on the final picture.<br>
   Arrows point from the current source frame to the previous one.
@@ -72,23 +74,19 @@ Use **Edition Extended** to turn on the features you want.
 | `edition/nvngx_dlss.dll` | NVIDIA runtime for DLSS SR and DLAA |
 | `edition/nvngx_dlssg.dll` | NVIDIA runtime for frame generation |
 | `edition/mpcvrmfg_nvngx.dll` | Edition bridge for frame generation |
-| `edition/DirectML.dll` | DirectML runtime for ZipDepth |
-| `edition/zipdepth.dmlpack` | Default 384×384 mixed FP16 ZipDepth model |
+| `edition/DirectML.dll` | DirectML runtime for SVDLUT and optional depth estimation |
 | [`LICENSE.md`](LICENSE.md) | Project license and third-party notices |
 
-## Change the ZipDepth Model
+## Optional research depth
 
-The renderer reads `edition\zipdepth.dmlpack` when ZipDepth starts.<br>
-It detects 384×384 and 512×288 models from the file.
+The optional Depth Pro 2-S 352×192 W4 mixed FP16 resources are for non-commercial scientific research or academic development under the [Apple model agreement](LICENSE-Apple-DepthPro2.txt). See [RESEARCH-ONLY.txt](RESEARCH-ONLY.txt) for attribution and the changes made for DirectML.
 
-1. Close the player.
-2. Download a pack from [ZipDepth Models](https://github.com/kannagi0303/MPC-VR-Edition/tree/main/models).
-3. Replace `edition\zipdepth.dmlpack` with the downloaded file.
-4. Open the player again.
+For permitted research, open **Edition Extended**, choose **Both**, **DLSS SR Only**, or **MFG Only** under **Depth use**, and select **Apply**. Enable the corresponding DLSS feature and reopen the video if needed. Version 0.3.0 starts with depth estimation disabled on new installations and when upgrading older settings. DLSS SR, DLAA, and MFG use neutral depth when estimation is disabled or unavailable.
 
-To restore the default model, repeat these steps with the 384×384 pack.
+Keep the matching **dp2-s-w4-352x192-fp16.dmlgraph** and **depthpro2-s-fp16.dmlweights** in **edition/** and retain the Apple agreement and research notice with them.
+
 
 ## References
 
-- [ZipDepth converter guide](https://github.com/kannagi0303/MPC-VR-Edition/blob/main/tools/zipdepth-convert.md)
+- [Depth converter guide](https://github.com/kannagi0303/MPC-VR-Edition/blob/main/build-support/depth/README.md)
 - [Releases and source code](https://github.com/kannagi0303/MPC-VR-Edition/releases)

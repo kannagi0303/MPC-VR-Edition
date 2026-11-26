@@ -8,10 +8,13 @@
 #include <commctrl.h>
 #include <atlbase.h>
 #include <d3d9.h>
+#include <dwmapi.h>
 #include <string>
 #include <iostream>
 #include <stdexcept>
 #include <cstring>
+#include <algorithm>
+#include <vector>
 #include "IVideoRenderer.h"
 #include "SettingsLayoutContract.h"
 #include "FilterInterfaces.h"
@@ -213,26 +216,67 @@ struct Page {
 void PumpPaintMessages() {
     for (int pass=0; pass<3; ++pass) {
         MSG msg{};
+        unsigned messages=0;
         while (PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) {
+            Require(++messages < 4096, "Visible test window paint messages did not settle");
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
         GdiFlush();
+        DwmFlush();
         Sleep(15);
     }
 }
 
+class ScreenPixels {
+    RECT rect{};
+    std::vector<DWORD> pixels;
+
+public:
+    explicit ScreenPixels(RECT bounds) : rect(bounds) {
+        const LONG width = rect.right - rect.left, height = rect.bottom - rect.top;
+        Require(width > 0 && height > 0, "Empty visible paint probe");
+        pixels.resize(size_t(width) * height);
+        HDC screen = GetDC(nullptr);
+        Require(screen != nullptr, "Cannot acquire screen DC");
+        HDC copy = CreateCompatibleDC(screen);
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        void* bits = nullptr;
+        HBITMAP bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HGDIOBJ previous = copy && bitmap ? SelectObject(copy, bitmap) : nullptr;
+        const bool captured = previous && previous != HGDI_ERROR &&
+            BitBlt(copy, 0, 0, width, height, screen, rect.left, rect.top, SRCCOPY);
+        if (captured) {
+            GdiFlush();
+            std::copy_n(static_cast<const DWORD*>(bits), pixels.size(), pixels.begin());
+        }
+        if (previous && previous != HGDI_ERROR) SelectObject(copy, previous);
+        if (bitmap) DeleteObject(bitmap);
+        if (copy) DeleteDC(copy);
+        ReleaseDC(nullptr, screen);
+        Require(captured, "Cannot capture actual screen pixels");
+    }
+
+    COLORREF At(LONG x, LONG y) const {
+        if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return CLR_INVALID;
+        const DWORD value = pixels[size_t(y - rect.top) * (rect.right - rect.left) + (x - rect.left)];
+        return RGB((value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff);
+    }
+};
+
 void CheckVisibleGroupBackground(HWND pane, HWND host, unsigned expectedGroups) {
     Require(IsWindowVisible(pane)!=FALSE,"Selected pane is not visible on screen");
-    // DCX_USESTYLE reproduces the real pane's window-style clipping, unlike
-    // the FIX04 memory-DC erase check. The outer host may still clip its panes.
-    HDC paneDC=GetDCEx(pane,nullptr,DCX_CACHE|DCX_USESTYLE);
-    HDC screenDC=GetDC(nullptr);
-    if (!paneDC || !screenDC) {
-        if(paneDC) ReleaseDC(pane,paneDC);
-        if(screenDC) ReleaseDC(nullptr,screenDC);
-        Require(false,"Cannot acquire visible window/screen DC");
-    }
+    // Use the pane's actual client DC and window clipping.
+    RECT visibleRect{};
+    Require(GetWindowRect(pane, &visibleRect) != FALSE, "Cannot locate visible pane");
+    const ScreenPixels screen(visibleRect);
+    HDC paneDC=GetDC(pane);
+    Require(paneDC != nullptr, "Cannot acquire visible pane DC");
     unsigned groups=0, points=0;
     const char* failure=nullptr;
     const COLORREF background=GetSysColor(COLOR_3DFACE);
@@ -262,7 +306,13 @@ void CheckVisibleGroupBackground(HWND pane, HWND host, unsigned expectedGroups) 
                 if(!PtVisible(paneDC,local.x,local.y)) {
                     failure="Group interior is clipped out of the pane's real DC"; break;
                 }
-                if(GetPixel(screenDC,at.x,at.y)!=background) {
+                const COLORREF pixel = screen.At(at.x, at.y);
+                if (pixel != background) {
+                    wchar_t title[80]{};
+                    GetWindowTextW(group, title, _countof(title));
+                    std::wcerr << L"Group '" << title << L"', pane " << GetDlgCtrlID(pane)
+                        << L", screen point " << at.x << L"," << at.y
+                        << L", actual " << std::hex << pixel << L", background " << background << std::dec << L'\n';
                     failure="Group interior contains stale pixels or wrong background"; break;
                 }
                 ++sampled; ++points;
@@ -270,10 +320,79 @@ void CheckVisibleGroupBackground(HWND pane, HWND host, unsigned expectedGroups) 
         }
         if(!sampled && !failure) failure="No unobstructed group interior pixel could be tested";
     }
-    ReleaseDC(nullptr,screenDC);
     ReleaseDC(pane,paneDC);
     Require(!failure,failure?failure:"Visible paint failed");
     Require(groups==expectedGroups && points>=groups,"Unexpected number of visible group backgrounds tested");
+}
+
+// Count foreground-like pixels in actual screen rectangles. A visible HWND
+// alone does not prove its label was painted. Compare with the same control
+// immediately before Apply, allowing focus/theming antialias differences.
+unsigned VisibleInk(RECT r) {
+    const ScreenPixels screen(r);
+    unsigned count = 0;
+    const COLORREF foreground = GetSysColor(COLOR_BTNTEXT);
+    const COLORREF background = GetSysColor(COLOR_3DFACE);
+    auto distance = [](COLORREF a, COLORREF b) {
+        const int dr = int(GetRValue(a))-int(GetRValue(b));
+        const int dg = int(GetGValue(a))-int(GetGValue(b));
+        const int db = int(GetBValue(a))-int(GetBValue(b));
+        return dr*dr + dg*dg + db*db;
+    };
+    for (LONG y=r.top; y<r.bottom; ++y) for (LONG x=r.left; x<r.right; ++x) {
+        const COLORREF pixel = screen.At(x,y);
+        if (pixel != CLR_INVALID && distance(pixel,foreground) < distance(pixel,background)) ++count;
+    }
+    return count;
+}
+
+RECT ControlScreenRect(HWND hwnd) {
+    RECT r{};
+    Require(hwnd && GetWindowRect(hwnd,&r)!=FALSE,"Missing visible paint probe");
+    return r;
+}
+
+void CheckApplyPaint(Page& page, const RECT& bounds, bool profiles) {
+    // MPC-BE's light-theme CComPropertySheet::OnActivated moves its pages
+    // and invalidates the non-clipping parent after PSN_SETACTIVE on Apply.
+    // Exercise that sequence without a compensating full redraw in the test.
+    SetWindowLongPtrW(page.host,GWL_STYLE,GetWindowLongPtrW(page.host,GWL_STYLE)&~WS_CLIPCHILDREN);
+    const HWND tab=page.Control(IDC_SETTINGS_TAB);
+    for(int index=0;index<2;++index) {
+        page.Tab(index);
+        PumpPaintMessages();
+        for(int cycle=0;cycle<4;++cycle) {
+            const int setting=index?IDC_EDITION_STATS_DETAILS:IDC_CHECK2;
+            page.Click(setting,SendMessageW(page.Control(setting),BM_GETCHECK,0,0)!=BST_CHECKED);
+            PumpPaintMessages();
+            RECT tabItem{};
+            Require(TabCtrl_GetItemRect(tab,index,&tabItem)!=FALSE,"Cannot find selected tab paint probe");
+            MapWindowPoints(tab,nullptr,reinterpret_cast<POINT*>(&tabItem),2);
+            const HWND shown=page.Control(index?IDD_EDITION_EXTENDED_PANE:IDD_EDITION_RENDERER_PANE);
+            const HWND hidden=page.Control(index?IDD_EDITION_RENDERER_PANE:IDD_EDITION_EXTENDED_PANE);
+            const RECT probes[]={tabItem, ControlScreenRect(page.Control(IDC_BUTTON1)),
+                ControlScreenRect(page.Control(index?IDC_COLOR_LABEL:IDC_STATIC2)),
+                ControlScreenRect(page.Control(index?IDC_DEPTH_MODE:IDC_COMBO1))};
+            unsigned ink[4]{};
+            for(int i=0;i<4;++i) {
+                ink[i]=VisibleInk(probes[i]);
+                Require(ink[i]>=8,"Paint probe lacks foreground before Apply");
+            }
+            const unsigned saves=page.renderer.saves;
+            Check(page.object->Apply(),"Visible page Apply failed");
+            Require(page.renderer.saves==saves+1,"Apply did not persist settings once");
+            Check(page.object->Move(&bounds),"Host reactivation move failed");
+            InvalidateRect(page.host,nullptr,TRUE);
+            PumpPaintMessages();
+            for(int i=0;i<4;++i)
+                Require(VisibleInk(probes[i])*2>=ink[i],"Tab, footer, static label or combo disappeared after host Apply repaint");
+            Require(TabCtrl_GetCurSel(tab)==index,"Apply changed selected tab");
+            Require(page.Control(index?IDD_EDITION_EXTENDED_PANE:IDD_EDITION_RENDERER_PANE)==shown &&
+                IsWindowVisible(shown) && !IsWindowVisible(hidden),"Apply recreated or changed pane visibility");
+            CheckVisibleGroupBackground(shown,page.host,index && profiles?4:3);
+        }
+    }
+    std::cout << "PASS: 8 real property-page Apply calls with simulated host reactivation/invalidation; tab, footer, label and combo screen pixels.\n";
 }
 
 void RunVisibleTabs(HMODULE module, bool profiles) {
@@ -319,7 +438,8 @@ void RunVisibleTabs(HMODULE module, bool profiles) {
     }
     Require(page.Control(IDD_EDITION_RENDERER_PANE)==native && page.Control(IDD_EDITION_EXTENDED_PANE)==extended,
         "Tab switching recreated pane HWNDs");
-    std::cout << "PASS: 40 real tab selections; visible pane/DC clipping and blank group pixels.\n";
+    std::cout << "PASS: 40 real tab selections; visible pane/DC clipping and blank group pixels." << std::endl;
+    CheckApplyPaint(page,bounds,profiles);
 }
 
 void Run(HMODULE module, bool profiles) {
@@ -383,9 +503,12 @@ void Run(HMODULE module, bool profiles) {
             page.Select(IDC_JVR_EYE, 0);
             Require(page.renderer.settings.iJvrVertical == 15 && page.renderer.settings.iJvrEye == 0, "JVR preview failed");
         }
+        const HWND depthMode = page.Control(IDC_DEPTH_MODE);
+        Require(SendMessageW(depthMode, CB_GETITEMDATA, SendMessageW(depthMode, CB_GETCURSEL, 0, 0), 0) == ZIPDEPTH_Disable,
+            "Research depth must start disabled");
         page.Click(IDC_MFG_MULTIPLIER, true);
         page.Select(IDC_DLSS_SR_SOURCE_LIMIT, DLSSSR_SOURCE_1080p);
-        page.Select(IDC_ZIPDEPTH_MODE, ZIPDEPTH_DlssSrOnly);
+        page.Select(IDC_DEPTH_MODE, ZIPDEPTH_DlssSrOnly);
         page.Select(IDC_MFG_PROCESSING_MODE, 1);
         page.Select(IDC_EXTENDED_STARTUP, 1);
         Check(page.object->Apply(), "Cannot apply Edition controls");
@@ -421,7 +544,7 @@ void Run(HMODULE module, bool profiles) {
     {
         Page page(module);
         page.Tab(1); page.Slider(IDC_VIDEO_ENHANCEMENT,100);
-        SendMessageW(page.Control(IDC_ZIPDEPTH_MODE), CB_SETCURSEL, -1, 0);
+        SendMessageW(page.Control(IDC_DEPTH_MODE), CB_SETCURSEL, -1, 0);
         Require(page.object->Apply() == E_INVALIDARG && page.renderer.saves == 0, "Invalid selection was committed");
         page.Cancel();
     }
@@ -430,14 +553,19 @@ void Run(HMODULE module, bool profiles) {
         page.Tab(1); page.Slider(IDC_MEMORY_COLOR,25);
         page.Tab(0); page.Click(IDC_BUTTON1,false);
         Require(page.renderer.memoryColor==25,"Native default changed Edition strength");
-        page.Tab(1); page.Click(IDC_BUTTON1,false);
+        page.Tab(1);
+        page.Select(IDC_DEPTH_MODE, ZIPDEPTH_Both);
+        page.Click(IDC_BUTTON1,false);
+        Check(page.object->Apply(), "Apply Edition defaults");
+        Require(!page.renderer.settings.bUseZipDepthSr && !page.renderer.settings.bUseZipDepthMfg,
+            "Reset to Edition defaults enabled research depth");
         Require(page.renderer.memoryColor==100 && page.renderer.skinTone==100 && page.renderer.videoEnhancement==100 && page.renderer.adaptiveTone==100,"Edition default did not restore strengths");
         page.Cancel();
     }
     {
         Page page(module);
         page.Tab(1);
-        page.Edit(IDC_VIDEO_ENHANCEMENT_VALUE,L"43",false);
+        page.Edit(IDC_COLOR_ENHANCEMENT_VALUE,L"43",false);
         Check(page.object->Apply(),"Apply pending numeric edit");
         Require(page.renderer.videoEnhancement==43,"Apply lost pending edit");
         page.Click(IDC_ENHANCEMENT_MASTER,false);
@@ -445,6 +573,24 @@ void Run(HMODULE module, bool profiles) {
         page.Click(IDC_ENHANCEMENT_MASTER,true);
         page.Cancel();
         Require(!page.renderer.enhancementEnabled && page.renderer.videoEnhancement==43,"Cancel lost applied off master or strengths");
+    }
+    {
+        Page page(module);
+        page.Tab(1);
+        Require(IsWindowEnabled(page.Control(IDC_EDITION_STATS_DETAILS)), "Edition details initially disabled");
+        page.Click(IDC_EDITION_STATS_DETAILS, true);
+        page.Click(IDC_MFG_FEATURE_BADGES, false);
+        Require(!IsWindowEnabled(page.Control(IDC_EDITION_STATS_DETAILS)) &&
+            SendMessageW(page.Control(IDC_EDITION_STATS_DETAILS), BM_GETCHECK, 0, 0) == BST_CHECKED,
+            "Edition information did not preserve the disabled details preference");
+        Check(page.object->Apply(), "Apply Edition information off");
+        Require(!page.renderer.settings.bShowFeatureBadges && page.renderer.settings.bShowEditionDetails,
+            "Edition OSD preferences did not apply independently of native statistics");
+        page.Click(IDC_MFG_FEATURE_BADGES, true);
+        Require(IsWindowEnabled(page.Control(IDC_EDITION_STATS_DETAILS)), "Edition details did not recover");
+        page.Cancel();
+        Require(!page.renderer.settings.bShowFeatureBadges && page.renderer.settings.bShowEditionDetails,
+            "Cancel lost the applied Edition information preferences");
     }
     if (!profiles) {
         Page page(module);
@@ -465,15 +611,16 @@ void Run(HMODULE module, bool profiles) {
 
 int wmain(int argc, wchar_t** argv) {
     try {
-        Require(argc == 3 || (argc == 4 && lstrcmpW(argv[3],L"--visual-tabs")==0),
+        Require(argc == 3 || (argc == 4 && (lstrcmpW(argv[3],L"--visual-tabs")==0)),
             "Usage: EditionPageIntegration.exe <filter.ax> <profiles:0|1> [--visual-tabs]");
-        if(argc==4) SetProcessDPIAware();
+        const bool visual = argc==4 && lstrcmpW(argv[3],L"--visual-tabs")==0;
+        if(visual) SetProcessDPIAware();
         Check(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED), "COM initialization failed");
         INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES | ICC_BAR_CLASSES};
         Require(InitCommonControlsEx(&controls) != FALSE, "Common controls initialization failed");
         HMODULE module = LoadLibraryW(argv[1]);
         Require(module != nullptr, "Cannot load filter directly");
-        if(argc==4) RunVisibleTabs(module,argv[2][0] == L'1');
+        if(visual) RunVisibleTabs(module,argv[2][0] == L'1');
         else Run(module, argv[2][0] == L'1');
         FreeLibrary(module);
         CoUninitialize();

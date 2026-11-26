@@ -6,7 +6,7 @@
 #include "GpuBankTimeline.h"
 #include "BankSelection.h"
 #include "DLSS/DlssOpticalFlow.h"
-#include "DLSS/ZipDepth.h"
+#include "Depth/Depth.h"
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
@@ -125,7 +125,6 @@ struct Session::Impl {
         GpuBankTimeline timeline;
         unsigned generatedCount=0;
         RECT motionPicture{};
-        bool previewDepth = false;
         int64_t motionPrevious = -1, motionCurrent = -1;
         bool checked=false,valid=false,multiplierRetry=false;
     };
@@ -145,11 +144,9 @@ struct Session::Impl {
     CDlssOpticalFlow flow;
     Letterbox letterbox;
     LetterboxTrace letterboxTrace;
-    PictureTexture priorActivePicture;
     RECT lastPicture{};
     bool detectBars = true;
-    CZipDepthHistory zipHistory;
-    bool zipDepthActive = false;
+    bool depthActive = false;
     UINT w=0,h=0,sourceW=0,sourceH=0,multiplier=0,allocated=0;
     DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
     D3D11_TEXTURE2D_DESC originalDesc{};
@@ -351,7 +348,6 @@ struct Session::Impl {
             (settingLength != 1 || letterboxSetting[0] != L'0');
         Check(letterbox.Init(d, h));
         letterboxTrace.Init(d);
-        Check(priorActivePicture.Create(d, 1, DXGI_FORMAT_R32G32B32A32_SINT));
         for (unsigned i = 0; i < activeBanks; ++i)
             Check(banks[i].activePicture.Create(d, 1, DXGI_FORMAT_R32G32B32A32_SINT));
         allocated=multiplier-1;
@@ -401,8 +397,7 @@ struct Session::Impl {
         // Skipping an interpolation interval still invalidates optical-flow
         // history. Do not mistake independent capture for timeline continuity.
         previous=-1;
-        zipHistory.Reset();
-        zipDepthActive = false;
+        depthActive = false;
         flow.Reset();
         return true;
     }
@@ -414,8 +409,7 @@ struct Session::Impl {
     bool Generate(ID3D11Texture2D* image,int64_t timestamp,Batch& batch,bool inspectMotion,const DepthInput* depth,
         const FrameGeometry* geometry) {
         const bool reset=previous<0||timestamp<=previous||timestamp-previous>2500000;
-        zipDepthActive = false;
-        if (reset || !depth || !depth->applyDepth) zipHistory.Reset();
+        depthActive = false;
         if (reset) {
             flow.Reset();
             motionCheck.Reset();
@@ -497,19 +491,14 @@ struct Session::Impl {
             context->PSSetShaderResources(6,1,&empty);
         } else context->ClearRenderTargetView(bank.motion.rtv.Get(),none);
         context->OMSetRenderTargets(0,nullptr,nullptr);srvs[1]=nullptr;context->PSSetShaderResources(0,2,srvs);
-        if (!hasFlow) zipHistory.Reset();
         if (depth && depth->applyDepth && hasFlow && !reset) {
             const RECT picture = WorkPicture(depth->picture);
-            const CZipDepthHistory::FramePair pair{previous, flow.CurrentFrame(), flow.PreviousFrame(), depth->adaptive};
-            zipDepthActive = zipHistory.Draw(device11.Get(), context.Get(), depth->source,
-                bank.depth.d11.Get(), bank.depth.rtv.Get(), bank.motion.srv.Get(), picture,
-                depth->modelSize, timestamp, float(timestamp - previous) / 10000.f, true,
-                &pair, active, resetPicture ? nullptr : priorActivePicture.view.Get());
+            depthActive = depth->source.DrawEstimate(context.Get(), bank.depth.d11.Get(), bank.depth.rtv.Get(), picture,
+                depth->modelSize, timestamp, float(timestamp - previous) / 10000.f, true, active);
         }
-        if (!zipDepthActive) context->ClearRenderTargetView(bank.depth.rtv.Get(), flat);
-        context->CopyResource(priorActivePicture.texture.Get(), bank.activePicture.texture.Get());
+        if (!depthActive) context->ClearRenderTargetView(bank.depth.rtv.Get(), flat);
         if (geometry && hasFlow && letterboxTrace.Enabled()) {
-            // The ZipDepth pass uses its own b0 binding and leaves it bound.
+            // The depth pass uses its own b0 binding and leaves it bound.
             context->PSSetConstantBuffers(0, 1, &cb);
             letterboxTrace.Submit(context.Get(), previous, timestamp, serial + 1, bankIndex,
                 geometry->picture, geometry->crop, geometry->present, visible, {LONG(sourceW), LONG(sourceH)},
@@ -550,18 +539,17 @@ struct Session::Impl {
         bank.valid=accepted&&hasFlow&&!reset;
         bank.multiplierRetry=bank.valid&&multiplier>1u+runtime.Maximum();
         if(!SubmitBank(bank)) throw std::runtime_error("MFG GPU evaluate timed out");
-        if(bank.valid && zipDepthActive) depth->source.RecordMfgSubmission();
+        if(bank.valid && depth && depth->applyDepth) depth->source.RecordMfgSubmission(depthActive);
         // The producer no longer waits for D3D12 completion when asynchronous.
         // Only generated surfaces are gated by the completion fence. Originals
         // remain separate snapshots and may be presented independently.
         bank.serial=++serial;
         bank.motionPicture = hasFlow && !reset && geometry ? picture : RECT{};
-        bank.previewDepth = depth && depth->applyDepth && !IsRectEmpty(&bank.motionPicture);
         bank.motionPrevious = previous;
         bank.motionCurrent = timestamp;
         batch={serial,bank.valid ? multiplier-1 : 0,previous,timestamp,bank.original};
         previous=accepted ? timestamp : -1;
-        if(!accepted) zipDepthActive=false;
+        if(!accepted) depthActive=false;
         return true;
     }
 };
@@ -748,8 +736,7 @@ void Session::ResetHistory() {
 }
 void Session::ResetDepthHistory() {
     if (impl_) {
-        impl_->zipHistory.Reset();
-        impl_->zipDepthActive = false;
+        impl_->depthActive = false;
     }
 }
 void Session::Reset() {
@@ -835,8 +822,8 @@ bool Session::CaptureOriginal(ID3D11Texture2D* image,int64_t timestamp,Batch& ba
         failed_=true;return false;
     }
 }
-bool Session::UsesZipDepth() const {
-    return impl_ && impl_->zipDepthActive;
+bool Session::UsesDepth() const {
+    return impl_ && impl_->depthActive;
 }
 SIZE Session::InputSize() const {
     return impl_ ? SIZE{LONG(impl_->sourceW), LONG(impl_->sourceH)} : SIZE{};
@@ -887,16 +874,6 @@ MotionOverlay Session::OverlayMotion(uint64_t serial, int64_t pts) const {
             pts > bank.motionPrevious && pts <= bank.motionCurrent &&
             bank.timeline.ProducerReady(impl_->fence->GetCompletedValue()))
             return {bank.motion.srv.Get(), bank.motionPicture, bank.activePicture.view.Get()};
-    }
-    return {};
-}
-DepthPreview Session::OverlayDepth(uint64_t serial, int64_t pts) const {
-    if (!impl_ || !serial) return {};
-    for (unsigned i = 0; i < impl_->activeBanks; ++i) {
-        const auto& bank = impl_->banks[i];
-        if (bank.previewDepth && bank.serial == serial && pts > bank.motionPrevious && pts <= bank.motionCurrent &&
-            bank.timeline.ProducerReady(impl_->fence->GetCompletedValue()))
-            return {bank.depth.srv.Get(), bank.motionPicture, {LONG(impl_->w), LONG(impl_->h)}};
     }
     return {};
 }

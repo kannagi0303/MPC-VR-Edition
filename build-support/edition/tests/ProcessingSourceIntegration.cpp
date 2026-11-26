@@ -13,6 +13,7 @@
 #include <d3d9.h>
 #include <VersionHelpers.h>
 #include "Edition/VideoFrame.h"
+#include "Edition/PlaybackCancellation.h"
 #include "IVideoRenderer.h"
 
 // Exercise the actual native threshold dispatch together with the Edition
@@ -94,6 +95,7 @@ struct CDX11VideoProcessor {
     struct Filter {
         struct { bool bWaitForExtendedStartup = false; } m_Sets;
         FILTER_STATE m_filterState = State_Running;
+        mpcvr::edition::PlaybackCancellation m_playbackCancel;
     } filter;
     Filter* m_pFilter = &filter;
     std::atomic<unsigned> m_mfgMultiplier{0};
@@ -144,6 +146,8 @@ struct CDX11VideoProcessor {
         }
     } swapChain{&events};
     SwapChain* m_pDXGISwapChain1 = &swapChain;
+    bool completedBackBufferInvalidated = false;
+    void InvalidateCompletedBackBuffer() { completedBackBufferInvalidated = true; }
     HRESULT ApplyPendingWindowResize() { events.push_back("resize"); return resizeResult; }
     void UpdateProcessingResolution() { events.push_back("resolution"); }
     bool CanProjectJvr() const { return projectJvr; }
@@ -169,6 +173,15 @@ void TestRenderPreparation() {
         HRESULT status = S_OK;
         return processor.PrepareEditionRender(frame, buffer, tick, status);
     };
+    {
+        CDX11VideoProcessor processor;
+        processor.filter.m_playbackCancel.Cancel();
+        edition::VideoFrame frame{.field=1, .frameStartTime=10};
+        CComPtr<ID3D11Texture2D> buffer;
+        const auto result = run(processor, frame, buffer);
+        require(result && *result == S_OK && processor.events.empty() && !buffer.p &&
+            !processor.completedBackBufferInvalidated, "Cancelled timeline launched renderer work");
+    }
     {
         CDX11VideoProcessor processor;
         processor.resizeResult = E_FAIL;
@@ -225,7 +238,7 @@ void TestRenderPreparation() {
         uint64_t tick = 0;
         HRESULT status = E_FAIL;
         const auto result = processor.PrepareEditionRender(frame, buffer, tick, status);
-        require(!result && status == S_OK && buffer.p == &processor.swapChain.image && tick > 0 &&
+        require(!result && status == S_OK && buffer.p == &processor.swapChain.image && tick > 0 && processor.completedBackBufferInvalidated &&
             frame.projected == (project && !projectionFails) && frame.sourceReady == (!project || !projectionFails) &&
             frame.frameSource == (project && !projectionFails ? CRect(0,0,1104,621) : processor.m_srcRect) &&
             !processor.m_completedLast, "Projection fallback changed source/target or stale-frame clearing");

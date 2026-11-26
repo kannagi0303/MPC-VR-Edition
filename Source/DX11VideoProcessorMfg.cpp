@@ -447,7 +447,7 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
             m_mfgQuietFlowCredit = 0;
         m_mfgLowMotionActive = m_mfgLowMotionStreak == EnterSavingAfter && m_mfgQuietFlowCredit > 0;
         if (difference == mfg::FrameDifference::Cut) {
-            if (UsesZipDepthSr() || UsesZipDepthMfg()) m_zipDepth.MarkSceneCut(timestamp);
+            if (UsesDepthSr() || UsesDepthMfg()) m_depth.MarkSceneCut(timestamp);
         }
         if (difference == mfg::FrameDifference::Cut || m_mfgRepeatHold || (repeatPending && !repeatBridge)) {
             m_mfg.ResetHistory();
@@ -517,11 +517,11 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
     // The source snapshot excludes subtitles and OSD. Full-backbuffer
     // input needs a picture rect so black bars are excluded from estimation.
     std::optional<mfg::DepthInput> depth;
-    const bool useDepthForMfg = UsesZipDepthMfg() && MfgDepthSourceEligible();
+    const bool useDepthForMfg = UsesDepthMfg() && MfgDepthSourceEligible();
     // After-MFG SR needs a depth estimate from the original frame, even
     // when MFG itself uses flat depth.
     const auto frameSource = ProcessingSourceRect(projected);
-    const bool captureForSr = !projected && nativeInput && UsesZipDepthSr() && MfgPostUpscaleRequested() &&
+    const bool captureForSr = !projected && nativeInput && UsesDepthSr() && MfgPostUpscaleRequested() &&
         CanDlssSRUpscale(frameSource, ProcessingRect());
     const auto displayPicture = PictureForPlayback(projected);
     const auto& outputPicture = m_completingSample && m_completedTarget ? m_completedTarget->picture : displayPicture;
@@ -534,8 +534,8 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
     if (useDepthForMfg || captureForSr) {
         if (projected || nativeInput || videoOnlyInput || m_renderRect == m_videoRect) {
             const SIZE modelSize{frameSource.Width(), frameSource.Height()};
-            depth.emplace(mfg::DepthInput{m_zipDepth, sourcePicture, modelSize, !projected && !overlayInputHandled,
-                useDepthForMfg, m_adaptiveMfgDepth});
+            depth.emplace(mfg::DepthInput{m_depth, sourcePicture, modelSize, !projected && !overlayInputHandled,
+                useDepthForMfg});
         }
     }
 
@@ -551,7 +551,7 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
             // Preserve the existing raw depth input and avoid capturing
             // again from the corrected MFG snapshot.
             if(depth && depth->captureSource) {
-                m_zipDepth.Update(m_pDevice,m_pDeviceContext,sourceToneInput->pShaderResource,
+                m_depth.Update(m_pDevice,m_pDeviceContext,sourceToneInput->pShaderResource,
                     depth->picture,depth->modelSize,timestamp);
                 depth->captureSource=false;
             }
@@ -994,15 +994,7 @@ HRESULT CDX11VideoProcessor::RenderMfgVideo(const mfg::FrameSurface& surface, bo
 void CDX11VideoProcessor::DrawMfgPresentOverlays(ID3D11Texture2D* target, const CRect& picture,
     REFERENCE_TIME timestamp, uint64_t serial)
 {
-    if (DepthOverlayEnabled()) {
-        const auto depth = m_mfg.OverlayDepth(serial, timestamp);
-        if (depth.view) {
-            DrawDepthView(target, picture, depth.view, depth.size, CRect(depth.picture), 0, true);
-            m_mfg.MarkConsumed(serial);
-        } else if (!UsesZipDepthMfg()) {
-            DrawDepthOverlay(target, picture, timestamp);
-        }
-    }
+    if (DepthOverlayEnabled()) DrawDepthOverlay(target, picture, timestamp);
     if (m_showMfgMotion) DrawMfgMotion(target, serial, timestamp, picture);
     const auto saved=m_rtStart;m_rtStart=timestamp;
     DrawSubtitles(target, &picture);m_rtStart=saved;

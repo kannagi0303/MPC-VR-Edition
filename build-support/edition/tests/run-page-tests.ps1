@@ -7,15 +7,19 @@ if (-not $MSBuildPath) {
     if (-not (Test-Path -LiteralPath $vswhere)) { throw 'Visual Studio vswhere.exe is required.' }
     $visualStudioRoot = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
     if (-not $visualStudioRoot) { throw 'Visual Studio C++ tools were not found.' }
-    $MSBuildPath = Join-Path $visualStudioRoot 'MSBuild\Current\Bin\MSBuild.exe'
+    $MSBuildPath = Join-Path $visualStudioRoot 'MSBuild\Current\Bin\amd64\MSBuild.exe'
+    if (!(Test-Path -LiteralPath $MSBuildPath -PathType Leaf)) {
+        $MSBuildPath = Join-Path $visualStudioRoot 'MSBuild\Current\Bin\MSBuild.exe'
+    }
 }
 if (-not (Test-Path -LiteralPath $MSBuildPath)) { throw 'MSBuild.exe was not found.' }
 
 # Uses only installed/local dependencies. Does not invoke dependency download,
 # filter registration, packaging, or a renderer that writes user preferences.
-$buildArguments = @('/t:Build', '/p:Configuration=Release', '/p:Platform=x64',
+$commonBuildArguments = @('/p:Configuration=Release', '/p:Platform=x64',
     "/p:SolutionDir=$projectRoot\", '/m:1', '/nr:false', '/nologo', '/v:minimal')
-& $MSBuildPath (Join-Path $projectRoot 'MpcVideoRenderer.sln') @buildArguments
+& $MSBuildPath (Join-Path $projectRoot 'MpcVideoRenderer.sln') /t:MpcVideoRenderer @commonBuildArguments
+$buildArguments = @('/t:Build') + $commonBuildArguments
 if ($LASTEXITCODE -ne 0) { throw 'Renderer build failed.' }
 & $MSBuildPath (Join-Path $PSScriptRoot 'EditionPageIntegration.vcxproj') @buildArguments
 if ($LASTEXITCODE -ne 0) { throw 'Property page test build failed.' }
@@ -114,7 +118,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Property page tests with JVR profiles failed.'
 & $test (Join-Path $withoutProfiles 'MPCVRMFG64.ax') 0 @pageArgs
 if ($LASTEXITCODE -ne 0) { throw 'Property page tests without JVR profiles failed.' }
 if ($VisualTabsOnly) {
-    Write-Output 'Visible tab/DC/background tests passed with and without VR profiles.'
+    Write-Output 'Visible tab/DC/background and Apply host-repaint tests passed with and without VR profiles.'
 } else {
     Write-Output 'Edition settings persistence, VP policy, processing-source and property page tests passed. Isolated artifacts were retained under _bin/edition-tests.'
 }

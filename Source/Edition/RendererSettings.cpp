@@ -73,24 +73,23 @@ HRESULT VerifySavedSettings(CRegKey& key, const Settings_t& sets)
 	if (key.QueryDWORDValue(L"MfgProcessingMode", savedMode) != ERROR_SUCCESS) return E_FAIL;
 	DWORD savedStartup = 0;
 	if (key.QueryDWORDValue(L"WaitForExtendedStartup", savedStartup) != ERROR_SUCCESS) return E_FAIL;
-	DWORD savedZipDepthMode = 0;
-	if (key.QueryDWORDValue(L"ZipDepthMode", savedZipDepthMode) != ERROR_SUCCESS) return E_FAIL;
+	DWORD savedDepthMode = 0;
+	if (key.QueryDWORDValue(ResearchDepthModeKey, savedDepthMode) != ERROR_SUCCESS) return E_FAIL;
 	DWORD savedSvdLut = 0;
 	DWORD savedSvdLutStrength = 0;
 	if (key.QueryDWORDValue(L"SvdLut", savedSvdLut) != ERROR_SUCCESS ||
 		key.QueryDWORDValue(L"SvdLutStrength", savedSvdLutStrength) != ERROR_SUCCESS) return E_FAIL;
 	DWORD savedDepthOverlay = 0;
 	if (key.QueryDWORDValue(L"ShowDepthOverlay", savedDepthOverlay) != ERROR_SUCCESS) return E_FAIL;
-	DWORD savedLowMotion = 1, savedAdaptive = 1, savedDepth3D = 1;
+	DWORD savedLowMotion = 1, savedDepth3D = 1;
 	if (key.QueryDWORDValue(L"MfgLowMotion", savedLowMotion) != ERROR_SUCCESS ||
-		key.QueryDWORDValue(L"AdaptiveMfgDepth", savedAdaptive) != ERROR_SUCCESS ||
 		key.QueryDWORDValue(L"Depth3DPreview", savedDepth3D) != ERROR_SUCCESS) return E_FAIL;
 	return saved == sets.iMfgMultiplier && savedMode == sets.iMfgProcessingMode &&
 		savedStartup == static_cast<DWORD>(sets.bWaitForExtendedStartup) &&
-		savedZipDepthMode == static_cast<DWORD>(edition::ZipDepthModeFromSettings(sets)) &&
+		savedDepthMode == static_cast<DWORD>(edition::DepthModeFromSettings(sets)) &&
 		savedDepthOverlay == static_cast<DWORD>(sets.bShowDepthOverlay) &&
 		savedSvdLutStrength == static_cast<DWORD>(sets.GetSvdLutStrength()) &&
 		savedSvdLut == static_cast<DWORD>(sets.GetSvdLutStrength() != 0) &&
-		savedLowMotion == 0 && savedAdaptive == 0 && savedDepth3D == 0 ? S_OK : E_FAIL;
+		savedLowMotion == 0 && savedDepth3D == 0 ? S_OK : E_FAIL;
 }
 }

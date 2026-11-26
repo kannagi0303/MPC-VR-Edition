@@ -1,7 +1,7 @@
 # MPC Video Renderer Edition
 
 - Based on [MPC Video Renderer 0.11.1.2636](https://github.com/Aleksoid1978/VideoRenderer/releases/tag/0.11.1).
-- Edition source version: **0.2.3**.
+- Edition source version: **0.3.0**.
 - **Windows x64 only.**<br>
   Works with players that support MPC Video Renderer.
 
@@ -18,8 +18,8 @@
   Finds repeated frames so MFG can fill the gap.
 - **Processing order**<br>
   Choose whether to upscale or add frames first.
-- **ZipDepth**<br>
-  Uses the GPU to estimate depth from video.
+- **Optional depth estimation**<br>
+  Shares a depth map between DLSS SR / DLAA and MFG when compatible research resources are installed.
 - **SDR video enhancement**<br>
   Adjust color grading, memory colors, skin tones, and adaptive contrast independently.
 - **VR projection**<br>
@@ -46,7 +46,7 @@ Run `Uninstall_MPCVR_64.cmd` as administrator.
 
 ## How It Works
 
-In the **Renderer** tab, select **Use Direct3D 11** to use Edition features. This tab also holds video processor, scaling, HDR, and playback statistics settings. Open **Edition Extended** for DLSS, ZipDepth, video enhancement, and display information.
+In the **Renderer** tab, select **Use Direct3D 11** to use Edition features. This tab also holds video processor, scaling, HDR, and playback statistics settings. Open **Edition Extended** for DLSS, depth routing, video enhancement, and display information.
 
 DLSS requires a compatible NVIDIA RTX GPU and driver. DLSS SR / DLAA supports 8-bit SDR video.
 
@@ -78,16 +78,16 @@ Some playback paths resize the video before MFG, even with DLSS SR and RTX VSR o
 
 ### Depth estimation
 
-ZipDepth uses DirectML to estimate depth on the GPU.
+**Depth use** routes the optional Depth Pro 2-S 352×192 W4 model, which runs on DirectML with upstream mixed FP16 precision.
 
-- **Both** (default)<br>
+- **Both**<br>
   Share depth between DLSS SR / DLAA and MFG when enabled.
 - **DLSS SR Only** or **MFG Only**<br>
-  Use ZipDepth for one feature.
-- **Disable**<br>
-  Turn off depth estimation.
+  Use depth estimation for one feature.
+- **Disable** (default)<br>
+  Keep depth estimation off.
 
-DLSS SR, DLAA, and MFG use flat depth while an estimate is unavailable.
+The package can include the model files for non-commercial scientific research or academic development. Read RESEARCH-ONLY.txt and the [Apple model agreement](../licenses/LICENSE-Apple-DepthPro2.txt) before enabling depth. On upgrade to 0.3.0, select a depth mode again for research. DLSS SR, DLAA, and MFG use neutral depth when estimation is disabled or unavailable.
 
 ### Video Enhancement
 
@@ -104,36 +104,24 @@ Use **Enable video enhancement** to bypass or re-enable all four effects togethe
 
 ### Display Information
 
-- **Show feature status** displays the status of DLSS SR, RTX VSR, and MFG.
-- **Show detailed Edition statistics** adds Edition diagnostics when **Show statistics** is enabled in the **Renderer** tab.
-- **Show depth overlay** displays the active ZipDepth map. **Show optical flow** draws MFG motion arrows on the picture.
+- **Show Edition information** adds a compact summary to **Show statistics** or a brief corner badge when statistics are hidden.
+- **Include detailed diagnostics** adds GPU, depth, and buffer diagnostics to the summary.
+- **Show depth overlay** displays the current depth map. **Show optical flow** draws MFG motion arrows on the picture.
 
 ### VR Projection
 
 The **VR Projection** group appears when the renderer finds an `.ini` profile in `VRProfiles/` next to `MPCVRMFG64.ax`. For supported progressive SDR full side-by-side video, enable **Fisheye to flat**, choose an eye, and adjust **Vertical framing** and **Reprojection** as needed.
 
-### Change the ZipDepth Model
+## Build from source
 
-- **384×384 mixed FP16**<br>
-  The default pack for general playback. It has a smaller file size.
-- **512×288 FP32**<br>
-  An optional pack for widescreen videos.<br>
-  It uses a 16:9 input and more horizontal pixels.
-
-1. Close the player.
-2. Download your pack from [ZipDepth Models](../models/README.md).
-3. Replace `edition/zipdepth.dmlpack` with the downloaded file.
-4. Open the player again.
-
-Keep the file name `zipdepth.dmlpack`.<br>
-To restore the default, use the 384×384 pack.
+Run **build-x64.cmd** to build incrementally and prepare the depth resources. It stages the renderer and the optional research resources in **dist/**. Keep the Apple agreement and research notice with the model files when packaging them.
 
 ## References
 
 - [NVIDIA DLSS](https://github.com/NVIDIA/DLSS)
-- [ZipDepth model downloads and license](../models/README.md)
+- [Depth model and license](../models/README.md)
 - [Playback guide](../build-support/README.dist.md)
-- [ZipDepth converter guide](../tools/zipdepth-convert.md)
+- [Depth converter guide](../build-support/depth/README.md)
 - [Windows x64 build script](../build-x64.cmd)
 - [Project license](LICENSE.md)
 - [Third-party licenses](../licenses/)

@@ -64,10 +64,10 @@ void CVideoProcessor::UpdateStatsByWindow()
 	if (m_iResizeStats == 1) {
 		int w = std::max(512, m_windowRect.Width() / 2 - 10) - 5 - 3;
 		int h = std::max(280, m_windowRect.Height() - 10) - 5 - 3;
-		// 0.59 and 1.02 are the width and the height of a Consolas cell against its
-		// point size: the old constants 36 and 19.4 were these for 61 columns and 19
-		// lines, before the box started following the text.
-		m_StatsFontH = (int)std::ceil(std::min(w / (m_StatsColumns * 0.59), h / (m_StatsLines * 1.02)));
+		const bool nativeLayout = Type() == VP_DX11 && !m_pFilter->m_Sets.bShowFeatureBadges;
+		const double widthScale = nativeLayout ? 36.0 : m_StatsColumns * 0.59;
+		const double heightScale = nativeLayout ? 19.4 : m_StatsLines * 1.02;
+		m_StatsFontH = (int)std::ceil(std::min(w / widthScale, h / heightScale));
 		m_StatsFontH &= ~1;
 		if (m_StatsFontH < 14) {
 			m_StatsFontH = 14;

@@ -4,7 +4,7 @@
 #include "Mfg/CadenceTrace.h"
 #include "DlssSR.h"
 #include "DlssOpticalFlow.h"
-#include "ZipDepth.h"
+#include "Depth/Depth.h"
 #include "NgxRuntime.h"
 #include "Mfg/MotionShaders.h"
 #include "SrMotionRefine.h"
@@ -84,7 +84,7 @@ float4 Main(float4 pos : SV_POSITION) : SV_TARGET {
 struct CDlssSR::Session
 {
 	// NGX uses a private immediate context in Play first mode. Video conversion,
-	// optical flow and ZipDepth keep using the renderer's original context.
+	// optical flow and depth keep using the renderer's original context.
 	CComPtr<ID3D11Device1> ngxDevice;
 	CComPtr<ID3D11DeviceContext> ngxContext;
 	CComPtr<ID3D11DeviceContext4> renderSync, ngxSync;
@@ -100,8 +100,7 @@ struct CDlssSR::Session
 	CComPtr<ID3D11VertexShader> vertex;
 	CComPtr<ID3D11PixelShader> luma, vectors, validatedVectors, costValidatedVectors;
 	CComPtr<ID3D11PixelShader> refinedVectors, refinedCostVectors;
-    CZipDepthHistory zipHistory;
-    bool zipDepthActive = false;
+    bool depthActive = false;
     bool depthIsFlat = true;
 	CComPtr<ID3D11Buffer> constants;
 	CComPtr<ID3D11RenderTargetView> depthView, motionView;
@@ -206,7 +205,7 @@ struct CDlssSR::Session
         sceneEnabled = true;
     }
 
-    bool PollSceneDetection(REFERENCE_TIME lastFramePts, REFERENCE_TIME maxGap, CZipDepth* zipDepth)
+    bool PollSceneDetection(REFERENCE_TIME lastFramePts, REFERENCE_TIME maxGap, CDepth* depthSource)
     {
         if (!sceneEnabled) return false;
         bool resetHistory = false;
@@ -286,7 +285,7 @@ struct CDlssSR::Session
                 if (samplePts <= lastFramePts && lastFramePts - samplePts <= maxGap &&
                     (strongCut || structuralCut)) {
                     resetHistory = true;
-                    if (zipDepth) zipDepth->MarkSceneCut(samplePts);
+                    if (depthSource) depthSource->MarkSceneCut(samplePts);
                     ++sceneCutCount;
                 }
             }
@@ -610,8 +609,7 @@ struct CDlssSR::Session
 			return false;
 		}
 		depthIsFlat = false;
-		zipHistory.Reset();
-		zipDepthActive = false;
+		depthActive = false;
 
 		if (!vertex) {
 			const auto compile = [](const char* entry, const char* target, ID3DBlob** code) {
@@ -823,7 +821,7 @@ struct CDlssSR::Session
 			requestedWidth == outWidth && requestedHeight == outHeight;
 	}
 
-	bool Evaluate(REFERENCE_TIME pts, float frameTimeMs, CZipDepth* zipDepth, bool sourceFrame,
+	bool Evaluate(REFERENCE_TIME pts, float frameTimeMs, CDepth* depthSource, bool sourceFrame,
 		ID3D11ShaderResourceView* cleanSource, std::unique_lock<std::mutex>& ngxLock)
 	{
 		if (validOutput && pts >= 0 && pts == lastPts) {
@@ -843,10 +841,9 @@ struct CDlssSR::Session
 		// Scene results arrive asynchronously, generally one frame after the
 		// cut. Never wait for a result. A recent late cut can still clear history.
 		const bool sceneCut = !discontinuity && PollSceneDetection(lastPts, maxContinuousGap,
-            sourceFrame ? zipDepth : nullptr);
+            sourceFrame ? depthSource : nullptr);
 		const bool reset = discontinuity || sceneCut;
 		if (reset) {
-            zipHistory.Reset();
 			flow.Reset();
 			if (discontinuity) ResetSceneDetection();
 		} else {
@@ -900,23 +897,20 @@ struct CDlssSR::Session
 		}
 		context->OMSetRenderTargets(0, nullptr, nullptr);
 		context->PSSetShaderResources(0, 4, empty);
-		zipDepthActive = false;
-		if (zipDepth) {
+		depthActive = false;
+		if (depthSource) {
 			const RECT picture{0, 0, LONG(w), LONG(h)};
 			const SIZE modelSize{LONG(w), LONG(h)};
 			if (sourceFrame && !cleanSource) {
-				zipDepth->Update(device, context, input.pShaderResource, picture, modelSize, pts);
+				depthSource->Update(device, context, input.pShaderResource, picture, modelSize, pts);
 			} else {
-				zipDepth->PollCompleted();
+				depthSource->PollCompleted();
 			}
 			if (!reset && hasMotion) {
-				const CZipDepthHistory::FramePair pair{lastPts, flow.CurrentFrame(), flow.PreviousFrame(), false};
-				zipDepthActive = zipHistory.Draw(device, context, *zipDepth, depth.pTexture, depthView,
-					motion.pShaderResource, picture, modelSize, pts, frameTimeMs, false, &pair);
+				depthActive = depthSource->DrawEstimate(context, depth.pTexture, depthView, picture, modelSize, pts, frameTimeMs, false);
 			}
 		}
-		if (!zipDepth || !hasMotion) zipHistory.Reset();
-		if (zipDepthActive) {
+		if (depthActive) {
 			depthIsFlat = false;
 		} else if (!depthIsFlat) {
 			const FLOAT flatDepth[4] = {0.5f, 0, 0, 0};
@@ -962,7 +956,7 @@ struct CDlssSR::Session
 			failure = std::format(L"Inactive (NGX evaluate {:#x})", unsigned(result));
 			return false;
 		}
-		if (zipDepthActive) zipDepth->RecordSrEvaluation();
+		if (depthSource) depthSource->RecordSrEvaluation(depthActive);
 		const auto now = GetTickCount64();
 		if (!validOutput) {
 			rateStartMs = now;
@@ -1205,7 +1199,7 @@ void CDlssSR::StartPreparation(std::unique_ptr<Session> retired, ID3D11Device1* 
 	}
 }
 
-Tex2D_t* CDlssSR::Evaluate(int64_t pts, float frameTimeMs, CZipDepth* zipDepth, bool sourceFrame, ID3D11ShaderResourceView* cleanSource)
+Tex2D_t* CDlssSR::Evaluate(int64_t pts, float frameTimeMs, CDepth* depthSource, bool sourceFrame, ID3D11ShaderResourceView* cleanSource)
 {
 	std::unique_lock lock(NgxD3D11Lock, std::defer_lock);
 	if (m_session->background) {
@@ -1218,7 +1212,7 @@ Tex2D_t* CDlssSR::Evaluate(int64_t pts, float frameTimeMs, CZipDepth* zipDepth, 
 	}
 	const bool trace = !m_session->validOutput && mfg::SourceCadenceTrace().Enabled();
 	const auto start = trace ? GetPreciseTick() : 0;
-	const bool evaluated = m_session->Evaluate(pts, frameTimeMs, zipDepth, sourceFrame, cleanSource, lock);
+	const bool evaluated = m_session->Evaluate(pts, frameTimeMs, depthSource, sourceFrame, cleanSource, lock);
 	if (trace) {
 		const auto now = GetPreciseTick();
 		mfg::SourceCadenceTrace().Record("sr_first_output", now, pts, -1, 0, 0, 0, 0, 0, false, 0,
@@ -1250,8 +1244,7 @@ void CDlssSR::ResetHistory()
 		m_session->validOutput = false;
 		m_session->flow.Reset();
 		m_session->ResetSceneDetection();
-        m_session->zipHistory.Reset();
-        m_session->zipDepthActive = false;
+        m_session->depthActive = false;
 	}
 }
 
@@ -1293,16 +1286,16 @@ int CDlssSR::RequestedModel() const
 	return Active() ? m_session->requestedModel : 0;
 }
 
-const wchar_t* CDlssSR::Status(const CZipDepth* zipDepth) const
+const wchar_t* CDlssSR::Status(const CDepth* depthSource) const
 {
 	if (Active()) {
-        if (zipDepth) {
-            m_statusDetails = m_session->activeStatus + L", ZipDepth DirectML";
-            if (m_session->zipDepthActive) {
-                m_statusDetails += zipDepth->ForFrame(m_session->lastPts).view
+        if (depthSource) {
+            m_statusDetails = m_session->activeStatus + L", depth DirectML";
+            if (m_session->depthActive) {
+                m_statusDetails += depthSource->ForFrame(m_session->lastPts).view
                     ? L", estimated depth active" : L", reprojecting depth";
             } else {
-                m_statusDetails += std::format(L", flat ({})", zipDepth->Status());
+                m_statusDetails += std::format(L", flat ({})", depthSource->Status());
             }
             return m_statusDetails.c_str();
         }

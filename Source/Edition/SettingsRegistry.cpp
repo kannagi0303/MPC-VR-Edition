@@ -187,31 +187,12 @@ void ReadSettings(CRegKey& key, Settings_t& sets)
 		sets.szDlssSRDllPath[std::size(sets.szDlssSRDllPath) - 1] = L'\0';
 	}
 #endif
-	// New single ZipDepth routing mode. If absent, preserve the last checkbox-based
-	// configuration from older builds; completely new installs keep the default Both.
-	DWORD zipDepthMode = ZIPDEPTH_Both;
-	if (key.QueryDWORDValue(L"ZipDepthMode", zipDepthMode) == ERROR_SUCCESS &&
-		zipDepthMode <= ZIPDEPTH_Disable) {
-		ApplyZipDepthMode(sets, static_cast<int>(zipDepthMode));
-	} else {
-		DWORD sr = 0, mfg = 0;
-		const bool haveSr = key.QueryDWORDValue(L"UseZipDepthSr", sr) == ERROR_SUCCESS;
-		const bool haveMfg = key.QueryDWORDValue(L"UseZipDepthMfg", mfg) == ERROR_SUCCESS;
-		if (haveSr || haveMfg) {
-			sets.bUseZipDepthSr = haveSr && sr != 0;
-			sets.bUseZipDepthMfg = haveMfg && mfg != 0;
-		} else if (key.QueryDWORDValue(L"UseZipDepth", dw) == ERROR_SUCCESS) {
-			sets.bUseZipDepthSr = sets.bUseZipDepthMfg = dw != 0;
-		} else {
-			DWORD legacyMfg = 0, legacySr = 0;
-			const bool haveLegacyMfg = key.QueryDWORDValue(L"MfgZipDepth", legacyMfg) == ERROR_SUCCESS;
-			const bool haveLegacySr = key.QueryDWORDValue(L"DlssSRDepthMode", legacySr) == ERROR_SUCCESS;
-			if (haveLegacyMfg || haveLegacySr) {
-				sets.bUseZipDepthMfg = haveLegacyMfg && legacyMfg != 0;
-				sets.bUseZipDepthSr = haveLegacySr && legacySr == 2;
-			}
-		}
-	}
+	// The old default could already be saved as Both. Only the new key
+	// records a choice to use the research resources.
+	DWORD depthMode = ZIPDEPTH_Disable;
+	const bool savedDepthMode = key.QueryDWORDValue(ResearchDepthModeKey, depthMode) == ERROR_SUCCESS;
+	ApplyDepthMode(sets, savedDepthMode && depthMode <= ZIPDEPTH_Disable
+		? static_cast<int>(depthMode) : ZIPDEPTH_Disable);
 	if (key.QueryDWORDValue(L"SvdLutStrength", dw) == ERROR_SUCCESS && dw <= SVDLUT_STRENGTH_MAX) {
 		sets.SetSvdLutStrength(static_cast<int>(dw));
 	} else if (key.QueryDWORDValue(L"SvdLut", dw) == ERROR_SUCCESS) {
@@ -274,12 +255,7 @@ void WriteSettings(CRegKey& key, const Settings_t& sets)
 	key.SetDWORDValue(L"MfgProcessingMode", sets.iMfgProcessingMode);
 	key.SetDWORDValue(L"WaitForExtendedStartup", sets.bWaitForExtendedStartup);
 	key.SetDWORDValue(L"MfgLowMotion", 0);
-	key.SetDWORDValue(L"ZipDepthMode", ZipDepthModeFromSettings(sets));
-	// Keep legacy fields synchronized so older builds/presets do not misread the mode.
-	key.SetDWORDValue(L"UseZipDepth", sets.bUseZipDepthSr || sets.bUseZipDepthMfg);
-	key.SetDWORDValue(L"UseZipDepthSr", sets.bUseZipDepthSr);
-	key.SetDWORDValue(L"UseZipDepthMfg", sets.bUseZipDepthMfg);
-	key.SetDWORDValue(L"AdaptiveMfgDepth", 0);
+	key.SetDWORDValue(ResearchDepthModeKey, DepthModeFromSettings(sets));
 	key.SetDWORDValue(L"ShowMfgMotion", sets.bShowMfgMotion);
 	key.SetDWORDValue(L"ShowDepthOverlay", sets.bShowDepthOverlay);
 	key.SetDWORDValue(L"Depth3DPreview", 0);

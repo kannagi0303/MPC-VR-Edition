@@ -31,13 +31,12 @@
     bool m_optionalToneTurn = true; // FA-02: fair optional prime order
 	mfg::DecodedFrameDifference m_mfgDecodedDifference;
 	std::atomic<unsigned> m_mfgPendingRepeats{0};
-	bool m_useZipDepthSr = false;
-	bool m_useZipDepthMfg = false;
-	bool m_adaptiveMfgDepth = false;
+	bool m_useDepthSr = false;
+	bool m_useDepthMfg = false;
 	bool m_showMfgMotion = false;
-	bool UsesZipDepthSr() const { return m_useZipDepthSr && m_iVPSuperRes == SUPERRES_DLSS_SR; }
+	bool UsesDepthSr() const { return m_useDepthSr && m_iVPSuperRes == SUPERRES_DLSS_SR; }
 	bool MfgSourceMeetsDisplayRate() const;
-	bool UsesZipDepthMfg() const { return m_useZipDepthMfg && m_mfgMultiplier && !MfgSourceMeetsDisplayRate(); }
+	bool UsesDepthMfg() const { return m_useDepthMfg && m_mfgMultiplier && !MfgSourceMeetsDisplayRate(); }
 	bool m_showDepthOverlay = false;
 	bool m_depth3DPreview = false;
 	bool MfgDepthSourceEligible() const;

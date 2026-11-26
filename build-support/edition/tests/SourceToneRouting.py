@@ -83,7 +83,7 @@ assert 'const bool sourceColorFinal = upstreamTone || sourceToneInput != nullptr
 assert 'if(!upstreamTone && SourceToneEligible())' in queue
 assert 'if(upstreamTone && depth) depth->captureSource=false;' in queue
 assert queue.index('PrepareSourceTone(*sourceToneInput')<queue.index('m_mfg.CaptureOriginal(image')<queue.index('m_mfg.Generate(m_pDevice, m_pDeviceContext, image')
-assert queue.index('m_zipDepth.Update(m_pDevice,m_pDeviceContext,sourceToneInput->pShaderResource')<queue.index('image=corrected;')
+assert queue.index('m_depth.Update(m_pDevice,m_pDeviceContext,sourceToneInput->pShaderResource')<queue.index('image=corrected;')
 assert 'depth->captureSource=false;' in queue
 assert queue.index('if(colorRouteChanged) m_mfg.ResetHistory()')<queue.index('const bool checkFrames')
 assert queue.index('if (phases.empty()) return false;')<queue.index('m_completedTarget->sourceColorFinal=sourceColorFinal;')

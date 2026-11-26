@@ -34,7 +34,7 @@ void CDX11VideoProcessor::ResetFeatureStatus()
 
 LONG CDX11VideoProcessor::DrawFeatureStatus(ID3D11Texture2D* target)
 {
-	if (!target || !m_pDevice || !m_showFeatureStatus.load(std::memory_order_relaxed)) {
+	if (!target || !m_pDevice || m_bShowStats || !m_showFeatureStatus.load(std::memory_order_relaxed)) {
 		return 0;
 	}
 

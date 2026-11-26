@@ -8,3 +8,6 @@
 *.props text eol=crlf
 *.rc text eol=crlf
 *.dmlpack binary
+*.dmlgraph binary
+*.dmlweights binary
+licenses/LICENSE-Apple-DepthPro2.txt text eol=lf

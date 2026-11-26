@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Included by ZipDepthNative.cpp so both native models use the same graph helpers.
+// Included by DepthNative.cpp so both native models use the same graph helpers.
 #include "SvdLutModel.h"
 #include "../Edition/SvdLutLutRegularity.h"
 
@@ -118,7 +118,7 @@ void MapModelWeights(DmlSerializedGraphDesc& decoded,
         const auto slot = static_cast<UINT>(weights.size() + 1);
         if (!slots.emplace(node.Name, slot).second) throw std::runtime_error("Duplicate SVDLUT weight");
         weights.emplace_back(reinterpret_cast<const std::uint8_t*>(raw->data), static_cast<size_t>(raw->dataSize));
-        // Use the same initializer-owned inputs as ZipDepth. The bytes stay
+        // Use the same initializer-owned inputs as depth. The bytes stay
         // in the model file, but CompileGraph never sees inline constant nodes.
         *constant = ConstantName{node.Name};
     }

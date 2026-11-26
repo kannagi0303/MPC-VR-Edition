@@ -46,7 +46,7 @@
 	HRESULT WaitForRenderTime(uint64_t epoch);
 	HRESULT WaitForRenderTime(uint64_t epoch, const mpcvr::edition::PlaybackCancellation::Ticket& ticket);
 	bool LookaheadCancelled(uint64_t epoch) const;
-	bool PrefetchZipDepth(IMediaSample* sample, int64_t pts, uint64_t epoch);
+	bool PrefetchDepth(IMediaSample* sample, int64_t pts, uint64_t epoch);
 	void DrainLookahead();
 	void ReportLookaheadError(HRESULT hr);
 	std::optional<LRESULT> HandleEditionWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);

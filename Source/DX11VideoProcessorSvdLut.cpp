@@ -450,10 +450,10 @@ HRESULT CDX11VideoProcessor::ApplyPerceptual(const Tex2D_t& source, ID3D11Textur
     float historyWeight = 0.0f;
     // The source depth is only safe at exact picture geometry. There is no
     // arbitrary SR/MFG/letterbox coordinate guess and NEVER extra inference.
-    if (allowDepth && pts != INVALID_TIME && (UsesZipDepthSr() || UsesZipDepthMfg()) &&
+    if (allowDepth && pts != INVALID_TIME && (UsesDepthSr() || UsesDepthMfg()) &&
         visible == area && offset == CPoint(0, 0) &&
-        m_zipDepth.MatchesColorPicture(visible.Width(), visible.Height())) {
-        const auto estimate = m_zipDepth.ForFrame(pts);
+        m_depth.MatchesColorPicture(visible.Width(), visible.Height())) {
+        const auto estimate = m_depth.ForFrame(pts);
         const auto age = pts - estimate.pts;
         if (estimate.view && estimate.pts != INVALID_TIME && age >= 0 && age < 1'900'000) {
             // Fade stale depth softly, never snap colour at one timestamp.
@@ -465,7 +465,7 @@ HRESULT CDX11VideoProcessor::ApplyPerceptual(const Tex2D_t& source, ID3D11Textur
             // No extra model invocation, GPU pass or CPU readback. The pixel
             // shader can damp depth disagreement at a small sampling cost.
             if (estimate.pts > 0) {
-                const auto previous = m_zipDepth.ForFrame(estimate.pts - 1);
+                const auto previous = m_depth.ForFrame(estimate.pts - 1);
                 if (previous.view && previous.pts >= 0 &&
                     estimate.pts - previous.pts <= 1'500'000 &&
                     previous.rotated == estimate.rotated) {

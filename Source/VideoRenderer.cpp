@@ -20,8 +20,8 @@
 
 #include "stdafx.h"
 #include <algorithm>
-#include "DLSS/DecodedFrameLookahead.h"
-#include "DLSS/ZipDepthLookahead.h"
+#include "Depth/DecodedFrameLookahead.h"
+#include "Depth/DepthLookahead.h"
 #include <atomic>
 #include <optional>
 #include <evr.h> // for MR_VIDEO_ACCELERATION_SERVICE, because the <mfapi.h> does not contain it

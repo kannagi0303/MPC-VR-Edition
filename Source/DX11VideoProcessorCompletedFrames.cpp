@@ -370,7 +370,7 @@ bool CDX11VideoProcessor::QueueCompletedFrame(CompletedFrame&& frame)
 {
     // Depth 3D must be baked while the frame is produced, not when it is
     // presented. The completed queue intentionally runs about two seconds
-    // ahead, while CZipDepth::ForFrame() only accepts a recent estimate and
+    // ahead, while CDepth::ForFrame() only accepts a recent estimate and
     // its result slots are reused. Looking the depth up again at Present time
     // therefore makes the effect appear only intermittently.
     //

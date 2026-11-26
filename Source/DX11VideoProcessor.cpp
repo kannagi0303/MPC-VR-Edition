@@ -1518,8 +1518,11 @@ void CDX11VideoProcessor::CalcStatsParams()
 
 		if (SUCCEEDED(m_Font3D.CreateFontBitmap(L"Consolas", m_StatsFontH, 0))) {
 			SIZE charSize = m_Font3D.GetMaxCharMetric();
-			m_StatsRect.right  = m_StatsRect.left + m_StatsColumns * charSize.cx + 5 + 3;
-			m_StatsRect.bottom = m_StatsRect.top + m_StatsLines * charSize.cy + 5 + 3 + kStatsMarkerH + 1;
+			const bool editionInformation = m_showFeatureStatus.load(std::memory_order_relaxed);
+			const int columns = editionInformation ? m_StatsColumns : 61;
+			const int height = editionInformation ? m_StatsLines * charSize.cy + kStatsMarkerH + 1 : 19 * charSize.cy;
+			m_StatsRect.right  = m_StatsRect.left + columns * charSize.cx + 5 + 3;
+			m_StatsRect.bottom = m_StatsRect.top + height + 5 + 3;
 		}
 		m_StatsBackground.Set(m_StatsRect, rtSize, D3DCOLOR_ARGB(80, 0, 0, 0));
 
@@ -2540,7 +2543,7 @@ HRESULT CDX11VideoProcessor::ProcessSample(IMediaSample* pSample)
 
 	m_rtStart = rtStart;
 	m_sampleDuration = rtFrameDur;
-	m_zipDepth.PlaybackFrame(rtStart, rtFrameDur);
+	m_depth.PlaybackFrame(rtStart, rtFrameDur);
 	CRefTime rtClock(rtStart);
 
 	HRESULT hr = CopySample(pSample);
@@ -4892,8 +4895,10 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 
 	const auto statsNow = GetTickCount64();
 	const auto statsRun = m_pFilter->m_featureStatusPlaybackRun.load(std::memory_order_relaxed);
-	if (!m_cachedStatisticsTick || statsNow - m_cachedStatisticsTick >= 250 ||
-		m_cachedStatisticsRun != statsRun) {
+	const bool editionInformation = m_showFeatureStatus.load(std::memory_order_relaxed);
+	const bool refreshEditionStatistics = !m_cachedStatisticsTick || statsNow - m_cachedStatisticsTick >= 250 ||
+		m_cachedStatisticsRun != statsRun;
+	if (!editionInformation || refreshEditionStatistics) {
 	std::wstring str;
 	str.reserve(700);
 	str.assign(m_strStatsHeader);
@@ -4908,12 +4913,6 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 		frametype,
 		m_pFilter->m_DrawStats.GetAverageFps()
 	);
-	if (const auto corrected = m_pFilter->m_correctedSourcePts) {
-		str += std::format(L"\nSource PTS    : {} corrected", corrected);
-	}
-	if (const auto backwards = m_pFilter->m_FrameStats.GetBackwardsTimestamps()) {
-		str += std::format(L"\nSource PTS    : {} out of order", backwards);
-	}
 
 	str.append(m_strStatsInputFmt);
 	if (m_Dovi.bValid && m_Dovi.bHasMMR) {
@@ -4921,8 +4920,8 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 	}
 	str.append(m_strStatsVProc);
 
-	const bool projected = CanProjectJvr();
-	const auto picture = PictureForPlayback(projected);
+	const bool projected = editionInformation && CanProjectJvr();
+	const auto picture = editionInformation ? PictureForPlayback(projected) : m_videoRect;
 	const auto source = ProcessingSourceRect(projected);
 	const UINT dstW = picture.Width();
 	const UINT dstH = picture.Height();
@@ -4933,7 +4932,9 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 	} else {
 		str += std::format(L"\nScaling       : {}x{} -> {}x{}", m_srcRectWidth, m_srcRectHeight, dstW, dstH);
 	}
-	if (UINT(source.Width()) != dstW || UINT(source.Height()) != dstH) {
+	const UINT srcW = editionInformation ? UINT(source.Width()) : m_srcRectWidth;
+	const UINT srcH = editionInformation ? UINT(source.Height()) : m_srcRectHeight;
+	if (srcW != dstW || srcH != dstH) {
 		if (m_D3D11VP.IsReady() && m_bVPScaling && !m_bVPScalingUseShaders) {
 			str.append(L" D3D11");
 			if (m_bVPUseSuperRes && m_srcRectWidth < dstW && m_srcRectHeight < dstH) {
@@ -5007,14 +5008,15 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 		m_RenderStats.t6 * 1000 / GetPreciseTicksPerSecond());
 #endif
 
-	const auto editionSeparator = AppendEditionStatistics(str, sourceFps);
-	if (UpdateStatsLayout(str)) {
-		UpdateStatsByWindow();
+	if (refreshEditionStatistics) {
+		const auto editionSeparator = AppendEditionStatistics(str, sourceFps);
+		const bool layoutChanged = editionInformation && UpdateStatsLayout(str);
+		if (layoutChanged || !m_cachedStatisticsTick) UpdateStatsByWindow();
+		if (editionSeparator) InsertEditionStatsSeparator(str, *editionSeparator);
+		m_cachedStatisticsTick = statsNow;
+		m_cachedStatisticsRun = statsRun;
 	}
-	if (editionSeparator) InsertEditionStatsSeparator(str, *editionSeparator);
 	m_cachedStatisticsText = std::move(str);
-	m_cachedStatisticsTick = statsNow;
-	m_cachedStatisticsRun = statsRun;
 	}
 
 	ID3D11RenderTargetView* pRenderTargetView = nullptr;

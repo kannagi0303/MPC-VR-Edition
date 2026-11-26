@@ -21,8 +21,8 @@
 #include "stdafx.h"
 #include "Helper.h"
 #include "VideoRenderer.h"
-#include "DLSS/DecodedFrameLookahead.h"
-#include "DLSS/ZipDepthLookahead.h"
+#include "Depth/DecodedFrameLookahead.h"
+#include "Depth/DepthLookahead.h"
 #include "Mfg/AvcPresentationClock.h"
 
 HRESULT CMpcVideoRenderer::CompleteConnect(IPin* pReceivePin)
@@ -58,11 +58,11 @@ HRESULT CMpcVideoRenderer::CompleteConnect(IPin* pReceivePin)
 			filter.Release();
 		}
 	}
-	if (m_localFile && !m_depthLookahead && zipdepth::LookaheadMs()) {
+	if (m_localFile && !m_depthLookahead && depthsettings::LookaheadMs()) {
 		try {
-			m_depthLookahead = std::make_unique<DecodedFrameLookahead>(*this, zipdepth::LookaheadMs());
+			m_depthLookahead = std::make_unique<DecodedFrameLookahead>(*this, depthsettings::LookaheadMs());
 		} catch (...) {
-			DLog(L"ZipDepth lookahead worker unavailable");
+			DLog(L"depth lookahead worker unavailable");
 		}
 	}
 	const HRESULT hr = __super::CompleteConnect(pReceivePin);

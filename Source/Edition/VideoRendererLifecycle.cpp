@@ -21,7 +21,7 @@
 #include "stdafx.h"
 #include "Helper.h"
 #include "VideoRenderer.h"
-#include "DLSS/DecodedFrameLookahead.h"
+#include "Depth/DecodedFrameLookahead.h"
 #include "Edition/WindowMessages.h"
 
 // These hooks execute synchronously at the original lifecycle call sites.
@@ -160,7 +160,7 @@ const wchar_t* CMpcVideoRenderer::FeatureStatusText(bool dlssSR, bool vsr, bool 
 
 void CMpcVideoRenderer::BeginStartupOverlay()
 {
-	if (!m_Sets.bWaitForExtendedStartup || !m_Sets.bShowFeatureBadges ||
+	if (!m_Sets.bWaitForExtendedStartup || !m_Sets.bShowFeatureBadges || m_Sets.bShowStats ||
 		m_VideoProcessor->Type() != VP_DX11) return;
 	const bool dlssSR = m_Sets.bDlssSR;
 	const bool vsr = m_Sets.iVPSuperRes > SUPERRES_Disable &&

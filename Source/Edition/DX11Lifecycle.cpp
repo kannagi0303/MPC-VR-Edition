@@ -37,7 +37,15 @@ void CDX11VideoProcessor::ApplyJvrPlaybackMode(Settings_t& config, bool projectJ
 CDX11VideoProcessor::EditionConfiguration CDX11VideoProcessor::ConfigureEdition(Settings_t& config)
 {
 	InvalidateCompletedBackBuffer();
-	if (m_showEditionDetails != config.bShowEditionDetails) m_completedBufferStats.clear();
+	const bool informationChanged = m_showFeatureStatus.load(std::memory_order_relaxed) != config.bShowFeatureBadges;
+	if (informationChanged || m_showEditionDetails != config.bShowEditionDetails) {
+		m_cachedStatisticsTick = 0;
+		m_completedBufferStatsTick = 0;
+		m_completedBufferStats.clear();
+		m_StatsLines = 19;
+		m_StatsColumns = kStatsMinColumns;
+		m_StatsShrinkCount = 0;
+	}
 	m_showEditionDetails = config.bShowEditionDetails;
 	mfg::EnforceScope(config);
 	const bool jvrFlatView = m_pFilter->JvrProjectionRequested(config);
@@ -48,11 +56,11 @@ CDX11VideoProcessor::EditionConfiguration CDX11VideoProcessor::ConfigureEdition(
 	const bool srChanged = srWasEnabled != config.bDlssSR ||
 		(config.bDlssSR && m_dlssSRSourceLimit != config.iDlssSRSourceLimit);
 	if (m_iVPSuperRes != superRes) m_editionVsr = {};
-	const bool wasUsingZipDepth = UsesZipDepthSr() || UsesZipDepthMfg();
-	const bool useZipDepth = (config.bUseZipDepthSr && config.bDlssSR) ||
+	const bool wasUsingDepth = UsesDepthSr() || UsesDepthMfg();
+	const bool useDepth = (config.bUseZipDepthSr && config.bDlssSR) ||
 		(config.bUseZipDepthMfg && mfgMultiplier);
-	const bool overlayChanged = (wasUsingZipDepth && m_showDepthOverlay) !=
-		(useZipDepth && config.bShowDepthOverlay);
+	const bool overlayChanged = (wasUsingDepth && m_showDepthOverlay) !=
+		(useDepth && config.bShowDepthOverlay);
 	const unsigned processingMode = config.iMfgProcessingMode <= 1 ? config.iMfgProcessingMode : 0;
 	const bool jvrModeChanged = jvrFlatView != m_jvrFlatView;
 	if (processingMode != m_mfgProcessingMode ||
@@ -70,8 +78,8 @@ CDX11VideoProcessor::EditionConfiguration CDX11VideoProcessor::ConfigureEdition(
 	m_jvrFlatView = jvrFlatView;
 	ConfigureJvrProjection(config);
 	if (jvrModeChanged) {
-		m_zipDepth.StopLookahead();
-		m_zipDepth.ResetHistory();
+		m_depth.StopLookahead();
+		m_depth.ResetHistory();
 		if (!jvrFlatView) {
 			m_jvrSource.Release();
 			m_jvrFrame.Release();
@@ -106,17 +114,16 @@ CDX11VideoProcessor::EditionConfiguration CDX11VideoProcessor::ConfigureEdition(
 		m_mfgAutoEpoch = m_mfgAutoLastPts = -1;
 	}
 	if (jvrModeChanged) ResetSvdLutHistory();
-	if (m_useZipDepthSr != config.bUseZipDepthSr) m_dlssSR.ResetHistory();
-	if (m_useZipDepthMfg != config.bUseZipDepthMfg || m_adaptiveMfgDepth != config.bAdaptiveMfgDepth)
+	if (m_useDepthSr != config.bUseZipDepthSr) m_dlssSR.ResetHistory();
+	if (m_useDepthMfg != config.bUseZipDepthMfg)
 		m_mfg.ResetDepthHistory();
-	m_useZipDepthSr = config.bUseZipDepthSr;
-	m_useZipDepthMfg = config.bUseZipDepthMfg;
-	m_adaptiveMfgDepth = config.bAdaptiveMfgDepth;
+	m_useDepthSr = config.bUseZipDepthSr;
+	m_useDepthMfg = config.bUseZipDepthMfg;
 	m_showMfgMotion = config.bShowMfgMotion;
 	m_showDepthOverlay = config.bShowDepthOverlay;
 	m_depth3DPreview = config.bDepth3DPreview;
-	if (!m_showDepthOverlay || !useZipDepth) m_depthOverlayCapture.Release();
-	if (wasUsingZipDepth && !useZipDepth) m_zipDepth.Stop();
+	if (!m_showDepthOverlay || !useDepth) m_depthOverlayCapture.Release();
+	if (wasUsingDepth && !useDepth) m_depth.Stop();
 	return {superRes, srChanged, jvrModeChanged};
 }
 
@@ -124,7 +131,7 @@ void CDX11VideoProcessor::ResetEditionVideoProcessor()
 {
 	m_editionVsr = {};
 	m_editionOriginalDropsBase = m_mfgLostReal.load(std::memory_order_relaxed);
-	m_zipDepth.ResetHistory();
+	m_depth.ResetHistory();
 	m_dlssSRAfterMfg = false;
 	m_dlssSR.Reset();
 	m_dlssSRSource.Release();
@@ -137,7 +144,7 @@ void CDX11VideoProcessor::StopEditionDevice()
 {
 	ClearCompletedFrames(true);
 	StopMfg(true, m_fastShutdown);
-	m_zipDepth.Stop(m_fastShutdown);
+	m_depth.Stop(m_fastShutdown);
 	ReleaseSvdLut();
 }
 
@@ -184,8 +191,8 @@ void CDX11VideoProcessor::FlushEdition()
 	}
 	ClearCompletedFrames(false);
 	ResetSvdLutHistory();
-	m_zipDepth.StopLookahead();
-	m_zipDepth.ResetHistory();
+	m_depth.StopLookahead();
+	m_depth.ResetHistory();
 	m_dlssSR.ResetHistory();
 	if (stopping) {
 		// StopMfg's existing fast path retires unfinished NGX GPU work and
@@ -193,7 +200,7 @@ void CDX11VideoProcessor::FlushEdition()
 		// model workers already support safe asynchronous retirement, too.
 		// Normal Seek keeps the old history-only behavior below.
 		StopMfg(true, true);
-		m_zipDepth.Stop(true);
+		m_depth.Stop(true);
 		ReleaseSvdLut(true);
 	} else {
 		StopMfg(false);
@@ -212,9 +219,8 @@ void CDX11VideoProcessor::InitializeEdition(Settings_t& config)
 	ConfigureJvrProjection(config);
 	m_mfgMultiplier=(config.bUseD3D11 ? config.iMfgMultiplier : 0);m_rtVideoDelay=config.iVideoDelay*10000LL;
     m_mfgProcessingMode = config.iMfgProcessingMode <= 1 ? config.iMfgProcessingMode : 0;
-	m_useZipDepthSr = config.bUseZipDepthSr;
-	m_useZipDepthMfg = config.bUseZipDepthMfg;
-	m_adaptiveMfgDepth = config.bAdaptiveMfgDepth;
+	m_useDepthSr = config.bUseZipDepthSr;
+	m_useDepthMfg = config.bUseZipDepthMfg;
 	m_showMfgMotion = config.bShowMfgMotion;
 	m_showDepthOverlay = config.bShowDepthOverlay;
 	m_depth3DPreview = config.bDepth3DPreview;
@@ -240,7 +246,7 @@ void CDX11VideoProcessor::BeginEditionSample(IMediaSample* pSample)
 			m_mfgAutoEpoch = m_mfgAutoLastPts = -1;
 		}
 		m_dlssSR.ResetHistory();
-		m_zipDepth.ResetHistory();
+		m_depth.ResetHistory();
 		m_D3D11VP.ResetFrameOrder();
 	}
 }

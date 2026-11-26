@@ -369,6 +369,7 @@ HRESULT CVRMainPPage::OnActivate()
 INT_PTR CVRMainPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
 	if (OnEditionMessage(uMsg, wParam, lParam)) return TRUE;
+	if (uMsg == WM_PAINT || uMsg == WM_ERASEBKGND) return FALSE; // Native dialog painting.
 	if (uMsg == WM_COMMAND) {
 		LRESULT lValue;
 		const int nID = LOWORD(wParam);
@@ -694,7 +695,6 @@ HRESULT CVRMainPPage::OnApplyChanges()
 	// Do not prompt for a player restart when Apply has already committed it.
 
 	CommitPreviewSettings();
-
 	return S_OK;
 }
 

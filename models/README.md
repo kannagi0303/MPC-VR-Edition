@@ -1,26 +1,9 @@
-# ZipDepth Models
+# Model resources
 
-| Model | Download | Playback ZIP |
-| --- | --- | --- |
-| 384×384 mixed FP16 | [zipdepth.dmlpack](https://raw.githubusercontent.com/kannagi0303/MPC-VR-Edition/main/models/zipdepth_384x384_mixed_fp16/zipdepth.dmlpack) | Included |
-| 512×288 FP32 | [zipdepth.dmlpack](https://raw.githubusercontent.com/kannagi0303/MPC-VR-Edition/main/models/zipdepth_512x288_fp32/zipdepth.dmlpack) | Separate download |
+This source tree includes the SVDLUT FiveK sRGB color graph and its license. The optional depth model for permitted research uses the official Depth Pro 2-S checkpoint at revision **903a1c1ade918831d138adcc4aedbcc8f4da0078**, exported at 352×192 with W4 and upstream mixed FP16.
 
-## Change the Model
+The renderer looks for a matching **dp2-s-w4-352x192-fp16.dmlgraph** and **depthpro2-s-fp16.dmlweights** directly in **edition/**. The Release ZIP can include this pair as optional research resources. Depth is disabled by default. SR and MFG use neutral depth when estimation is disabled or the pair is unavailable.
 
-1. Close the player.
-2. Download the model you want.
-3. Replace `edition/zipdepth.dmlpack` with the downloaded file.
-4. Open the player again.
+Run **build-x64.cmd** for a permitted local research build. The repository provides the converter source and resource preparation scripts. Their outputs and legal requirements are described in the [converter guide](../build-support/depth/README.md).
 
-Keep the name `zipdepth.dmlpack`.
-The renderer detects both model sizes.
-
-## Source and License
-
-Both packs come from the Nightfall EdgePad models based on Fabio Tosi's ZipDepth.
-The 512×288 pack uses the ONNX model from Nightfall Meteor.
-The 384×384 pack uses the mixed FP16 ONNX model in this repository.
-
-- [Nightfall model release](https://github.com/tB0nE/nightfall/releases/tag/edgepad-models-2026-10-08)
-- [MIT license](LICENSE.txt)
-- [ZipDepth converter guide](../tools/zipdepth-convert.md)
+[Apple Machine Learning Research Model License Agreement](../licenses/LICENSE-Apple-DepthPro2.txt)

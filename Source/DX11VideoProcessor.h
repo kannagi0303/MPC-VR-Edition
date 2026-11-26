@@ -248,7 +248,7 @@ private:
     int m_dlssSRSourceLimit = DLSSSR_SOURCE_Disable;
 	bool m_dlssSRDlaa = false;
 	CDlssSR m_dlssSR;
-	CZipDepth m_zipDepth;
+	CDepth m_depth;
 	CComPtr<CMemAllocator> m_lookaheadAllocator;
 	const wchar_t* m_dlssSRInputStatus = nullptr;
 	bool m_dlssSRAfterMfg = false;
@@ -333,8 +333,8 @@ public:
 	int Type() override { return VP_DX11; }
 	int GetRenderAhead() override;
 	CComPtr<IMediaSample> CloneLookaheadSample(IMediaSample* sample, int64_t& pts, uint64_t& bytes);
-	bool PrefetchZipDepth(IMediaSample* sample, int64_t pts);
-	void StopZipDepthLookahead() { m_zipDepth.StopLookahead(); }
+	bool PrefetchDepth(IMediaSample* sample, int64_t pts);
+	void StopDepthLookahead() { m_depth.StopLookahead(); }
 	unsigned GetVideoProcessorUse() override { return m_D3D11VP.IsReady() ? 1u : 0u; }
 	std::wstring GetMfgStatus() override;
 

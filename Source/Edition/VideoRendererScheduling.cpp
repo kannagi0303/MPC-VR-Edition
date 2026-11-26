@@ -21,7 +21,7 @@
 #include "stdafx.h"
 #include "Helper.h"
 #include "VideoRenderer.h"
-#include "DLSS/DecodedFrameLookahead.h"
+#include "Depth/DecodedFrameLookahead.h"
 #include "Mfg/AvcPresentationClock.h"
 #include "Times.h"
 #include "Mfg/CadenceTrace.h"
@@ -265,7 +265,7 @@ HRESULT CMpcVideoRenderer::ReceiveEditionSample(IMediaSample* pSample)
 	{
 		CAutoLock lock(&m_RendererLock);
 		if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get()))
-			dx11->StopZipDepthLookahead();
+			dx11->StopDepthLookahead();
 	}
 	return projected ? ReceiveWithSourceTime(pSample) : ReceiveScheduled(pSample, 0);
 }
@@ -473,13 +473,13 @@ bool CMpcVideoRenderer::LookaheadCancelled(uint64_t epoch) const
 	return epoch && m_depthLookahead->Epoch() != epoch;
 }
 
-bool CMpcVideoRenderer::PrefetchZipDepth(IMediaSample* sample, int64_t pts, uint64_t epoch)
+bool CMpcVideoRenderer::PrefetchDepth(IMediaSample* sample, int64_t pts, uint64_t epoch)
 {
 	CAutoLock lock(&m_RendererLock);
 	if (LookaheadCancelled(epoch) || m_bFlushing || m_filterState == State_Stopped) return true;
 	if (m_filterState == State_Paused) return false;
 	auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get());
-	return !dx11 || dx11->PrefetchZipDepth(sample, pts);
+	return !dx11 || dx11->PrefetchDepth(sample, pts);
 }
 
 void CMpcVideoRenderer::DrainLookahead()

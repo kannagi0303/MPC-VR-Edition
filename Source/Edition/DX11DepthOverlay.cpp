@@ -32,7 +32,7 @@ struct DEPTH3D_VERTEX {
 
 bool CDX11VideoProcessor::DepthOverlayEnabled() const
 {
-	return m_showDepthOverlay && (UsesZipDepthSr() || UsesZipDepthMfg()) && !m_depthOverlayShaderFailed &&
+	return m_showDepthOverlay && (UsesDepthSr() || UsesDepthMfg()) && !m_depthOverlayShaderFailed &&
 		!m_bHdrDisplayModeEnabled && !m_pPSHalfOUtoInterlace &&
 		MfgDepthSourceEligible();
 }
@@ -53,7 +53,7 @@ bool CDX11VideoProcessor::BlendSourceDepthOverlay(ID3D11Texture2D* image, ID3D11
 		source = m_depthOverlayCapture.pShaderResource;
 	}
 	const SIZE modelSize{LONG(m_srcRectWidth), LONG(m_srcRectHeight)};
-	m_zipDepth.Update(m_pDevice, m_pDeviceContext, source, picture, modelSize, timestamp);
+	m_depth.Update(m_pDevice, m_pDeviceContext, source, picture, modelSize, timestamp);
 	DrawDepthOverlay(image, picture, timestamp);
 	return true;
 }
@@ -309,10 +309,10 @@ float4 main(VS_OUTPUT input) : SV_TARGET {
 const Tex2D_t* CDX11VideoProcessor::PrepareDepth3DPreview(const CompletedFrame& frame, const CRect& sourceRect)
 {
 	if (!m_depth3DPreview || m_depth3DPreviewShaderFailed || sourceRect.IsRectEmpty() ||
-		(!UsesZipDepthSr() && !UsesZipDepthMfg())) return &frame.image;
+		(!UsesDepthSr() && !UsesDepthMfg())) return &frame.image;
 
-	m_zipDepth.PollCompleted();
-	const auto estimate = m_zipDepth.ForFrame(frame.pts);
+	m_depth.PollCompleted();
+	const auto estimate = m_depth.ForFrame(frame.pts);
 	if (!estimate.view) return &frame.image;
 	if (!EnsureDepth3DMeshResources()) return &frame.image;
 
@@ -332,7 +332,7 @@ const Tex2D_t* CDX11VideoProcessor::PrepareDepth3DPreview(const CompletedFrame& 
 	constexpr float kDepth3DZStrength = 0.45f;
 	constexpr float kDepth3DCameraDistance = 3.0f;
 	const float constants[8]{sourceUV[0], sourceUV[1], sourceUV[2], sourceUV[3],
-		estimate.rotated ? 1.0f : 0.0f, kDepth3DZStrength, CZipDepth::NormalizedDepthSpan, kDepth3DCameraDistance};
+		estimate.rotated ? 1.0f : 0.0f, kDepth3DZStrength, CDepth::NormalizedDepthSpan, kDepth3DCameraDistance};
 	m_pDeviceContext->UpdateSubresource(m_pDepth3DPreviewConstants, 0, nullptr, constants, 0, 0);
 
 	const float black[4]{0, 0, 0, 1};
@@ -372,10 +372,10 @@ const Tex2D_t* CDX11VideoProcessor::PrepareDepth3DPreview(const CompletedFrame& 
 
 void CDX11VideoProcessor::DrawDepthOverlay(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME timestamp)
 {
-	m_zipDepth.PollCompleted();
-	const auto estimate = m_zipDepth.ForFrame(timestamp);
+	m_depth.PollCompleted();
+	const auto estimate = m_depth.ForFrame(timestamp);
 	if (!estimate.view) return;
-	const auto tensor = m_zipDepth.TensorSize();
+	const auto tensor = m_depth.TensorSize();
 	DrawDepthView(target, picture, estimate.view, tensor, CRect(0, 0, tensor.cx, tensor.cy),
 		estimate.rotated ? 270 : 0, false);
 }
@@ -397,8 +397,17 @@ struct PS_INPUT {
 float4 main(PS_INPUT input) : SV_TARGET {
     const float sampleDepth = Depth.SampleLevel(Linear, input.Tex, 0);
     const float depth = Inverted > 0.5 ? 1.0 - sampleDepth : sampleDepth;
-    const float gray = saturate(0.5 + (0.5 - depth) / DepthSpan);
-    return float4(gray, gray, gray, 1.0);
+    // Display-only false color: far purple/blue, middle cyan/green,
+    // near yellow/orange/red. No change to the depth texture or NGX input.
+    const float z = saturate(0.5 + (0.5 - depth) / DepthSpan);
+    float3 color;
+    if (z < 0.20) color = lerp(float3(0.17, 0.075, 0.21), float3(0.24, 0.20, 0.48), z / 0.20);
+    else if (z < 0.38) color = lerp(float3(0.24, 0.20, 0.48), float3(0.04, 0.78, 0.99), (z - 0.20) / 0.18);
+    else if (z < 0.53) color = lerp(float3(0.04, 0.78, 0.99), float3(0.18, 0.88, 0.50), (z - 0.38) / 0.15);
+    else if (z < 0.68) color = lerp(float3(0.18, 0.88, 0.50), float3(0.99, 0.87, 0.13), (z - 0.53) / 0.15);
+    else if (z < 0.85) color = lerp(float3(0.99, 0.87, 0.13), float3(1.00, 0.36, 0.015), (z - 0.68) / 0.17);
+    else color = lerp(float3(1.00, 0.36, 0.015), float3(0.76, 0.075, 0.015), (z - 0.85) / 0.15);
+    return float4(saturate(color), 1.0);
 }
 )";
 		D3D11_BLEND_DESC blend{};
@@ -427,12 +436,12 @@ float4 main(PS_INPUT input) : SV_TARGET {
 	if (FAILED(m_pDevice->CreateRenderTargetView(target, nullptr, &targetView)) ||
 		FAILED(FillVertexBuffer(m_pDeviceContext, m_pVertexBuffer, textureSize.cx, textureSize.cy, source, rotation, false))) return;
 	const float settings[4]{inverted ? 1.f : 0.f,
-		inverted ? CZipDepthHistory::OutputDepthSpan : CZipDepth::NormalizedDepthSpan};
+		inverted ? CDepth::OutputDepthSpan : CDepth::NormalizedDepthSpan};
 	m_pDeviceContext->UpdateSubresource(m_pDepthOverlayConstants, 0, nullptr, settings, 0, 0);
 	D3D11_VIEWPORT viewport{FLOAT(picture.left), FLOAT(picture.top),
 		FLOAT(picture.Width()), FLOAT(picture.Height()), 0.0f, 1.0f};
 	m_pDeviceContext->RSSetState(nullptr);
-	constexpr float opacity = 0.95f;
+	const float opacity = 1.0f;
 	const FLOAT blendFactor[]{opacity, opacity, opacity, 1.0f};
 	TextureBlt11(m_pDeviceContext, targetView, viewport, m_pVSimpleInputLayout, m_pVS_Simple,
 		m_pPS_DepthOverlay, depth, m_pSamplerLinear, m_pDepthOverlayConstants, m_pVertexBuffer,

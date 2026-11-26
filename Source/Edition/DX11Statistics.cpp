@@ -37,6 +37,10 @@ void CDX11VideoProcessor::RecordEditionVsr(const CRect& input, const CRect& outp
 
 std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring& str, double sourceFps)
 {
+	const bool showInformation = m_showFeatureStatus.load(std::memory_order_relaxed);
+	auto& bufferTrace = mfg::SourceCadenceTrace();
+	if (!showInformation && !bufferTrace.Enabled()) return std::nullopt;
+	const bool showDetails = showInformation && m_showEditionDetails;
 	const bool running = m_pFilter->m_filterState == State_Running;
 	const auto now = GetTickCount64();
 	const auto run = m_pFilter->m_featureStatusPlaybackRun.load(std::memory_order_relaxed);
@@ -221,14 +225,13 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 	const auto vsrStats = vsrActive ? edition::ScalingStatistics(m_editionVsr.input.cx, m_editionVsr.input.cy,
 		m_editionVsr.output.cx, m_editionVsr.output.cy) : L"Off";
 
-	const bool zipDepthEnabled = UsesZipDepthSr() || UsesZipDepthMfg();
-	const auto& depth = m_zipDepth.GetCounters();
-	const bool srDepthUsed = UsesZipDepthSr() && depth.srEvaluations && (!running || now - depth.lastSrUseTick <= 1000);
-	const bool mfgDepthUsed = UsesZipDepthMfg() && depth.mfgSubmissions && (!running || now - depth.lastMfgUseTick <= 1000);
-	const bool depthActive = (srDepthUsed || mfgDepthUsed) && !m_zipDepth.CoolingDown(now);
+	const bool depthEnabled = UsesDepthSr() || UsesDepthMfg();
+	const auto& depth = m_depth.GetCounters();
+	const bool srDepthUsed = UsesDepthSr() && depth.srEvaluations && (!running || now - depth.lastSrUseTick <= 1000);
+	const bool mfgDepthUsed = UsesDepthMfg() && depth.mfgSubmissions && (!running || now - depth.lastMfgUseTick <= 1000);
+	const bool depthActive = (srDepthUsed || mfgDepthUsed) && !m_depth.CoolingDown(now);
     const bool svdOff = !m_pFilter->m_videoEnhancement.load();
     const bool svdRaw = !svdOff;
-    const bool svdTemporal = svdRaw;
     const bool svdBUnsupported = svdRaw && (SourceIsHDR() || m_bVPUseRTXVideoHDR ||
         m_currentSwapChainColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 || m_pPSHalfOUtoInterlace);
     const auto svdStats = svdOff ? L"Off" : svdBUnsupported ? L"SDR required" :
@@ -239,7 +242,7 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 	const bool refreshBufferStats = hasVideoBuffer && running &&
 		(!m_completedBufferStatsTick || now - m_completedBufferStatsTick >= edition::BufferLowWatermark::SampleIntervalMs);
 	CRefTime bufferStream;
-	const bool needDepthPts = m_showEditionDetails && running && (zipDepthEnabled || !svdOff);
+	const bool needDepthPts = showDetails && running && (depthEnabled || !svdOff);
 	const bool hasStreamTime = (refreshBufferStats || needDepthPts) && SUCCEEDED(m_pFilter->StreamTime(bufferStream));
 	const int64_t playbackPts = needDepthPts && hasStreamTime ? REFERENCE_TIME(bufferStream) - m_rtVideoDelay : -1;
 
@@ -249,7 +252,7 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 		m_completedBufferPercent = edition::BufferPercent(time.ready, target);
 		m_completedBufferLow.Add(now, *m_completedBufferPercent);
 		m_completedBufferStats.clear();
-		if (m_showEditionDetails) {
+		if (showDetails) {
 			m_completedBufferStats = std::format(L"\nBuffer        Ready {} s ({}) | Queued {} s ({})",
 				edition::CompactNumber(double(time.ready) / UNITS), time.readyFrames,
 				edition::CompactNumber(double(time.queued) / UNITS), time.queuedFrames);
@@ -261,8 +264,7 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 		// [MFG-B10 | 2026-11-24 23:56 +08:00] Independent diagnostic upper bound.
 		// Same queue and fence snapshot; no policy reads this result. Signaled
 		// frames after a gap are not necessarily safe continuous playback.
-		auto& bufferTrace = mfg::SourceCadenceTrace();
-		if (m_showEditionDetails || bufferTrace.Enabled()) {
+		if (showDetails || bufferTrace.Enabled()) {
 			const auto audit = edition::AuditCompletedBuffer(m_completedFrames, time.fence, time.readyFrames);
 			using Cutoff = edition::CompletedBufferAudit::Cutoff;
 			const wchar_t* cutoff = L"none";
@@ -275,7 +277,7 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 			default: break;
 			}
 			const auto signaledAhead = audit.signaledFrames ? (std::max)(REFERENCE_TIME(0), audit.signaledEnd - REFERENCE_TIME(bufferStream)) : 0;
-			if (m_showEditionDetails) {
+			if (showDetails) {
 				m_completedBufferStats += std::format(L"\nBuffer audit  Signaled {} ms ({}) | Cut {} | Batch {}",
 					signaledAhead / 10000, audit.signaledFrames, cutoff, m_completedBatches.size());
 			}
@@ -296,120 +298,115 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 		m_completedBufferStatsTick = now;
 	}
 
-	std::wstring level = hasVideoBuffer ? L"--" : L"Off";
-	if (hasVideoBuffer && m_completedBufferPercent) level = std::format(L"{}%", *m_completedBufferPercent);
-	const auto separator = str.size() + 1;
-	str += std::format(L"\n\nDLSS SR  {}\nVSR      {}\nMFG      {}\nZipDepth {} | Color Enhancement {} | Video buffer {}",
-		srStats, vsrStats, mfgStats, depthActive ? L"On" : L"Off", svdStats, level);
+	if (!showInformation) return std::nullopt;
 
+	const auto editionStart = str.size();
+	std::wstring summary;
+	const auto addSummary = [&summary](std::wstring_view item) {
+		if (!summary.empty()) summary += L" | ";
+		summary += item;
+	};
+	if (m_mfgMultiplier) addSummary(std::format(L"MFG {}", mfgReason ? mfgReason : mfgStats.c_str()));
+	if (srActive) addSummary(std::format(L"DLSS SR {}", srStats));
+	else if (srSelected) addSummary(std::format(L"DLSS SR {}", m_dlssSR.Preparing() ? L"Preparing" :
+		m_dlssSRInputStatus ? m_dlssSRInputStatus : L"Inactive"));
+	if (vsrActive) addSummary(std::format(L"VSR {}", vsrStats));
+	if (hasVideoBuffer && m_completedBufferPercent) {
+		addSummary(std::format(L"Ready buffer {}%", *m_completedBufferPercent));
+	}
+	if (!summary.empty()) str += L"\n" + summary;
 
-    if (m_pFilter->m_adaptiveTone.load()) {
-        const auto& at=m_adaptiveTone;
-        str += std::format(L"\nAdaptive Tone {}% | {}", m_pFilter->m_adaptiveTone.load(), !AdaptiveToneSupported()?L"SDR required":at.shaderFailed?L"Shader unavailable":at.shot.locked<0?L"Analyzing":!at.shot.active?L"Neutral":at.applied?L"Active":L"Ready");
-        if(m_showEditionDetails) str+=std::format(L" | anchor {}/{}",at.shot.count,edition::adaptive_tone::AnchorSamples);
-    }
-    if (m_showEditionDetails) {
-		// Keep the full diagnostic counters in their owners, but do not rebuild
-		// a multi-page text dump every time Statistics is displayed.
-		str += L"\n\nGPU / timing";
+	summary.clear();
+	if (depthEnabled) {
+		const wchar_t* depthStatus = m_depth.Loading() ? L"Loading" :
+			m_depth.Unavailable() ? L"Unavailable" : depthActive ? L"On" : L"Inactive";
+		addSummary(std::format(L"Depth {}", depthStatus));
+	}
+	if (!svdOff) addSummary(std::format(L"Color Enhancement {}", svdStats));
+	if (const auto strength = m_pFilter->m_adaptiveTone.load()) {
+		const auto& at = m_adaptiveTone;
+		addSummary(std::format(L"Adaptive Tone {}% {}", strength, !AdaptiveToneSupported() ? L"SDR required" :
+			at.shaderFailed ? L"Shader unavailable" : at.shot.locked < 0 ? L"Analyzing" :
+			!at.shot.active ? L"Neutral" : at.applied ? L"Active" : L"Ready"));
+	}
+
+	if (!summary.empty()) str += L"\n" + summary;
+
+	if (showDetails) {
+		if (const auto corrected = m_pFilter->m_correctedSourcePts)
+			str += std::format(L"\nSource PTS    {} corrected", corrected);
+		if (const auto backwards = m_pFilter->m_FrameStats.GetBackwardsTimestamps())
+			str += std::format(L"\nSource PTS    {} out of order", backwards);
 		if (m_VendorId == PCIV_NVIDIA) {
 			if (!m_gpuLoadSampler) m_gpuLoadSampler = std::make_unique<edition::GpuLoadSampler>();
 			const auto gpu = m_gpuLoadSampler->Read();
-			const auto value = [](int v) -> std::wstring {
-				return v >= 0 ? std::format(L"{}%", v) : L"n/a";
-			};
-			str += std::format(L"\nGPU activity  {} | Memory bus {}", value(gpu.gpu), value(gpu.memory));
-			str += std::format(L"\nEngines       Decode {} | Encode {} | OFA {}",
-				value(gpu.decoder), value(gpu.encoder), value(gpu.opticalFlow));
-			// This is one NVML signal, not two independent measures.
-			str += std::format(L"\nCore idle     {} | 6-sample idle low {}",
-				value(gpu.gpu >= 0 ? 100 - gpu.gpu : -1), value(gpu.idleLow));
-		} else {
-			str += L"\nGPU activity  n/a (NVML: NVIDIA only)";
-		}
-		// NVML GPU idle is NOT a full pipeline GPU frame deadline measurement.
-		// DLSS SR, ZipDepth and DX12 MFG can overlap on independent timelines.
-		// Never turn (100 - GPU load) into an invented per-frame headroom.
-		if (running && m_dRefreshPeriodMs > 0.0) {
-			str += std::format(L"\nFrame budget  {:.2f} ms | GPU frame headroom n/a", m_dRefreshPeriodMs);
-		} else {
-			str += L"\nGPU frame headroom n/a";
+			if (gpu.gpu >= 0 && gpu.memory >= 0)
+				str += std::format(L"\nGPU activity  {}% | Memory bus {}%", gpu.gpu, gpu.memory);
+			if (gpu.decoder > 0 || gpu.opticalFlow > 0) {
+				str += L"\nGPU engines  ";
+				if (gpu.decoder > 0) str += std::format(L" Decode {}%", gpu.decoder);
+				if (gpu.opticalFlow > 0) str += std::format(L" OFA {}%", gpu.opticalFlow);
+			}
 		}
 		if (srActive && sr.ngxGpuTimeValid) {
 			str += std::format(L"\nDLSS SR GPU   {:.2f} ms (NGX only)", sr.ngxGpuMs);
-		}
-		if (zipDepthEnabled && depth.gpuTimings.available) {
-			str += std::format(L"\nZipDepth GPU  {:.2f} / {:.2f} / {:.2f} ms (pack/model/post)",
-				depth.gpuTimings.packMs, depth.gpuTimings.modelMs, depth.gpuTimings.postMs);
 		}
 
 		const bool mfgActive = !mfgReason && m_mfgMultiplier && m_mfg.InputSize().cx;
 		if (mfgActive || m_completedPresentWaitable) {
 			str += L"\nPresent       ";
-			str += displayFps ? std::format(L"DXGI {} fps", edition::CompactNumber(*displayFps)) : std::format(L"DXGI n/a ({})", dxgiStatus);
+			str += displayFps ? std::format(L"DXGI {} fps", edition::CompactNumber(*displayFps)) :
+				std::format(L"DXGI n/a ({})", dxgiStatus);
 			if (skippedPerSec >= 0.1)
 				str += std::format(L" | {} skipped/s", edition::CompactNumber(skippedPerSec));
 		}
-		if (hasVideoBuffer) {
-			str.append(m_completedBufferStats);
-		}
+		if (hasVideoBuffer) str.append(m_completedBufferStats);
 		if (m_completedResizeEarlyDrops)
 			str += std::format(L"\nMFG resize    {} early drops", m_completedResizeEarlyDrops);
 		const auto lostOriginals = m_mfgLostReal.load(std::memory_order_relaxed);
 		if (lostOriginals > m_editionOriginalDropsBase)
 			str += std::format(L"\nOriginal drops {}", lostOriginals - m_editionOriginalDropsBase);
-		if (mfgReason) str += std::format(L"\nMFG           {}", mfgReason);
-		if (srSelected && !srActive) {
-			str += std::format(L"\nDLSS SR       {}", m_dlssSR.Preparing() ? L"Preparing" :
-				m_dlssSRInputStatus ? m_dlssSRInputStatus : L"Inactive");
+
+		if (depthEnabled) {
+			if (depth.mapRateSampleTick && (!running || (now >= depth.mapRateSampleTick &&
+				now - depth.mapRateSampleTick <= 2000))) {
+				str += std::format(L"\nDepth rate    {:.1f} maps/s{}", depth.mapsPerSecond, running ? L"" : L" (last sample)");
+			}
+			if (depth.gpuTimings.available) {
+				str += std::format(L"\nDepth GPU     {:.2f} / {:.2f} / {:.2f} ms (pack/model/post)",
+					depth.gpuTimings.packMs, depth.gpuTimings.modelMs, depth.gpuTimings.postMs);
+			}
+			const auto coverage = [](uint64_t used, uint64_t requested) {
+				return 100.0 * double(used) / double(requested);
+			};
+			if (UsesDepthSr() && depth.srDepthRequests)
+				str += std::format(L"\nDepth SR      {:.1f}% used", coverage(depth.srEvaluations, depth.srDepthRequests));
+			if (UsesDepthMfg() && depth.mfgDepthRequests)
+				str += std::format(L"\nDepth MFG     {:.1f}% used", coverage(depth.mfgSubmissions, depth.mfgDepthRequests));
+			if (UsesDepthMfg() && depth.rawMfgCheckAge >= 0)
+				str += std::format(L"\nDepth check   {} | {:.1f} ms age", depth.rawMfgCheck, double(depth.rawMfgCheckAge) / 10000.0);
+			const auto cache = m_depth.GetCacheStats(playbackPts);
+			if (cache.capacity)
+				str += std::format(L"\nDepth cache   {}/{} | {} late maps", cache.cached, cache.capacity, depth.lateMaps);
+			else if (m_depth.Unavailable())
+				str += std::format(L"\nDepth reason  {}", m_depth.Status());
 		}
-		if (zipDepthEnabled) {
-			const auto cache = m_zipDepth.GetCacheStats(playbackPts);
-			str += cache.capacity ?
-				std::format(L"\nZipDepth      {}/{} cached | {} late maps", cache.cached, cache.capacity, depth.lateMaps) :
-				std::format(L"\nZipDepth      {}", m_zipDepth.Status());
-		}
-        if (PerceptualEnabled()) {
-            str += std::format(L"\nMemory/Skin {}% / {}% | Depth {} used / {} fallback",
-                m_pFilter->m_memoryColor.load(),
-                m_pFilter->m_skinTone.load(),
-                m_perceptual.depthUsed, m_perceptual.depthFallback);
-            if (m_perceptual.failedStandalone || m_perceptual.failedB)
-                str += L"\nPerceptual    shader compile failed (fallback)";
-        }
+		if (PerceptualEnabled() && (m_perceptual.failedStandalone || m_perceptual.failedB))
+			str += L"\nPerceptual    shader compile failed (fallback)";
 		if (svdRaw) {
 			const auto& b = m_svdLutRawTest;
 			str += std::format(L"\nVE temporal   {}/{} analyzed | {} graded | {} ungraded",
 				b.completed, b.requests, b.presentedGraded, b.presentedUngraded);
-            if (svdTemporal && b.grayProbe.valid) {
-                const auto& probe = b.grayProbe;
-                // Synthetic gray (not sampled from the output), prior to
-                // B2.1/Preferred/Skin/Depth/SR/MFG and display conversion.
-                const wchar_t* origin = probe.source == 1 ? L"temporal" :
-                    probe.source == 2 ? L"held" : L"raw";
-                str += std::format(
-                    L"\nB1 gray 236   LUT {:.0f}/{:.0f}/{:.0f} | B mix {:.0f}/{:.0f}/{:.0f} ({})",
-                    probe.model[0] * 255.0f, probe.model[1] * 255.0f,
-                    probe.model[2] * 255.0f,
-                    probe.strengthMixed[0] * 255.0f, probe.strengthMixed[1] * 255.0f,
-                    probe.strengthMixed[2] * 255.0f, origin);
-            } else if (svdTemporal) {
-                str += L"\nB1 gray 236   n/a (selected LUT data unavailable)";
-            }
-            if (svdTemporal && b.b2Analyses) {
-                str += std::format(L"\nVE luma         {:.1f}% luma | {:.2f} EV candidate shift",
-                    b.b2LastTone[0] * 100.0f, b.b2LastSourceShiftEv);
-            }
-			if (b.b2MemoryShaderFailed)
-				str += L"\nVE chroma     shader compile failed";
-			if (b.b2ShaderFailed)
-				str += L"\nVE luma       shader compile failed";
+			if (b.b2MemoryShaderFailed) str += L"\nVE chroma     shader compile failed";
+			if (b.b2ShaderFailed) str += L"\nVE luma       shader compile failed";
 			if (b.model.GetState() == svdlut::ModelWorker::State::Failed || b.failed)
 				str += std::format(L"\nVE model error {}", SvdLutStatus());
 		}
 	}
 
-	return separator;
+	if (str.size() == editionStart) return std::nullopt;
+	str.insert(editionStart, 1, L'\n');
+	return editionStart + 1;
 }
 
 void CDX11VideoProcessor::InsertEditionStatsSeparator(std::wstring& str, size_t separator)
@@ -431,9 +428,9 @@ std::wstring CDX11VideoProcessor::GetMfgStatus() {
 		std::wstring diagnostics = std::format(
 			L"\nMFG runtime    : cap x{}, needs x{}; fallback {:.1f}/s, skipped {:.1f}/s",
 			m_mfg.MaxAvailableMultiplier(), m_mfgTargetSlots, m_mfgFallbackFps, m_mfgSkippedPerSec);
-		if (UsesZipDepthMfg()) {
-			diagnostics += std::format(L"\nMFG depth      : {}", m_mfg.UsesZipDepth() ? L"ZipDepth active" :
-				!MfgDepthSourceEligible() ? L"flat (unsupported source)" : m_zipDepth.Status());
+		if (UsesDepthMfg()) {
+			diagnostics += std::format(L"\nMFG depth      : {}", m_mfg.UsesDepth() ? L"depth active" :
+				!MfgDepthSourceEligible() ? L"flat (unsupported source)" : m_depth.Status());
 		}
 		const std::wstring& ngx = m_mfg.Status();
 		return L"Processor MFG: " + (multiplier==mfg::AutoMultiplier ? L"Auto" : L"x"+std::to_wstring(multiplier)) + L"; " +
@@ -458,7 +455,7 @@ void CDX11VideoProcessor::AppendEditionProcessorInfo(std::wstring& str)
 				m_dlssSRInputStatus, m_srcRect.Width(), m_srcRect.Height(),
 				m_videoRect.Width(), m_videoRect.Height(), m_srcParams.CDepth, m_bVPScaling);
 		} else {
-			str += std::format(L"\nDLSS SR        : {}", m_dlssSR.Status(UsesZipDepthSr() ? &m_zipDepth : nullptr));
+			str += std::format(L"\nDLSS SR        : {}", m_dlssSR.Status(UsesDepthSr() ? &m_depth : nullptr));
 			if (m_dlssSR.Active()) {
 				str += m_dlssSRAfterMfg ? L" (after MFG)" : L" (source frames)";
 				if (m_SampleFormat != D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE) str += L" (deinterlaced)";
@@ -467,23 +464,22 @@ void CDX11VideoProcessor::AppendEditionProcessorInfo(std::wstring& str)
 			}
 		}
 	}
-	if (UsesZipDepthSr() || UsesZipDepthMfg()) {
-		const auto& depth = m_zipDepth.GetCounters();
-		const auto latest = m_zipDepth.LatestPreview();
-		str += std::format(L"\nZipDepth       : {} captures, {} DirectML jobs, {} maps ({} late)"
-			L"\nZipDepth usage : {} SR evaluations, {} MFG submissions",
-			depth.captures, depth.jobs, depth.maps, depth.lateMaps, depth.srEvaluations, depth.mfgSubmissions);
-		if (const auto* precision = m_zipDepth.ModelPrecision(); *precision)
-			str += std::format(L"\nZipDepth model : {}", precision);
+	if (UsesDepthSr() || UsesDepthMfg()) {
+		const auto& depth = m_depth.GetCounters();
+		const auto latest = m_depth.LatestPreview();
+		str += std::format(L"\nDepth          : {} captures, {} DirectML jobs, {} maps ({} late)"
+			L"\nDepth usage    : {}/{} SR evaluations, {}/{} MFG submissions",
+			depth.captures, depth.jobs, depth.maps, depth.lateMaps,
+			depth.srEvaluations, depth.srDepthRequests, depth.mfgSubmissions, depth.mfgDepthRequests);
 		if (depth.maps)
-			str += std::format(L"\nZipDepth timing: GPU job {:.1f} ms, ready at {:.0f} ms age",
+			str += std::format(L"\nDepth timing: GPU job {:.1f} ms, ready at {:.0f} ms age",
 				depth.inferenceMs, double(depth.resultAge) / 10000.0);
 		if (depth.gpuTimings.available)
-			str += std::format(L"\nZipDepth GPU   : pack {:.2f} ms, model interval {:.2f} ms, post {:.2f} ms",
+			str += std::format(L"\nDepth GPU   : pack {:.2f} ms, model interval {:.2f} ms, post {:.2f} ms",
 				depth.gpuTimings.packMs, depth.gpuTimings.modelMs, depth.gpuTimings.postMs);
 		if (latest.view)
-			str += std::format(L"\nZipDepth latest: {:.0f} ms PTS", double(latest.pts) / 10000.0);
+			str += std::format(L"\nDepth latest: {:.0f} ms PTS", double(latest.pts) / 10000.0);
 		else
-			str += std::format(L"\nZipDepth latest: {}", m_zipDepth.Status());
+			str += std::format(L"\nDepth latest: {}", m_depth.Status());
 	}
 }

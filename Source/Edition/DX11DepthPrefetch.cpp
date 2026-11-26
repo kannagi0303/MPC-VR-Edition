@@ -30,7 +30,7 @@ class LookaheadSample final : public CMediaSample, public IMediaSampleD3D11 {
     CComPtr<ID3D11Texture2D> m_texture;
 public:
     LookaheadSample(CMemAllocator* allocator, ID3D11Texture2D* texture)
-        : CMediaSample(L"ZipDepth lookahead sample", allocator, nullptr), m_allocator(allocator), m_texture(texture) {}
+        : CMediaSample(L"depth lookahead sample", allocator, nullptr), m_allocator(allocator), m_texture(texture) {}
 
     STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
         if (iid == __uuidof(IMediaSampleD3D11)) return GetInterface(static_cast<IMediaSampleD3D11*>(this), out);
@@ -53,7 +53,7 @@ public:
 
 CComPtr<IMediaSample> CDX11VideoProcessor::CloneLookaheadSample(IMediaSample* sample, int64_t& pts, uint64_t& bytes)
 {
-    if (CanProjectJvr() || !m_pDeviceContext || !m_pDevice || (!UsesZipDepthMfg() && !UsesZipDepthSr()) ||
+    if (CanProjectJvr() || !m_pDeviceContext || !m_pDevice || (!UsesDepthMfg() && !UsesDepthSr()) ||
         !MfgDepthSourceEligible() || m_bInterlaced || m_srcDXGIFormat != DXGI_FORMAT_NV12 ||
         m_srcExFmt.VideoTransferMatrix != DXVA2_VideoTransferMatrix_BT709 ||
         sample->IsDiscontinuity() == S_OK || sample->IsPreroll() == S_OK)
@@ -93,7 +93,7 @@ CComPtr<IMediaSample> CDX11VideoProcessor::CloneLookaheadSample(IMediaSample* sa
     if (m_D3D11VP.IsReady() && FAILED(m_D3D11VP.CheckInputTexture(copy))) return {};
     if (!m_lookaheadAllocator) {
         HRESULT hr = S_OK;
-        auto* allocator = new(std::nothrow) CMemAllocator(L"ZipDepth lookahead", nullptr, &hr);
+        auto* allocator = new(std::nothrow) CMemAllocator(L"depth lookahead", nullptr, &hr);
         if (!allocator || FAILED(hr)) {
             delete allocator;
             return {};
@@ -112,9 +112,9 @@ CComPtr<IMediaSample> CDX11VideoProcessor::CloneLookaheadSample(IMediaSample* sa
     return result;
 }
 
-bool CDX11VideoProcessor::PrefetchZipDepth(IMediaSample* sample, int64_t pts)
+bool CDX11VideoProcessor::PrefetchDepth(IMediaSample* sample, int64_t pts)
 {
-    if (CanProjectJvr() || (!UsesZipDepthMfg() && !UsesZipDepthSr()) || !m_pDevice || !m_pDeviceContext || !MfgDepthSourceEligible())
+    if (CanProjectJvr() || (!UsesDepthMfg() && !UsesDepthSr()) || !m_pDevice || !m_pDeviceContext || !MfgDepthSourceEligible())
         return true;
     CComQIPtr<IMediaSampleD3D11> decoded(sample);
     CComPtr<ID3D11Texture2D> texture;
@@ -123,7 +123,7 @@ bool CDX11VideoProcessor::PrefetchZipDepth(IMediaSample* sample, int64_t pts)
     CComPtr<ID3D11Device> owner;
     texture->GetDevice(&owner);
     if (owner.p != static_cast<ID3D11Device*>(m_pDevice.p)) return true;
-    return m_zipDepth.PrefetchNv12(m_pDevice, m_pDeviceContext, texture, m_srcRect,
+    return m_depth.PrefetchNv12(m_pDevice, m_pDeviceContext, texture, m_srcRect,
         m_srcExFmt.NominalRange == DXVA2_NominalRange_0_255, pts);
 }
 

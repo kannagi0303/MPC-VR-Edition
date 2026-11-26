@@ -21,6 +21,8 @@
 #pragma once
 
 #include "IVideoRenderer.h"
+#include <string>
+#include <vector>
 
 // Shared controls for the native page and its Edition section.
 void ComboBox_AddStringData(HWND hWnd, int nIDComboBox, LPCWSTR str, LONG_PTR data);

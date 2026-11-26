@@ -92,6 +92,16 @@ for flag in ('RDW_INVALIDATE','RDW_ERASE','RDW_FRAME','RDW_ALLCHILDREN','RDW_UPD
     assert flag in switch
 assert 'case WM_ERASEBKGND:' in p and '::FillRect(reinterpret_cast<HDC>(wp)' in p
 assert '::GetSysColorBrush(COLOR_3DFACE)' in p
+# Outer page must propagate real parent paint into clipped child subtrees.
+# This is a source contract, not a Windows paint test.
+paint=p.split('bool CVRMainPPage::OnEditionMessage',1)[1].split('if(uMsg==WM_NOTIFY',1)[0]
+assert 'WM_PAINT' in paint and 'GetUpdateRect(m_hWnd, nullptr, FALSE)' in paint
+assert 'IsWindowVisible(child)' in paint and 'RedrawWindow(child' in paint
+assert 'RDW_ALLCHILDREN' in paint and 'RDW_UPDATENOW' not in paint
+assert 'RedrawWindow(m_hWnd' not in paint and 'return false' in paint
+native=(root/'Source/PropPage.cpp').read_text()
+assert 'if (uMsg == WM_PAINT || uMsg == WM_ERASEBKGND) return FALSE' in native
+
 assert 'ControlParent' in header and 'm_rendererPane' in header and 'm_extendedPane' in header
 assert 'case WM_COMMAND:' in p and 'case WM_HSCROLL:' in p and 'case WM_NOTIFY:' in p
 assert 'GetParent(hwnd), msg, wp, lp' in p

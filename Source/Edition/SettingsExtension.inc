@@ -100,7 +100,7 @@
 	// Kept at the end of Settings_t to preserve previous members and presets.
 	// Hybrid MFG processing order, independent of the final D3D11 Present.
 	unsigned iMfgProcessingMode = 0; // 0 Quality: VSR -> MFG; 1 Performance: MFG -> VSR
-	bool bShowFeatureBadges = true; // show DLSS SR, VSR and MFG status on the video
+	bool bShowFeatureBadges = true; // Edition OSD master, using the existing settings slot and key.
 	BYTE svdLutStrength = 0; // Reuses the retired processing-resolution slot.
 	bool reservedDlssSRValidateMotion = {}; // Legacy Settings_t slot.
 	bool bShowEditionDetails = false; // Uses the alignment byte before iDlssSRSourceLimit.
@@ -113,13 +113,13 @@
 	int reservedDlssSRDepthMode = {}; // Legacy Settings_t slot.
 	bool bWaitForExtendedStartup = false; // Reuses the retired pulldown slot.
 	bool bMfgLowMotion = false;
-	bool bUseZipDepthSr = true;
+	bool bUseZipDepthSr = false;
 	unsigned char reservedMfgOriginalProtection = {}; // Legacy Settings_t slot.
 	bool bShowDepthOverlay = false;
-	bool bUseZipDepthMfg = true; // Reuses the retired one-byte opacity slot.
+	bool bUseZipDepthMfg = false; // Reuses the retired one-byte opacity slot.
 	bool bAdaptiveMfgDepth = false;
 	bool bShowMfgMotion = false;
-	bool bDepth3DPreview = false; // Experimental ZipDepth-driven oblique parallax preview.
+	bool bDepth3DPreview = false; // Experimental depth-driven oblique parallax preview.
 	bool bJvrFlatView = false;
 	int iJvrVertical = JVR_VERTICAL_DEFAULT;
 	int iJvrReprojection = JVR_REPROJECTION_DEFAULT;
@@ -147,8 +147,8 @@
 		bDlssSRTemporalHistory = true;
 		SetSvdLutStrength(0);
 		bMfgLowMotion = false;
-		bUseZipDepthSr = true;
-		bUseZipDepthMfg = true;
+		bUseZipDepthSr = false;
+		bUseZipDepthMfg = false;
 		bAdaptiveMfgDepth = false;
 		bShowMfgMotion = false;
 		bShowDepthOverlay = false;

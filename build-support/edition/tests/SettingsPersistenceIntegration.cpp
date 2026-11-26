@@ -51,7 +51,7 @@ int main() try {
     input.values = {{L"UseD3D11", 0}, {L"TextureFormat", 0xffffffff},
         {L"ChromaUpsampling", 0xffffffff}, {L"Upscaling", 0xffffffff},
         {L"VPSuperResolution", SUPERRES_Always}, {L"MfgMultiplier", 3},
-        {L"WaitForExtendedStartup", 1}, {L"SharpenLevel", 0xffffffff},
+        {L"WaitForExtendedStartup", 1}, {L"ShowFeatureBadges", 0}, {L"ShowEditionDetails", 1}, {L"SharpenLevel", 0xffffffff},
         {L"ZipDepthMode", ZIPDEPTH_Both}, {L"SvdLutStrength", 67},
         {L"MfgLowMotion", 1}, {L"SdrPeakWindowMs", SDR_PEAK_WINDOW_MIN},
         {L"SdrPeakFloorNits", SDR_PEAK_FLOOR_MIN}, {L"SdrPeakSceneCuts", 0}};
@@ -66,8 +66,9 @@ int main() try {
         "Edition fallback policy must follow native validation");
     Require(loaded.iVPSuperRes == SUPERRES_1440p && loaded.iMfgMultiplier == 7,
         "Legacy VSR/MFG migration");
-    Require(loaded.bWaitForExtendedStartup && loaded.bUseZipDepthSr && loaded.bUseZipDepthMfg &&
+    Require(loaded.bWaitForExtendedStartup && !loaded.bUseZipDepthSr && !loaded.bUseZipDepthMfg &&
         loaded.GetSvdLutStrength() == 67 && !loaded.bMfgLowMotion, "Edition settings and scope");
+    Require(!loaded.bShowFeatureBadges && loaded.bShowEditionDetails, "Legacy OSD key and independent details preference");
     Require(std::wstring(loaded.szDlssSRDllPath) == L"test-only.dll", "Edition string settings");
     Require(loaded.iSdrPeakWindowMs == peakWindow && loaded.iSdrPeakFloorNits == peakFloor &&
         loaded.bSdrPeakSceneCuts == peakCuts, "Preset read must exclude registry-only tuning");
@@ -87,6 +88,35 @@ int main() try {
     MemoryRegistry savedAgain;
     SettingsPersistence::WriteSettings(savedAgain, restored);
     Require(saved.values == savedAgain.values && saved.strings == savedAgain.strings, "Preset roundtrip");
+
+    Require(saved.values.at(L"ResearchDepthMode") == ZIPDEPTH_Disable &&
+        !saved.values.contains(L"DepthMode") && !saved.values.contains(L"ZipDepthMode"),
+        "Save writes only the research depth preference");
+    Settings_t depthSettings;
+    Require(edition::DepthModeFromSettings(depthSettings) == ZIPDEPTH_Disable, "Fresh defaults must not opt in");
+    MemoryRegistry depthRouting;
+    edition::ApplyDepthMode(depthSettings, ZIPDEPTH_Both);
+    SettingsPersistence::ReadSettings(depthRouting, depthSettings);
+    Require(edition::DepthModeFromSettings(depthSettings) == ZIPDEPTH_Disable, "Absent key must clear reused settings");
+    depthRouting.values = {{L"DepthMode", ZIPDEPTH_Both}, {L"ZipDepthMode", ZIPDEPTH_MfgOnly},
+        {L"UseZipDepthSr", 1}, {L"UseZipDepthMfg", 1}, {L"UseZipDepth", 1}, {L"MfgZipDepth", 1}, {L"DlssSRDepthMode", 2}};
+    SettingsPersistence::ReadSettings(depthRouting, depthSettings);
+    Require(edition::DepthModeFromSettings(depthSettings) == ZIPDEPTH_Disable, "Old depth settings are not research opt-in");
+    depthRouting.values[L"ResearchDepthMode"] = 0xffffffff;
+    SettingsPersistence::ReadSettings(depthRouting, depthSettings);
+    Require(edition::DepthModeFromSettings(depthSettings) == ZIPDEPTH_Disable, "Invalid key must not fall back to legacy opt-in");
+    for (int mode : {ZIPDEPTH_Both, ZIPDEPTH_DlssSrOnly, ZIPDEPTH_MfgOnly, ZIPDEPTH_Disable}) {
+        edition::ApplyDepthMode(depthSettings, mode);
+        SettingsPersistence::WriteSettings(depthRouting, depthSettings);
+        Require(depthRouting.values.at(L"ResearchDepthMode") == DWORD(mode) &&
+            depthRouting.values.at(L"DepthMode") == ZIPDEPTH_Both, "Save writes research preference and preserves legacy keys");
+        Settings_t roundTrip;
+        SettingsPersistence::ReadSettings(depthRouting, roundTrip);
+        Require(edition::DepthModeFromSettings(roundTrip) == mode, "Explicit depth choice did not roundtrip");
+    }
+    auto wrongDepthMode = saved;
+    wrongDepthMode.values[L"ResearchDepthMode"] = ZIPDEPTH_Both;
+    Require(edition::VerifySavedSettings(wrongDepthMode, loaded) == E_FAIL, "Save verifies the research depth preference");
 
     auto corrupt = saved;
     corrupt.values[L"SvdLutStrength"] = 0;

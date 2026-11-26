@@ -30,33 +30,35 @@
     <ClInclude Include="Edition\AdaptiveToneShader.h" />
     <ClInclude Include="Edition\AdaptiveToneResearch.h" />
     <ClCompile Include="DLSS\DlssOpticalFlow.cpp" />
-    <ClCompile Include="DLSS\ZipDepthGpu.cpp" />
-    <ClCompile Include="DLSS\DecodedFrameLookahead.cpp" />
-    <ClCompile Include="DLSS\ZipDepthNative.cpp">
+    <ClCompile Include="Depth\DepthGpu.cpp" />
+    <ClCompile Include="Depth\DecodedFrameLookahead.cpp" />
+    <ClCompile Include="Depth\DepthNative.cpp">
       <PreprocessorDefinitions>MPCVR_ENABLE_SVDLUT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <AdditionalIncludeDirectories>$(SolutionDir)vendor\zipdepth\include;$(SolutionDir)vendor\zipdepth\flatbuffers\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)vendor\directml\include;$(SolutionDir)vendor\directml\flatbuffers\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
-    <ClCompile Include="DLSS\ZipDepth.cpp" />
+    <ClCompile Include="Depth\Depth.cpp" />
     <ClCompile Include="DLSS\DlssSR.cpp">
       <AdditionalIncludeDirectories>$(SolutionDir)vendor\nvidia\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <ClInclude Include="DLSS\DlssOpticalFlow.h" />
     <ClInclude Include="DLSS\DlssSR.h" />
-    <ClInclude Include="DLSS\ZipDepthGpu.h" />
-    <ClInclude Include="DLSS\ZipDepthNative.h" />
+    <ClInclude Include="Depth\DepthGpu.h" />
+    <ClInclude Include="Depth\DepthJobQueue.h" />
+    <ClInclude Include="Depth\DepthNative.h" />
     <ClInclude Include="DLSS\SvdLutModel.h" />
     <ClInclude Include="DLSS\SvdLutModel.inc" />
     <ClInclude Include="DLSS\SvdLutShader.h" />
     <ClInclude Include="Edition\SvdLutInput.h" />
     <ClInclude Include="Edition\SvdLutB2AdaptiveLuma.h" />
     <ClInclude Include="Edition\VideoEnhancementStartup.h" />
-    <ClInclude Include="DLSS\ZipDepthPack.h" />
-    <ClInclude Include="DLSS\ZipDepthGpuShaders.h" />
-    <ClInclude Include="DLSS\ZipDepthTemporalShaders.h" />
-    <ClInclude Include="DLSS\DecodedFrameLookahead.h" />
-    <ClInclude Include="DLSS\ZipDepthLookahead.h" />
-    <ClInclude Include="DLSS\ZipDepth.h" />
+    <ClInclude Include="Depth\DepthPack.h" />
+    <ClInclude Include="Depth\DepthSplitPack.h" />
+    <ClInclude Include="Depth\DepthGpuShaders.h" />
+    <ClInclude Include="Depth\DepthDrawShader.h" />
+    <ClInclude Include="Depth\DecodedFrameLookahead.h" />
+    <ClInclude Include="Depth\DepthLookahead.h" />
+    <ClInclude Include="Depth\Depth.h" />
     <ClInclude Include="DLSS\NvOF\nvOpticalFlowCommon.h" />
     <ClInclude Include="DLSS\NvOF\nvOpticalFlowD3D11.h" />
     <ClInclude Include="DLSS\NgxRuntime.h" />

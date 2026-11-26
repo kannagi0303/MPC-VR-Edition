@@ -7,7 +7,7 @@
 #include <string>
 
 struct Tex2D_t;
-class CZipDepth;
+class CDepth;
 
 // DLSS Super Resolution on the renderer's D3D11 device.
 class CDlssSR
@@ -28,14 +28,14 @@ public:
 	~CDlssSR();
 
 	Tex2D_t* Prepare(ID3D11Device1* device, UINT width, UINT height, UINT outputWidth, UINT outputHeight, bool background);
-	Tex2D_t* Evaluate(int64_t pts, float frameTimeMs, CZipDepth* zipDepth, bool sourceFrame, ID3D11ShaderResourceView* cleanSource);
+	Tex2D_t* Evaluate(int64_t pts, float frameTimeMs, CDepth* depthSource, bool sourceFrame, ID3D11ShaderResourceView* cleanSource);
 	bool Preparing() const;
 	void ResetHistory();
 	void Reset();
 	bool Active() const;
 	Stats GetStats() const;
 	int RequestedModel() const;
-	const wchar_t* Status(const CZipDepth* zipDepth) const;
+	const wchar_t* Status(const CDepth* depthSource) const;
 
 private:
 	struct Session;

@@ -126,17 +126,17 @@ std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Tex
 		if (MfgFrameAnalysisEligible()) {
 			m_mfgDecodedDifference.Submit(m_pDevice, m_pDeviceContext, m_jvrFrame.pTexture, 0, frameSource, frameStartTime);
 		}
-		if ((UsesZipDepthSr() && wantSr) || UsesZipDepthMfg()) {
-			m_zipDepth.Update(m_pDevice, m_pDeviceContext, m_jvrFrame.pShaderResource,
+		if ((UsesDepthSr() && wantSr) || UsesDepthMfg()) {
+			m_depth.Update(m_pDevice, m_pDeviceContext, m_jvrFrame.pShaderResource,
 				frameSource, frameSource.Size(), frameStartTime);
 		}
 	}
-	const bool warmZipDepth = (UsesZipDepthMfg() && MfgDepthSourceEligible()) ||
-		(UsesZipDepthSr() && wantSr);
-	if (field && frameStartTime != INVALID_TIME && warmZipDepth && (playFirst || mfgEnabledForRate)) {
-		m_zipDepth.Prepare(m_pDevice);
+	const bool warmDepth = (UsesDepthMfg() && MfgDepthSourceEligible()) ||
+		(UsesDepthSr() && wantSr);
+	if (field && frameStartTime != INVALID_TIME && warmDepth && (playFirst || mfgEnabledForRate)) {
+		m_depth.Prepare(m_pDevice);
 	}
-	const bool canEnhance = !playFirst || (m_startupHasPicture && (!warmZipDepth || !m_zipDepth.Loading()));
+	const bool canEnhance = !playFirst || (m_startupHasPicture && (!warmDepth || !m_depth.Loading()));
 	const bool pausedMfg = sourceReady && mfgEnabledForRate && field && frameStartTime != INVALID_TIME &&
 		m_pFilter->m_filterState == State_Paused && !m_pPSHalfOUtoInterlace &&
 		!m_mfg.Failed();

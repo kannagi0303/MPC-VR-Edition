@@ -23,9 +23,9 @@ struct CDX11VideoProcessor{
  int m_mfgMultiplier=2,m_pPS_Simple=0,m_pDevice=0,draws=0,copies=0;const wchar_t* m_dlssSRInputStatus=nullptr;
  struct{bool sourceToneBeforeUpscale=false;std::optional<bool>srSourceToneRoute;}m_adaptiveTone;
  struct Context{void OMSetRenderTargets(int,void*,void*){}void PSSetShaderResources(int,int,ID3D11ShaderResourceView**){}}ctx;Context*m_pDeviceContext=&ctx;
- struct Depth{int calls=0;ID3D11ShaderResourceView* raw=nullptr;void Update(int,Context*,ID3D11ShaderResourceView* p,CRect,int,REFERENCE_TIME){++calls;raw=p;}}m_zipDepth;
+ struct Depth{int calls=0;ID3D11ShaderResourceView* raw=nullptr;void Update(int,Context*,ID3D11ShaderResourceView* p,CRect,int,REFERENCE_TIME){++calls;raw=p;}}m_depth;
  struct SR{CDX11VideoProcessor* owner;int resets=0,calls=0;ID3D11ShaderResourceView* clean=nullptr;Tex2D_t result;void ResetHistory(){++resets;}Tex2D_t* Evaluate(REFERENCE_TIME,float,Depth*,bool,ID3D11ShaderResourceView* p){++calls;clean=p;return owner->evalOK?&result:nullptr;}}m_dlssSR{this};
- bool SourceToneEligible()const{return eligible;}bool DepthOverlayEnabled()const{return overlayEnabled;}bool UsesZipDepthSr()const{return srDepth;}bool UsesZipDepthMfg()const{return mfgDepth;}
+ bool SourceToneEligible()const{return eligible;}bool DepthOverlayEnabled()const{return overlayEnabled;}bool UsesDepthSr()const{return srDepth;}bool UsesDepthMfg()const{return mfgDepth;}
  ID3D11Texture2D* PrepareSourceTone(const Tex2D_t& src,CRect,REFERENCE_TIME,ID3D11Texture2D* target){++draws;assert(src.pTexture.p!=target);return drawOK?target:src.pTexture.p;}
  int TextureCopyRect(const Tex2D_t&,ID3D11Texture2D*,CRect,CRect,int,void*,int,bool){++copies;return copyOK?0:-1;}
  bool BlendSourceDepthOverlay(ID3D11Texture2D*,ID3D11ShaderResourceView*,CRect,REFERENCE_TIME){return overlayEnabled;}
@@ -43,8 +43,8 @@ int main(){ID3D11Texture2D raw{1},dst{2};ID3D11ShaderResourceView rawView{1};Tex
   bool overlay=false;auto* ret=p.EvaluateDlssSR(in,out,rect,pts,40,&overlay,projected);
   assert(bool(ret)==success);assert(p.draws==int(tone));assert(p.copies==int(copyNeeded));
   assert(p.m_adaptiveTone.sourceToneBeforeUpscale==(success&&tone));
-  assert(p.m_zipDepth.calls==int(converted&&tone&&!projected&&(p.srDepth||p.mfgDepth)));
-  if(p.m_zipDepth.calls)assert(p.m_zipDepth.raw==&rawView);
+  assert(p.m_depth.calls==int(converted&&tone&&!projected&&(p.srDepth||p.mfgDepth)));
+  if(p.m_depth.calls)assert(p.m_depth.raw==&rawView);
   if(converted)assert(p.m_dlssSR.clean==((projected||tone)?&rawView:nullptr));
   ++cases;
  }

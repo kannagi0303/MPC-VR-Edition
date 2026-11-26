@@ -2,7 +2,6 @@
 /AGENTS.md
 AGENTS.md
 /handoff.md
-/docs/
 /notes/
 /.references/
 /.agents/
@@ -14,8 +13,7 @@ AGENTS.md
 
 # Local SDK/runtime; build-x64.cmd downloads the pinned build-only SDK
 /vendor/nvidia/
-/vendor/zipdepth/
-/runtime/
+/vendor/directml/
 
 # Build outputs and developer environments
 /_bin/
@@ -64,7 +62,6 @@ CMakeCache.txt
 *.etl
 *.trace
 /backup/
-/backups/
 /Tests/
 /build-support/tests/
 
@@ -73,13 +70,7 @@ CMakeCache.txt
 /dist.stage-*/
 /dist.previous-*/
 
-# Optional native ZipDepth model build / converted weights (not stored in git).
-.zipdepth-build/
-runtime/zipdepth/
-vendor/ncnn/
-
-# Prebuilt ZipDepth TFLite package download cache
-.zipdepth-lite-cache/
-
-# App-local ZipDepth DirectML package cache
-/.zipdepth-directml-cache/
+# Local Depth Pro 2 research distribution (never publish or commit).
+/dist-depthpro2/
+/dist-depthpro2.stage-*/
+/dist-depthpro2.previous-*/

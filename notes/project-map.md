@@ -30,6 +30,7 @@
 | `DrawStats` → `AppendEditionStatistics`、`InsertEditionStatsSeparator` | `Source/Edition/DX11Statistics.cpp` | 先附加 Edition 統計，再由原生 layout 測量寬度，最後插入分隔線；保持格式及取樣／鎖定次序 |
 | JVR 投影 | `Source/DX11VideoProcessorJvr.cpp`、`Source/JvrProjection.h` | 原有來源準備與幾何算法 |
 | MFG 與成品佇列 | `Source/DX11VideoProcessorMfg.cpp`、`Source/DX11VideoProcessorCompletedFrames.cpp`、`Source/Mfg/` | 本輪保留既有實作與所有權 |
+| 深度 | Source/Depth/、Source/Edition/DX11DepthPrefetch.cpp、DX11DepthOverlay.cpp | SR/MFG 共用固定 352×192 W4 預測、RAW 正規化及來源預覽；保留 PTS 與各 consumer 准入 |
 | SVDLUT | `Source/DX11VideoProcessorSvdLut.cpp`、`Source/DLSS/SvdLut*` | 本輪保留既有模型、工作執行緒與 shader |
 
 ## DirectShow 來源交付與生命週期
@@ -45,8 +46,8 @@
 
 - `VideoRenderer.cpp` 的 private static `ReadSettings`／`WriteSettings` 是原生設定鍵表與讀寫的單一來源；同時服務建構時載入、SaveSettings、SavePreset／LoadPreset。它們尾端呼叫 Edition 讀寫。三個 registry-only tuning 只在建構時讀，不進預設集或寫回。
 - `Edition/RendererSettings.cpp` 只處理預設集路徑、Edition 存檔驗證及仍未啟用的舊遷移；不再維護 native 欄位表。SaveSettings 回到 native cpp，仍以 RendererLock 取得快照後才寫入 key，錯誤回傳語義不變。
-- `Source/Edition/SettingsRegistry.cpp`：MFG、SR、ZipDepth、SVDLUT、JVR 與既有 Edition／legacy 欄位的遷移與保存。兩組函式同時服務全域設定與預設集。
-- `Source/Edition/SettingsRegistry.h`：設定讀寫接點及共用 ZipDepth mode 轉換。
+- `Source/Edition/SettingsRegistry.cpp`：MFG、SR、深度路由、SVDLUT、JVR 與既有 Edition／legacy 欄位的遷移與保存。兩組函式同時服務全域設定與預設集。
+- `Source/Edition/SettingsRegistry.h`：設定讀寫接點及共用 DepthMode 轉換。
 - `Source/Edition/PropPageExtended.cpp`：Edition 控制項初始化、啟用條件、通知處理、驗證與預覽交易。`PropPage.cpp` 在原生頁面生命週期呼叫這些方法。
 - SDR nits 與 JVR 的原有合併預覽復原保留為同一交易；SVDLUT 的獨立預覽保留原 Apply／Cancel／重啟頁面行為。
 - `Source/Edition/ExtendedControls.rcinc` 與 `Dialogs.rcinc` 由原 RC 在原位置 include；`ResourceIds.h` 由原 resource.h include。尺寸、座標、ID 與 tab 順序維持既有值。
@@ -87,4 +88,4 @@
 
 第六輪加入 `SettingsPersistenceIntegration.cpp`，從 production 擷取原生讀寫、startup tuning、Edition 驗證函式，並直接編譯實際 SettingsRegistry.cpp，檢查全域／預設集邊界、無效值政策、舊值遷移、roundtrip、缺鍵／錯值／拒寫。原 pipeline 測試另擷取 native SetSuperRes 與 Edition policy 做 31 組廠牌／context／門檻案例；driver 呼叫為替身。
 
-GPU 播放驗收仍需 MPC-BE：一般 SDR／HDR、D3D9／D3D11，再到 JVR／SR／MFG／ZipDepth／SVDLUT 組合，以及暫停、seek、EOS、縮放、切換功能與音畫同步。
+GPU 播放驗收仍需 MPC-BE：一般 SDR／HDR、D3D9／D3D11，再到 JVR／SR／MFG／Depth Pro 2／SVDLUT 組合，以及暫停、seek、EOS、縮放、切換功能與音畫同步。

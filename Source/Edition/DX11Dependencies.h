@@ -12,7 +12,7 @@ namespace edition { struct VideoFrame; }
 #include <mutex>
 #include "Mfg/Session.h"
 #include "DLSS/DlssSR.h"
-#include "DLSS/ZipDepth.h"
+#include "Depth/Depth.h"
 #include "DLSS/SvdLutModel.h"
 #include "SvdLutTemporalStatistics.h"
 #include "Mfg/FrameQueue.h"

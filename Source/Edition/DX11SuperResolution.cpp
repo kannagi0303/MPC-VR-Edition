@@ -58,7 +58,7 @@ Tex2D_t* CDX11VideoProcessor::PrepareDlssSR(const CRect& srcRect, const CRect& d
 		m_dlssSRAfterMfg = afterMfg;
 	}
 	m_dlssSRInputStatus = nullptr;
-	if (UsesZipDepthSr()) m_zipDepth.Prepare(m_pDevice);
+	if (UsesDepthSr()) m_depth.Prepare(m_pDevice);
 	return m_dlssSR.Prepare(m_pDevice, srcRect.Width(), srcRect.Height(),
 		dstRect.Width(), dstRect.Height(), !m_pFilter->m_Sets.bWaitForExtendedStartup);
 }
@@ -94,10 +94,10 @@ Tex2D_t* CDX11VideoProcessor::EvaluateDlssSR(const Tex2D_t& source, Tex2D_t& inp
 		!depthPrepared && BlendSourceDepthOverlay(input.pTexture, source.pShaderResource, sourceRect, timestamp);
     // Keep both depth consumers and SR scene detection on ungraded source.
     // A projected source has already submitted raw depth in RenderEditionVideo.
-    if(sourceTone && !depthPrepared && (UsesZipDepthSr() || UsesZipDepthMfg()))
-        m_zipDepth.Update(m_pDevice,m_pDeviceContext,source.pShaderResource,sourceRect,sourceRect.Size(),timestamp);
+    if(sourceTone && !depthPrepared && (UsesDepthSr() || UsesDepthMfg()))
+        m_depth.Update(m_pDevice,m_pDeviceContext,source.pShaderResource,sourceRect,sourceRect.Size(),timestamp);
 	ID3D11ShaderResourceView* cleanSource = depthPrepared || overlay || sourceTone ? source.pShaderResource.p : nullptr;
-	auto* output = m_dlssSR.Evaluate(timestamp, frameTimeMs, UsesZipDepthSr() ? &m_zipDepth : nullptr,
+	auto* output = m_dlssSR.Evaluate(timestamp, frameTimeMs, UsesDepthSr() ? &m_depth : nullptr,
 		sourceFrame, cleanSource);
     // A failed evaluation leaves normal raw fallback in charge. Only a
     // returned SR output carries the upstream decision into MFG/Presenter.

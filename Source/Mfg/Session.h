@@ -13,7 +13,7 @@
 #include <atomic>
 #include "FlowMotionCheck.h"
 #include "../Edition/PlaybackCancellation.h"
-class CZipDepth;
+class CDepth;
 
 namespace mfg {
 // One source frame owns an independent reference to its full-resolution D3D11
@@ -27,12 +27,11 @@ struct OriginalSnapshot {
     Microsoft::WRL::ComPtr<ID3D12Resource> nativeView;
 };
 struct DepthInput {
-    CZipDepth& source;
+    CDepth& source;
     RECT picture;
     SIZE modelSize;
     bool captureSource = true;
     bool applyDepth = true;
-    bool adaptive = false;
 };
 struct FrameGeometry {
     RECT picture; // video rectangle in MFG input pixels
@@ -56,11 +55,6 @@ struct MotionOverlay {
     ID3D11ShaderResourceView* view = nullptr;
     RECT picture{};
     ID3D11ShaderResourceView* active = nullptr;
-};
-struct DepthPreview {
-    ID3D11ShaderResourceView* view = nullptr;
-    RECT picture{};
-    SIZE size{};
 };
 class Session {
     struct Impl;
@@ -98,7 +92,6 @@ public:
     bool Ready(uint64_t serial,unsigned index) const;
     FrameSurface Frame(uint64_t serial,unsigned index,int64_t current = -1) const;
     MotionOverlay OverlayMotion(uint64_t serial, int64_t pts) const;
-    DepthPreview OverlayDepth(uint64_t serial, int64_t pts) const;
     // Mark the generated bank as consumed AFTER D3D11 presentation work is
     // enqueued. The producer waits for this fence before reusing its outputs.
     void MarkConsumed(uint64_t serial);
@@ -115,7 +108,7 @@ public:
     unsigned MaxAvailableMultiplier() const;
     SIZE InputSize() const;
     SIZE GeneratedSize() const;
-    bool UsesZipDepth() const;
+    bool UsesDepth() const;
     std::wstring WorkDescription() const;
     void Reset();
     void FastShutdown();
