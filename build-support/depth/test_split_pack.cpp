@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../../Source/Depth/DepthSplitPack.h"
+#undef NDEBUG
 #include <cassert>
 #include <sstream>
 #include <iostream>
@@ -18,7 +19,7 @@ template<class F> void Reject(F f) {
     try { f(); } catch(const std::runtime_error&) { rejected=true; }
     assert(rejected);
 }
-int main() {
+int TestSplitPack() {
     const Bytes graph{1,2,3,4,5,6,7,8}, a{10,11,12,13}, b{20,21,22,23}, c{31,32,33,34};
     const Entries src{{GraphFile,graph},{"tensor_a.bin",a},{"tensor_b.bin",b},{"split_split_0.bin",c}};
     const auto parts=Partition(src);
@@ -67,4 +68,5 @@ int main() {
         for(const auto& [name,data]:input) assert(std::ranges::equal(r.at(name),data));
     }
     std::cout<<"PASS: split pack, 1000 randomized byte-identical round trips, direct spans, alignment, pairing, truncation, duplicate rejection and fixed intermediate compatibility\n";
+    return 0;
 }

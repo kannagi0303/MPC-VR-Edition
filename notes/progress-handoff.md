@@ -1,5 +1,14 @@
 # 目前進度與接手
 
+## 2026-11-27 語言與依賴重整
+
+- 工作樹的專案 Python 由 34 檔／189,804 B 降為 0。移除失效的 DirectML header 適配、White Balance 研究及其殘留 header、研究影像與模型驅動程式，以及被原生工具取代的轉換腳本。Adaptive Tone 保留正式曲線與 shot 邏輯，移除舊 Temporal 候選與重複色彩映射。歷史結論留在原有 notes，舊程式可從 Git 歷史取得。
+- 維護路徑使用固定外部上游匯出器及其鎖定 uv/Python/PyTorch 環境。只在外部匯出副本替換已驗證的 checkpoint revision；Edition 自己的 ONNX focal／inverse、Reshape 及檔案發布改由 DepthConvert 的維護版完成。維護版使用 ORT 1.24.4、DirectML 1.15.4；一般 build-x64.cmd／CPU EXE／播放不使用上述 ML 維護環境。步驟見 build-support/depth/README.md。
+- 既有 ProcessingSourceIntegration 整合 14 組原有 Python 測試中的 C++ 行為及算術案例，維持實際生產函式或 shader 片段，並納入既有 C++ 封包、深度、緩衝、設定、色彩輸入和 shader 編譯檢查。移除冗餘文字比對及離線研究驅動。設定頁含有／無 VR profile 均通過。測試專用 stack reserve 8 MiB，避免多個影像替身整合後超過 Windows 預設配置。
+- 核對完整維護流程：原始 checkpoint → 外部上游 W4 ONNX → C++ 適配 → DirectML 參照 → Recipe，雜湊仍為 6281379D6D648F50E087290D525F22DF7C6DB4D1CC4331C8405A2ED9ED05D54A。201 個張量與原本 pack 逐位元一致。使用隔離來源乾淨建置產物實際執行 10 幀 W4，含第 0 和 8 幀重置，最大差異 0。獨立 CPU EXE 比對相同，拒絕覆寫既有 ONNX。
+- C/C++ 355→363 檔、5,111,634→5,167,280 B；HLSL 62 檔／92,397 B，CMD 6 檔／10,718 B，PowerShell 11→10 檔、71,443→68,822 B。五類原始碼合計減少 136,779 B。使用已驗證的 SDK 下載快取與上游模型本機快取，隔離副本的乾淨及增量建置均通過。dist 15 檔／138,528,237 B，5 個 AX/DLL／87,272,192 B；獨立工具仍為 1,201,664 B。dist 無轉換器、測試或中間檔案。
+- 上游邊界守門仍有前一輪的 10 個超限檔案，44 個差異、+1583/-1149。沒有跑 MPC-BE 實播、可見頁面像素驗收或外部環境全網路下載。未 commit、push 或發布。實際紀錄在 _bin/language-regression-final.log、_bin/language-full-regeneration.log、_bin/language-split-final.log。
+
 ## 2026-11-26 Depth Pro 2-S Safetensors 原生資源準備
 
 - 一般 build-x64.cmd 依序使用有效 split pair、舊驗證 native pack、固定 checkpoint Safetensors。最後一條在 Windows CPU 上直接由同一 DepthConvert 專案生成 dmlgraph／dmlweights。只有本機資源不足時才查驗既有 Hub 快取或下載。一般轉換器依賴 Windows 系統元件，沒有 Python、PyTorch、uv、Git、ORT 或 app-local DirectML。Renderer 的 DirectML 和播放設定維持原狀。

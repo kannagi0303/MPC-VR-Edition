@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
-#include "AdaptiveToneResearch.h"
+#include "AdaptiveToneCurve.h"
 // [AT-03 | 2026-11-25 11:25 +08:00] Shot anchor, not a frame-by-frame AGC.
 namespace edition::adaptive_tone {
 constexpr unsigned SampleWidth=256, SampleHeight=144, TileSize=8, AnchorSamples=10;

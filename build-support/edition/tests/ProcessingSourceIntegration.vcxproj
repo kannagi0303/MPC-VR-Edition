@@ -18,9 +18,39 @@
     <IntDir>$(SolutionDir)_obj\edition-tests\$(MSBuildProjectName)\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup>
-    <ClCompile><AdditionalIncludeDirectories>$(SolutionDir)Source;$(SolutionDir)_bin\edition-tests\generated;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <Link><SubSystem>Console</SubSystem><AdditionalDependencies>user32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+    <ClCompile><AdditionalIncludeDirectories>$(SolutionDir)Source;$(SolutionDir)vendor\directml\flatbuffers\include;$(SolutionDir)_bin\edition-tests\generated;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <AdditionalDependencies>user32.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <StackReserveSize>8388608</StackReserveSize>
+    </Link>
   </ItemDefinitionGroup>
-  <ItemGroup><ClCompile Include="ProcessingSourceIntegration.cpp" /></ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="ProcessingSourceIntegration.cpp" />
+    <ClCompile Include="..\..\depth\test_split_pack.cpp" />
+    <ClCompile Include="DepthJobQueue.cpp" />
+    <ClCompile Include="DepthStreamContract.cpp" />
+    <ClCompile Include="DmlGraphDiagnostics.cpp" />
+    <ClCompile Include="ResizeBankRecovery.cpp" />
+    <ClCompile Include="SvdLutReferenceInput.cpp" />
+    <ClCompile Include="SvdLutAdaptiveLuma.cpp" />
+    <ClCompile Include="SvdLutReferenceShaders.cpp" />
+    <ClCompile Include="VideoEnhancementStartup.cpp" />
+    <ClCompile Include="AdaptiveToneShot.cpp" />
+    <ClCompile Include="CompletedBufferCalculation.cpp" />
+    <ClCompile Include="DxgiStatisticsAudit.cpp" />
+    <ClCompile Include="OptionalColorWork.cpp" />
+    <ClCompile Include="PresentationProducerFairness.cpp" />
+    <ClCompile Include="ResizeGeometryAdmission.cpp" />
+    <ClCompile Include="SourceToneRouting.cpp" />
+    <ClCompile Include="DepthPlaybackStatistics.cpp" />
+    <ClCompile Include="DepthPreviewAndConsume.cpp" />
+    <ClCompile Include="PerceptualLifecycle.cpp" />
+    <ClCompile Include="EnhancementMasterAndLayout.cpp" />
+    <ClCompile Include="SourceToneBeforeSR.cpp" />
+    <ClCompile Include="AdaptiveToneContinuity.cpp" />
+    <ClCompile Include="AdaptiveToneComposition.cpp" />
+    <ClCompile Include="DepthRawPipeline.cpp" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

@@ -1,47 +1,6 @@
-#!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-3.0-or-later
-# [MFG-B09 | 2026-11-24 17:51 +08:00] Compile actual production admission
-# against portable stand-ins. Tests policy, not D3D/NGX/Windows timing.
-from pathlib import Path
-import argparse
-import os
-import subprocess
-import tempfile
-
-ROOT = Path(__file__).resolve().parents[3]
-SOURCE = ROOT / 'Source/DX11VideoProcessorCompletedFrames.cpp'
-
-
-def method(source, name):
-    start = source.index(name)
-    brace = source.index('{', start)
-    depth = 1
-    end = brace + 1
-    while depth:
-        depth += (source[end] == '{') - (source[end] == '}')
-        end += 1
-    return source[start:end]
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--cxx', default=os.environ.get('CXX', 'g++'))
-    parser.add_argument('--sanitize', action='store_true')
-    args = parser.parse_args()
-    src = SOURCE.read_text(encoding='utf-8')
-    geometry = method(src, 'bool CDX11VideoProcessor::CompletedGeometryChanging(')
-    overlap = method(src, 'const char* CDX11VideoProcessor::CompletedOverlapBlock(')
-    next_frame = method(src, 'bool CDX11VideoProcessor::NextCompletedFrame(')
-    present = method(src, 'HRESULT CDX11VideoProcessor::PresentCompletedVideo(')
-    # Compile the real resize scheduling block, not an imitation of its predicate.
-    begin = next_frame.index('constexpr ULONGLONG resizeSettleMs = 140;')
-    finish = next_frame.index('// Early B-only', begin)
-    resize_block = next_frame[begin:finish]
-    assert 'if (!scheduled) ApplyPendingWindowResize();' in present
-    assert present.count('ApplyPendingWindowResize(') == 1
-    assert 'if (m_resizePending && !m_resizeTarget.IsRectEmpty())' in present
-    assert 'if (CompletedGeometryChanging())' in method(src, 'REFERENCE_TIME CDX11VideoProcessor::CompletedSubmitLead(')
-    code = r'''
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Production method fragments are supplied by the Edition integration runner.
+#undef NDEBUG
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -54,12 +13,18 @@ def main():
 #include <span>
 #include <vector>
 #include "Mfg/BankSelection.h"
+
+namespace {
 using REFERENCE_TIME = int64_t;
 using CRefTime = int64_t;
 using ULONGLONG = uint64_t;
 using UINT = unsigned;
 #define FAILED(hr) ((hr) < 0)
-namespace mfg { constexpr unsigned MaxGenerated=3; }
+namespace mfg {
+using ::mfg::BankOffer;
+using ::mfg::SelectReusableBank;
+constexpr unsigned MaxGenerated = 3;
+}
 struct Size { int cx=1920,cy=1080; };
 struct Rect { int l=0,t=0,r=1920,b=1080; bool operator==(const Rect&) const = default;
     int Width() const {return r-l;} int Height() const {return b-t;} };
@@ -118,9 +83,14 @@ struct CDX11VideoProcessor {
     void TryCommitResize();
     const char* Admit() const {return CompletedOverlapBlock(0,35000,20,100,100);}
 };
-''' + geometry + '\n' + overlap + '\nvoid CDX11VideoProcessor::TryCommitResize() {\n' + resize_block + '\n}\n' + r'''
+
+#include "ResizeAdmissionMethods.generated.inc"
+void CDX11VideoProcessor::TryCommitResize() {
+#include "ResizeCommit.generated.inc"
+}
+
 static bool same(const char* a,const char* b) {return (!a&&!b)||(a&&b&&std::strcmp(a,b)==0);}
-int main() {
+void Exercise() {
     // Compile the actual predicate: a recent geometry tick must not extend
     // protection once the pending resize has been committed/cancelled.
     CDX11VideoProcessor guard;
@@ -249,17 +219,6 @@ int main() {
     std::cout<<"Actual overlap: "<<accepted<<" admits, "<<rejected<<" rejects; identical during fixed-canvas resize\n";
     std::cout<<"Fixed-canvas stress opportunities: "<<opportunities<<"; geometry-dependent/mixed/format guards and deadline-aware commit PASS\n";
 }
-'''
-    with tempfile.TemporaryDirectory() as folder:
-        cpp = Path(folder) / 'test.cpp'
-        exe = Path(folder) / 'test'
-        cpp.write_text(code, encoding='utf-8')
-        flags = ['-std=c++20', '-O2', '-Wall', '-Wextra', '-I', str(ROOT/'Source')]
-        if args.sanitize:
-            flags += ['-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-no-pie']
-        subprocess.run([args.cxx, *flags, str(cpp), '-o', str(exe)], check=True)
-        subprocess.run([str(exe)], check=True)
+}
 
-
-if __name__ == '__main__':
-    main()
+void TestResizeGeometryAdmission() { Exercise(); }

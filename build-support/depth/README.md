@@ -24,7 +24,7 @@ The converter checks both input files by SHA-256, checks each generated tensor, 
 
 ## Regenerating the recipe
 
-Ordinary builds consume the checked-in recipe. Use the maintenance path when reviewing an upstream change or reproducing the checked-in recipe. It uses the existing pinned exporter, locked Python/PyTorch environment, ONNX graph adapter and ORT DirectML validator. Maintain the same checkpoint, exporter revision, exporter lockfile, DirectML and ONNX Runtime versions for a byte-for-byte reproduction.
+Ordinary builds consume the checked-in recipe. The maintenance path uses the upstream exporter's locked Python/PyTorch environment and the existing converter's C++ adapter and ORT DirectML validator. Install upstream's uv and make it available on PATH. Maintain the same checkpoint, exporter revision, exporter lockfile, DirectML and ONNX Runtime versions for a byte-for-byte reproduction.
 
 From a Developer PowerShell at the source root, use a work directory outside the source repository. Run the build scripts in a PowerShell process with `-ExecutionPolicy Bypass`, as the CMD entry point does for ordinary builds.
 
@@ -37,10 +37,12 @@ $checkpoint = Get-PinnedDepthCheckpoint $work
 & .\build-support\prepare-directml.ps1 -WithConverter -WithOnnxMaintenance -VisualStudioRoot $env:VSINSTALLDIR
 msbuild MpcVideoRenderer.sln /t:DepthConvert /p:Configuration=Release /p:Platform=x64 /p:DepthOnnxMaintenance=true
 $converter = (Resolve-Path .\_bin\depth-converter-maintenance\depth-convert.exe).Path
-& .\build-support\depth\convert-depthpro2.ps1 -Converter $converter -WorkDirectory $work -Rebuild
+$adapted = Join-Path $work ('adapted-' + [guid]::NewGuid() + '.onnx')
+$reference = Join-Path $work ('reference-' + [guid]::NewGuid() + '.dmlpack')
+& $converter --adapt-onnx (Join-Path $work 'dp2-s-w4-352x192-fp16.source.onnx') $adapted
+& $converter $adapted $reference
 $candidate = Join-Path $work ('DepthPro2S-352x192-' + [guid]::NewGuid() + '.recipe')
-& $converter --make-recipe ($checkpoint['model.safetensors']) ($checkpoint['config.json']) `
-    (Join-Path $work 'dp2-s-w4-352x192-fp16.dmlpack') $candidate
+& $converter --make-recipe ($checkpoint['model.safetensors']) ($checkpoint['config.json']) $reference $candidate
 Get-FileHash -Algorithm SHA256 $candidate, .\build-support\depth\DepthPro2S-352x192.recipe
 ```
 
@@ -57,3 +59,5 @@ depth-convert.exe --validate-split ADAPTED.onnx OUTPUT.dmlgraph OUTPUT.dmlweight
 ```
 
 `depth-convert.exe --licenses` prints the Apple model agreement and the converter's third-party notices. If distributing the prebuilt EXE with the embedded recipe, include the agreement and the research notice with it.
+
+Run `build-support/edition/tests/run-page-tests.ps1` after building the renderer to check the native split pack, W4 state, Graph verifier, renderer routes and settings on Windows. The test runner uses the existing Edition test executables.

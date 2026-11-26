@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../../../Source/Edition/CompletedBufferPolicy.h"
+#undef NDEBUG
 #include <cassert>
 #include <iostream>
 
@@ -19,7 +20,7 @@ struct Probe {
             }, [&] { ++reads; return ready; }, reserve);
     }
 };
-int main() {
+int TestResizeBankRecovery() {
     // Ready batch always uses the normal path, regardless of buffer level.
     for (const auto ready : {int64_t(0), reserve - 1, reserve, reserve + 1}) {
         Probe p; p.pending = false; p.ready = ready;
@@ -59,4 +60,5 @@ int main() {
     }
     assert(r.forced == 1);
     std::cout << "B08 normal-first retirement / ready reserve / delayed drain: PASS\n";
+    return 0;
 }

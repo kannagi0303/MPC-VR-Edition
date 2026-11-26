@@ -1,19 +1,14 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-# AT-06: extract production priming method against portable backend stand-ins.
-from pathlib import Path
-import tempfile, subprocess, os
-from ResizeGeometryAdmission import method
-root=Path(__file__).resolve().parents[3]
-src=(root/'Source/Edition/DX11AdaptiveTone.cpp').read_text()
-completed=(root/'Source/DX11VideoProcessorCompletedFrames.cpp').read_text()
-prime=method(src,'void CDX11VideoProcessor::PrimeAdaptiveToneFrames(')
-code=r'''
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Production method fragments are supplied by the Edition integration runner.
+#undef NDEBUG
 #include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <deque>
 #include <iostream>
 #include "Edition/AdaptiveToneShot.h"
+
+namespace {
 using REFERENCE_TIME=int64_t; using CRefTime=int64_t;
 constexpr int64_t INVALID_TIME=INT64_MIN; constexpr int State_Running=2;
 #define FAILED(x) ((x)<0)
@@ -36,8 +31,10 @@ struct CDX11VideoProcessor {
  void ObserveAdaptiveTone(const Frame::Image&,const CRect&,int64_t pts,bool buffered,bool primed){assert(buffered&&primed);++captures;request=pts;m_adaptiveTone.pending=true;}
  void PrimeAdaptiveToneFrames();
 };
-'''+prime+r'''
-int main(){using P=CDX11VideoProcessor;P p;
+
+#include "AdaptiveTonePriming.generated.inc"
+
+void Exercise(){using P=CDX11VideoProcessor;P p;
  p.m_completedFrames.emplace_back();auto& q=p.m_completedFrames;
  q[0].phase=0;for(int i=1;i<=15;++i){auto f=q[0];f.pts=i*800000;f.phase=mfg::MaxGenerated;q.push_back(f);}q[1].fence=11;q[2].image.desc.Format=28;
  p.PrimeAdaptiveToneFrames();assert(p.captures==0&&p.polls==1); // no crossing unfinished fence
@@ -52,17 +49,6 @@ int main(){using P=CDX11VideoProcessor;P p;
  P z;z.m_adaptiveTone.shot.locked=1;z.m_completedFrames.emplace_back();z.PrimeAdaptiveToneFrames();assert(!z.captures&&!z.polls); // no future AT cut after lock
  std::cout<<"PASS AT-06 production priming: pressure, deadline, reserve, fence, format, source waiter, cadence, locked shot\n";
 }
-'''
-# Static integration contracts (not a GPU test).
-assert 'a.shot.Observe(sample,a.capturePts,a.captureAfterSuspend,a.capturePrimed?pts:INVALID_TIME)' in src
-assert 'a.captureAfterSuspend=a.suspended; a.suspended=false' in src
-assert 'D3D11_MAP_FLAG_DO_NOT_WAIT' in src
-assert 'a.capturePts=INVALID_TIME; a.capturePrimed=false; a.primeTick=0' in src
-assert 'PrimeOptionalColorFrames(); // FA-02' in completed
-assert 'PrimeAdaptiveToneFrames();' in (root/'Source/DX11VideoProcessorSvdLut.cpp').read_text()
-assert 'toneOnSimple && geometryChanging' in completed
-assert 'DrawCompletedVideo(frame, target, picture, geometryChanging, nullptr, at.allowDraw)' in completed
-with tempfile.TemporaryDirectory() as d:
- p=Path(d)/'test.cpp';p.write_text(code);exe=Path(d)/'test'
- subprocess.run([os.environ.get('CXX','g++'),'-std=c++20','-O2','-I',str(root/'Source'),str(p),'-o',str(exe)],check=True)
- subprocess.run([str(exe)],check=True)
+}
+
+void TestAdaptiveToneContinuity() { Exercise(); }

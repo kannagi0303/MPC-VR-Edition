@@ -1,15 +1,6 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-# FA-02 portable test of the actual scheduling method, not D3D runtime.
-from pathlib import Path
-import os, subprocess, tempfile
-root=Path(__file__).resolve().parents[3]
-s=(root/'Source/DX11VideoProcessorSvdLut.cpp').read_text()
-def method(name):
-    start=s.index(name); a=s.index('{',start); n=1; b=a+1
-    while n:
-        n+=(s[b]=='{')-(s[b]=='}'); b+=1
-    return s[start:b]
-code=r'''
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Production method fragments are supplied by the Edition integration runner.
+#undef NDEBUG
 #include <atomic>
 #include <cassert>
 #include <cstdint>
@@ -18,6 +9,8 @@ code=r'''
 #include <string>
 #include <thread>
 #include "Edition/OptionalColorWork.h"
+
+namespace {
 using CRefTime=int64_t;using REFERENCE_TIME=int64_t;
 constexpr int DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709=0;
 #define FAILED(x) ((x)<0)
@@ -43,8 +36,10 @@ struct CDX11VideoProcessor {
  void PrimeSvdLutTemporalFrames(){calls+='V';filter.stream+=veCost;}
  void PrepareOptionalColorBytecode();void PrimeOptionalColorFrames();
 };
-'''+method('void CDX11VideoProcessor::PrepareOptionalColorBytecode(')+'\n'+method('void CDX11VideoProcessor::PrimeOptionalColorFrames(')+r'''
-int main(){using P=CDX11VideoProcessor;using namespace edition::color_work;
+
+#include "OptionalColorMethods.generated.inc"
+
+void Exercise(){using P=CDX11VideoProcessor;using namespace edition::color_work;
  unsigned cases=0;for(int mask=0;mask<4096;++mask){
  P p;p.tone=mask&1;p.filter.m_videoEnhancement=mask&2;p.wb=mask&4;p.m_adaptiveTone.wb.locked=mask&8;p.m_optionalToneTurn=mask&16;
  p.m_fastShutdown=mask&32;p.filter.m_bFlushing=mask&64;p.filter.m_playbackCancel.cancelled=mask&128;p.geometry=mask&256;p.m_completedPresentFairness.active=mask&512;p.filter.m_completedSourceWaiting=mask&1024;
@@ -64,18 +59,6 @@ int main(){using P=CDX11VideoProcessor;using namespace edition::color_work;
  P h;h.m_currentSwapChainColorSpace=1;standalone=grade=0;h.PrepareOptionalColorBytecode();assert(!h.atCompile&&!standalone&&!grade);
  std::cout<<"PASS "<<cases<<" optional-prime combinations, 256 CPU preparation combinations, deadline/fence/cancel/recheck/rotation boundaries\n";
 }
-'''
-# No CPU compiler waits added to the rendering calls, and startup remains in the model worker.
-model=(root/'Source/DLSS/SvdLutModel.inc').read_text()
-assert model.index('Inference model(adapter, directory, trace)')<model.index('if (regularizeB) PrepareVideoEnhancementShaders')
-assert 'CachedGradeBytecode()' in s
-at=(root/'Source/Edition/DX11AdaptiveTone.cpp').read_text()
-assert at.index('job->sampleReady.store')<at.index('job->ready.store')
-assert 'a.job->sampleReady.load(std::memory_order_acquire)' in at
-assert 'CompletedSubmitLead()' not in method('void CDX11VideoProcessor::PrimeOptionalColorFrames(')
-assert 'PrepareOptionalColorBytecode();' in (root/'Source/Edition/DX11VideoPipeline.cpp').read_text()
-assert 'PrimeOptionalColorFrames();' in (root/'Source/DX11VideoProcessorCompletedFrames.cpp').read_text()
-with tempfile.TemporaryDirectory() as d:
-    p=Path(d)/'test.cpp';p.write_text(code);exe=Path(d)/'test'
-    subprocess.run([os.environ.get('CXX','g++'),'-std=c++20','-O2','-I',str(root/'Source'),str(p),'-o',str(exe)],check=True)
-    subprocess.run([str(exe)],check=True)
+}
+
+void TestOptionalColorWork() { Exercise(); }

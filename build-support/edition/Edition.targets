@@ -28,7 +28,7 @@
     <ClCompile Include="Edition\DX11AdaptiveTone.cpp" />
     <ClInclude Include="Edition\AdaptiveToneShot.h" />
     <ClInclude Include="Edition\AdaptiveToneShader.h" />
-    <ClInclude Include="Edition\AdaptiveToneResearch.h" />
+    <ClInclude Include="Edition\AdaptiveToneCurve.h" />
     <ClCompile Include="DLSS\DlssOpticalFlow.cpp" />
     <ClCompile Include="Depth\DepthGpu.cpp" />
     <ClCompile Include="Depth\DecodedFrameLookahead.cpp" />

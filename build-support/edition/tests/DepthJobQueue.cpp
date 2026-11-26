@@ -1,5 +1,6 @@
 // Portable production queue-policy tests. No GPU/driver timing claims.
 #include "../../../Source/Depth/DepthJobQueue.h"
+#undef NDEBUG
 #include <cassert>
 #include <algorithm>
 #include <iostream>
@@ -37,7 +38,7 @@ static unsigned Simulate(unsigned jobUs) {
     }
     return harvested;
 }
-int main() {
+int TestDepthJobQueue() {
     std::mt19937 rng(26);
      {
         Queue q; std::uint64_t serial=0, last=0;
@@ -64,4 +65,5 @@ int main() {
     assert(pipelined>=1290 && pipelined<=1310);
     assert(Simulate(14'000)>=1435);
     std::cout << "PASS: 200000 queue transitions; fixed 46ms simulation " << pipelined/60.0 << " maps/s (not GPU measurement)\n";
+    return 0;
 }

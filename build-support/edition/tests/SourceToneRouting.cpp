@@ -1,15 +1,6 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-# FA-03A: extract actual producer routing, activation, and source draw logic.
-from pathlib import Path
-import os, subprocess, tempfile
-root=Path(__file__).resolve().parents[3]
-s=(root/'Source/Edition/DX11AdaptiveTone.cpp').read_text()
-def method(name):
-    start=s.index(name); a=s.index('{',start); n=1; b=a+1
-    while n:
-        n+=(s[b]=='{')-(s[b]=='}'); b+=1
-    return s[start:b]
-code=r'''
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Production method fragments are supplied by the Edition integration runner.
+#undef NDEBUG
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -19,6 +10,8 @@ code=r'''
 #include <optional>
 #include <memory>
 #include "Edition/AdaptiveToneShot.h"
+
+namespace {
 using REFERENCE_TIME=int64_t;
 constexpr int S_OK=0,S_FALSE=1;
 #define FAILED(x) ((x)<0)
@@ -46,8 +39,10 @@ struct CDX11VideoProcessor {
  float AdaptiveToneWeight(REFERENCE_TIME)const; bool SourceToneEligible()const;
  ID3D11Texture2D* PrepareSourceTone(const Tex2D_t&,const CRect&,REFERENCE_TIME,ID3D11Texture2D* directTarget=nullptr);
 };
-'''+method('float CDX11VideoProcessor::AdaptiveToneWeight(')+'\n'+method('bool CDX11VideoProcessor::SourceToneEligible(')+'\n'+method('ID3D11Texture2D* CDX11VideoProcessor::PrepareSourceTone(')+r'''
-int main(){using P=CDX11VideoProcessor;
+
+#include "SourceToneMethods.generated.inc"
+
+void Exercise(){using P=CDX11VideoProcessor;
  unsigned cases=0;
  for(int mask=0;mask<512;++mask){P p;p.m_completingSample=!(mask&1);if(mask&2)p.m_completedTarget.reset();p.tone=!(mask&4);p.filter.m_videoEnhancement=mask&8;p.m_fastShutdown=mask&16;p.filter.m_bFlushing=mask&32;p.filter.m_playbackCancel.cancelled=mask&64;if(mask&128)p.m_completedLast=P::Frame{false};if(mask&256)p.m_completedFrames.push_back({false});assert(p.SourceToneEligible()==(mask==0));++cases;}
  P mixed;mixed.m_completedFrames.push_back({true});mixed.m_completedBatches.push_back({{true}});mixed.m_completedLast=P::Frame{true};assert(mixed.SourceToneEligible());mixed.m_completedBatches.push_back({{false}});assert(!mixed.SourceToneEligible());
@@ -71,28 +66,6 @@ int main(){using P=CDX11VideoProcessor;
  P unavailable;unavailable.m_adaptiveTone.shot.active=true;unavailable.m_adaptiveTone.shot.locked=unavailable.m_adaptiveTone.shot.activation=0;unavailable.m_adaptiveTone.shader=false;assert(unavailable.PrepareSourceTone(input,area,0)==&raw&&!unavailable.draws&&!unavailable.m_adaptiveTone.sourceOutput.allocations);
  std::cout<<"PASS "<<cases<<" source-route combinations; raw fallback, independent perceptual routes, immediate source/legacy activation, cancellation, shader/texture failure\n";
 }
-'''
-with tempfile.TemporaryDirectory() as d:
- p=Path(d)/'test.cpp';p.write_text(code);e=Path(d)/'test'
- subprocess.run([os.environ.get('CXX','g++'),'-std=c++20','-O2','-I',str(root/'Source'),str(p),'-o',str(e)],check=True)
- subprocess.run([str(e)],check=True)
-# Integration invariants: production code positions, not GPU execution.
-mfg=(root/'Source/DX11VideoProcessorMfg.cpp').read_text()
-queue=mfg[mfg.index('bool CDX11VideoProcessor::QueueMfg('):mfg.index('bool CDX11VideoProcessor::PresentMfg(')]
-assert 'const bool sourceColorFinal = upstreamTone || sourceToneInput != nullptr;' in queue
-assert 'if(!upstreamTone && SourceToneEligible())' in queue
-assert 'if(upstreamTone && depth) depth->captureSource=false;' in queue
-assert queue.index('PrepareSourceTone(*sourceToneInput')<queue.index('m_mfg.CaptureOriginal(image')<queue.index('m_mfg.Generate(m_pDevice, m_pDeviceContext, image')
-assert queue.index('m_depth.Update(m_pDevice,m_pDeviceContext,sourceToneInput->pShaderResource')<queue.index('image=corrected;')
-assert 'depth->captureSource=false;' in queue
-assert queue.index('if(colorRouteChanged) m_mfg.ResetHistory()')<queue.index('const bool checkFrames')
-assert queue.index('if (phases.empty()) return false;')<queue.index('m_completedTarget->sourceColorFinal=sourceColorFinal;')
-completed=(root/'Source/DX11VideoProcessorCompletedFrames.cpp').read_text()
-assert 'target.sourceColorFinal = batch.target.sourceColorFinal;' in completed
-assert 'if (!m_completedFrames.empty() && !m_completedFrames.front().sourceColorFinal)' in completed
-back=completed[completed.index('HRESULT CDX11VideoProcessor::DrawCompletedBackBuffer('):completed.index('HRESULT CDX11VideoProcessor::PresentCompletedVideo(')]
-assert back.index('if(frame.sourceColorFinal)')<back.index('PollAdaptiveTone(frame.pts)')<back.index('DrawCompletedSvdLut(frame, target')
-assert 'if(frame.sourceColorFinal || frame.pts<head.pts' in s
-raw=(root/'Source/Edition/SvdLutRawMode.inc').read_text();assert 'if (frame.sourceColorFinal) break;' in raw and 'if (future.sourceColorFinal) break;' in raw
-pipeline=(root/'Source/Edition/DX11VideoPipeline.cpp').read_text();assert pipeline.index('PrepareSourceTone(target.image')<pipeline.index('QueueCompletedFrame(std::move(*m_completedTarget))')
-print('PASS source-only draw / generated inheritance / failed queue fallback / raw depth / post-route exclusion (static)')
+}
+
+void TestSourceToneRouting() { Exercise(); }

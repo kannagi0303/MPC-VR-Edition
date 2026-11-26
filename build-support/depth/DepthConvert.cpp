@@ -32,6 +32,7 @@
 namespace fs = std::filesystem;
 #ifdef DEPTH_ONNX_MAINTENANCE
 using Microsoft::WRL::ComPtr;
+void AdaptDepthOnnx(const fs::path& input, const fs::path& output);
 #endif
 
 void Check(HRESULT hr, const char* stage)
@@ -651,6 +652,7 @@ int wmain(int argc, wchar_t** argv)
         std::cout << "Usage: depth-convert.exe --from-safetensors MODEL.safetensors CONFIG.json OUTPUT.dmlgraph OUTPUT.dmlweights\n"
 #ifdef DEPTH_ONNX_MAINTENANCE
                      "       depth-convert.exe INPUT.onnx OUTPUT.dmlpack (maintenance build)\n"
+                     "       depth-convert.exe --adapt-onnx SOURCE.onnx ADAPTED.onnx (maintenance build)\n"
                      "       depth-convert.exe --validate-split INPUT.onnx INPUT.dmlgraph INPUT.dmlweights (maintenance build)\n"
 #endif
                      "       depth-convert.exe --make-recipe MODEL.safetensors CONFIG.json VERIFIED.dmlpack OUTPUT.recipe\n"
@@ -660,6 +662,25 @@ int wmain(int argc, wchar_t** argv)
         return 0;
     }
 #ifdef DEPTH_ONNX_MAINTENANCE
+    if (argc == 4 && std::wstring_view(argv[1]) == L"--adapt-onnx") {
+        fs::path staging;
+        try {
+            const auto input = fs::absolute(argv[2]);
+            const auto output = fs::absolute(argv[3]);
+            if (_wcsicmp(input.extension().c_str(), L".onnx") || _wcsicmp(output.extension().c_str(), L".onnx") ||
+                fs::exists(output)) throw std::runtime_error("Expected source and new adapted .onnx files");
+            staging = output.wstring() + L".partial-" + UniqueSuffix();
+            AdaptDepthOnnx(input, staging);
+            CheckWin(MoveFileExW(staging.c_str(), output.c_str(), MOVEFILE_WRITE_THROUGH) != 0, "Publish adapted ONNX");
+            std::cout << "Adapted focal-free W4 ONNX for DirectML.\n";
+            return 0;
+        } catch (const std::exception& error) {
+            std::error_code ec;
+            if (!staging.empty()) fs::remove(staging, ec);
+            std::cerr << "ONNX adaptation failed: " << error.what() << '\n';
+            return 1;
+        }
+    }
     const bool validateSplit = argc == 5 && std::wstring_view(argv[1]) == L"--validate-split";
     if (argc != 3 && !validateSplit) {
         std::cerr << "Run depth-convert.exe --help for usage.\n";

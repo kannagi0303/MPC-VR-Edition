@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Exercise the actual converter diagnostic with a serialized graph fixture.
 #include "../../depth/DmlGraphDiagnostics.h"
+#undef NDEBUG
 #include <cassert>
 #include <iostream>
 #include <vector>
@@ -61,7 +62,7 @@ void Expect(const std::vector<uint8_t>& bytes, const std::string& needle) {
     std::cout << result << '\n';
     assert(result.find(needle) != std::string::npos);
 }
-int main() {
+int TestDmlGraphDiagnostics() {
     auto bytes = Fixture();
     auto typedNull = Fixture(Attribute::TypedNull);
     std::cout << "Typed-null ScaleBias: " << Valid(typedNull) << std::endl;
@@ -110,4 +111,5 @@ int main() {
     flatbuffers::WriteScalar<flatbuffers::uoffset_t>(b.data(), 0);
     Expect(b, "root: invalid FlatBuffers root offset");
     std::cout << "DML graph diagnostic fixtures PASS\n";
+    return 0;
 }

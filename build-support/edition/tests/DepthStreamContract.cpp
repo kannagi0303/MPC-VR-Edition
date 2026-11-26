@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../../../Source/Depth/DepthStreamContract.h"
+#undef NDEBUG
 #include <cassert>
 #include <iostream>
 #include <random>
-int main() {
+int TestDepthStreamContract() {
     using namespace depthstream;
     assert(Present("past_filled") == "present_filled");
     assert(Present("past_keys_5") == "present_keys_5");
@@ -44,4 +45,5 @@ int main() {
         assert(physical[cycle.input] == reference);
     }
     std::cout << "100000 bank transitions, " << resets << " resets; timeline boundary and state names PASS\n";
+    return 0;
 }

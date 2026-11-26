@@ -270,7 +270,33 @@ void TestRenderPreparation() {
     std::cout << "PASS: 12 actual Render preparation cases, including early S_OK, resize/target failure, projection fallback and completed-frame PTS.\n";
 }
 
+int TestSplitPack();
+int TestDepthJobQueue();
+int TestDepthStreamContract();
+int TestDmlGraphDiagnostics();
+int TestResizeBankRecovery();
+int TestSvdLutReferenceInput();
+int TestSvdLutAdaptiveLuma();
+int TestSvdLutReferenceShaders();
+int TestVideoEnhancementStartup();
+int TestAdaptiveToneShot();
+void TestCompletedBufferCalculation();
+void TestDxgiStatisticsAudit();
+void TestOptionalColorWork();
+void TestPresentationProducerFairness();
+void TestResizeGeometryAdmission();
+void TestSourceToneRouting();
+void TestDepthPlaybackStatistics();
+void TestDepthPreviewAndConsume();
+void TestPerceptualLifecycle();
+void TestEnhancementMasterAndLayout();
+void TestSourceToneBeforeSR();
+void TestAdaptiveToneContinuity();
+void TestAdaptiveToneComposition();
+void TestDepthRawPipeline();
+
 int main() {
+    std::cout << std::unitbuf;
     try {
         unsigned combinations = 0;
         for (unsigned mask = 0; mask < 256; ++mask) {
@@ -322,6 +348,24 @@ int main() {
         std::cout << "PASS: " << combinations << " actual processing-source routing and SR/MFG transition cases.\n";
         TestRenderPreparation();
         TestSuperResolutionPolicy();
+        for (auto test : {TestSplitPack, TestDepthJobQueue, TestDepthStreamContract, TestDmlGraphDiagnostics, TestResizeBankRecovery,
+            TestSvdLutReferenceInput, TestSvdLutAdaptiveLuma, TestSvdLutReferenceShaders, TestVideoEnhancementStartup, TestAdaptiveToneShot}) {
+            if (test() != 0) throw std::runtime_error("Native regression test failed");
+        }
+        TestCompletedBufferCalculation();
+        TestDxgiStatisticsAudit();
+        TestOptionalColorWork();
+        TestPresentationProducerFairness();
+        TestResizeGeometryAdmission();
+        TestSourceToneRouting();
+        TestDepthPlaybackStatistics();
+        TestDepthPreviewAndConsume();
+        TestPerceptualLifecycle();
+        TestEnhancementMasterAndLayout();
+        TestSourceToneBeforeSR();
+        TestAdaptiveToneContinuity();
+        TestAdaptiveToneComposition();
+        TestDepthRawPipeline();
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';

@@ -2,12 +2,13 @@
 // Portable production-reader regression: no D3D, PyTorch or Windows required.
 #include "../../../Source/Edition/SvdLutInput.h"
 #include "../../../Source/Edition/SvdLutB2Refined.h"
+#undef NDEBUG
 #include <cassert>
 #include <iostream>
 #include <limits>
 #include <vector>
 
-int main()
+int TestSvdLutReferenceInput()
 {
     namespace in = svdlut::input;
     constexpr size_t pitch = in::MinPitch + 36;
@@ -41,4 +42,5 @@ int main()
     assert(in::ReadPlanar(data,pitch,image));
     assert(image[0]==0 && image[in::Size*in::Size]==1 && image[2*in::Size*in::Size]==0);
     std::cout << "PASS: 196608 planar values + 1536 B2 sample values, padded/unaligned rows, invalid inputs\n";
+    return 0;
 }

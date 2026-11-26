@@ -52,6 +52,7 @@
   <ItemGroup>
     <ClCompile Include="DepthConvert.cpp" />
     <ClCompile Include="SafetensorsDepth.cpp" />
+    <ClCompile Include="DepthOnnxAdapter.cpp" Condition="'$(DepthOnnxMaintenance)'=='true'" />
     <ClCompile Include="..\..\Source\Depth\DepthNative.cpp" Condition="'$(DepthOnnxMaintenance)'=='true'" />
     <ClInclude Include="ConverterResources.h" />
     <ResourceCompile Include="DepthConvert.rc" />

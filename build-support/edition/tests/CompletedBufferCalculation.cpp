@@ -1,33 +1,6 @@
-#!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-3.0-or-later
-# [MFG-B10 | 2026-11-24 23:56 +08:00] Test the extracted production methods.
-from pathlib import Path
-import argparse
-import subprocess
-import tempfile
-import os
-
-ROOT = Path(__file__).resolve().parents[3]
-
-def extract(s, name):
-    start = s.index(name)
-    pos = s.index('{', start)
-    level = 1
-    end = pos + 1
-    while level:
-        level += (s[end] == '{') - (s[end] == '}')
-        end += 1
-    return s[start:end]
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--cxx', default=os.environ.get('CXX', 'g++'))
-    parser.add_argument('--sanitize', action='store_true')
-    args = parser.parse_args()
-    method = extract((ROOT/'Source/DX11VideoProcessorCompletedFrames.cpp').read_text(),
-                     'CDX11VideoProcessor::CompletedBufferTime CDX11VideoProcessor::GetCompletedBufferTime(')
-    percent = extract((ROOT/'Source/Edition/StatisticsFormat.h').read_text(), 'inline unsigned BufferPercent(')
-    code = r'''
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Production method fragments are supplied by the Edition integration runner.
+#undef NDEBUG
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -36,6 +9,9 @@ def main():
 #include <optional>
 #include <random>
 #include "Edition/CompletedBufferAudit.h"
+#include "Edition/StatisticsFormat.h"
+
+namespace {
 using REFERENCE_TIME = int64_t;
 struct Frame { int64_t due; uint64_t fence; };
 struct Fence { uint64_t value=UINT64_MAX-1; uint64_t GetCompletedValue() const {return value;} };
@@ -51,9 +27,11 @@ struct CDX11VideoProcessor {
     Fence* m_completedFence=&fence;
     CompletedBufferTime GetCompletedBufferTime(REFERENCE_TIME stream) const;
 };
-''' + method + '\nnamespace edition {\n' + percent + '\n}\n' + r'''
+
+#include "CompletedBufferMethod.generated.inc"
+
 using Cutoff=edition::CompletedBufferAudit::Cutoff;
-int main() {
+void Exercise() {
     constexpr int64_t target=20000000, dt=166667;
     using edition::BufferPercent;
     assert(BufferPercent(199999,target)==0 && BufferPercent(200000,target)==1);
@@ -132,12 +110,6 @@ int main() {
     }
     std::cout << "PASS: 100000 independent audit comparisons, exact 0% counterexample, fence/percent boundaries\n";
 }
-'''
-    with tempfile.TemporaryDirectory() as tmp:
-        src=Path(tmp)/'test.cpp'; exe=Path(tmp)/'test'
-        src.write_text(code)
-        cmd=[args.cxx,'-std=c++20','-Wall','-Wextra','-Werror','-O2','-I',str(ROOT/'Source'),str(src),'-o',str(exe)]
-        if args.sanitize: cmd[1:1]=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-fno-pie','-no-pie']
-        subprocess.run(cmd,check=True)
-        subprocess.run([str(exe)],check=True)
-if __name__=='__main__': main()
+}
+
+void TestCompletedBufferCalculation() { Exercise(); }

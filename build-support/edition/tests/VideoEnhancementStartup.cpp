@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../../../Source/Edition/VideoEnhancementStartup.h"
+#undef NDEBUG
 #include <cassert>
 #include <iostream>
 using edition::ve::MayStart;
-int main() {
+int TestVideoEnhancementStartup() {
     // No startup GPU work while flushing, NGX preparing, or geometry settling.
     for (int flag = 0; flag < 3; ++flag)
         assert(!MayStart(flag==0,flag==1,flag==2,true,true,true,true,20000000,120));
@@ -18,4 +19,5 @@ int main() {
     assert(MayStart(false,false,false,false,false,true,false,0,0));
     // EXP-FADE-0 removes the activation ramp, not the cold admission gate.
     std::cout << "VE cold admission PASS\n";
+    return 0;
 }

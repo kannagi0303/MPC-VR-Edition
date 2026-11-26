@@ -94,6 +94,80 @@ if ($prepareStart -lt 0 -or $prepareEnd -le $prepareStart -or
 }
 [IO.File]::WriteAllText((Join-Path $generatedDirectory 'EditionRenderPreparation.generated.inc'),
     $pipelineSource.Substring($prepareStart, $prepareEnd - $prepareStart), [Text.UTF8Encoding]::new($false))
+
+# Compile the renderer's policy methods against small backend stand-ins.
+# Markers identify source boundaries; the C++ fixtures assert behavior.
+function Read-Production([string]$Path) {
+    return [IO.File]::ReadAllText((Join-Path $projectRoot $Path)).Replace("`r`n","`n")
+}
+function Fragment([string]$Source, [string]$Start, [string]$End) {
+    $first = $Source.IndexOf($Start,[StringComparison]::Ordinal)
+    $last = if ($first -ge 0) { $Source.IndexOf($End,$first + $Start.Length,[StringComparison]::Ordinal) } else { -1 }
+    if ($last -lt 0) { throw "Missing C++ fragment: $Start" }
+    return $Source.Substring($first,$last - $first)
+}
+function Method([string]$Source, [string]$Name) {
+    return (Fragment $Source $Name "`n}") + "`n}`n"
+}
+function Fixture([string]$Name, [string]$Source) {
+    [IO.File]::WriteAllText((Join-Path $generatedDirectory "$Name.generated.inc"),$Source,[Text.UTF8Encoding]::new($false))
+}
+$frames = Read-Production 'Source/DX11VideoProcessorCompletedFrames.cpp'
+$next = Method $frames 'bool CDX11VideoProcessor::NextCompletedFrame('
+$present = Method $frames 'bool CDX11VideoProcessor::PresentCompletedFrame('
+Fixture CompletedBufferMethod (Method $frames 'CDX11VideoProcessor::CompletedBufferTime CDX11VideoProcessor::GetCompletedBufferTime(')
+Fixture FairProducerMethods ((Method $frames 'bool CDX11VideoProcessor::CompletedFairProducerCanvas(') +
+    (Method $frames 'bool CDX11VideoProcessor::TryServiceCompletedProducer('))
+Fixture FairAdmission (Fragment (Method $frames 'const char* CDX11VideoProcessor::CompletedAdmissionBlock(') '    if (hasCompletedFrame) {' '    if (completed == UINT64_MAX)')
+Fixture FairPermit (Fragment $present '    if (!TryCompletedPresentPermit()) {' '    const auto completed = m_completedFence->GetCompletedValue();')
+Fixture FairHandoff (Fragment $next '    const auto sourceTurn =' '    // Complete a deferred window resize')
+Fixture FairPresent (Method $present '    if (hr == S_OK && CompletedFairProducerCanvas()) {')
+Fixture ResizeAdmissionMethods ((Method $frames 'bool CDX11VideoProcessor::CompletedGeometryChanging(') +
+    (Method $frames 'const char* CDX11VideoProcessor::CompletedOverlapBlock('))
+Fixture ResizeCommit (Fragment $next 'constexpr ULONGLONG resizeSettleMs = 140;' '// Early B-only')
+Fixture DxgiClassification (Fragment (Read-Production 'Source/Edition/DX11Statistics.cpp') 'const auto previousCount = m_mfgDxgiLastPresentCount;' 'm_mfgRateTick=rateTick;')
+$depthHeader = Read-Production 'Source/Depth/Depth.h'
+$depth = Read-Production 'Source/Depth/Depth.cpp'
+Fixture DepthCounterMethods ((Fragment $depthHeader '    struct Counters {' '    static constexpr float OutputDepthSpan') +
+    (Fragment $depthHeader '    void RecordSrEvaluation(' '    bool CoolingDown('))
+Fixture DepthPublicationRate (Fragment $depth '    // Wall-clock rate of valid maps' "`n}`n`nCDepth::Estimate CDepth::ForFrame")
+Fixture DepthConsumerGate (Fragment (Method $depth 'bool CDepth::DrawEstimate(') '    PollCompleted();' '    D3D11_TEXTURE2D_DESC desc{};')
+$raw = Read-Production 'Source/Depth/DepthGpuShaders.h'
+$draw = Read-Production 'Source/Depth/DepthDrawShader.h'
+Fixture DepthRawScalars ((Method $raw 'bool FiniteDepth(') + ((Fragment $raw 'float2 RawEmpty()' "[numthreads(256, 1, 1)]`nvoid RawRangeTiles").Replace('0.0','0.0f')))
+$normalize = [regex]::Match((Method $raw 'void RawNormalize('), 'Depth\[pixel\] = ([^;]+);')
+$expand = [regex]::Match((Method $draw 'float RawExpand('), 'return (0\.5 \+ \(depth - 0\.5\)[^;]+);')
+if (!$normalize.Success -or !$expand.Success) { throw 'Missing RAW shader expressions' }
+Fixture DepthRawNormalize ($normalize.Groups[1].Value -replace '(?<![\w.])(0\.56|0\.12|0\.5)(?![\w.])','${1}f')
+Fixture DepthRawExpand ($expand.Groups[1].Value -replace '(?<![\w.])(0\.12|0\.5)(?![\w.])','${1}f')
+$tone = Read-Production 'Source/Edition/DX11AdaptiveTone.cpp'
+Fixture AdaptiveTonePriming (Method $tone 'void CDX11VideoProcessor::PrimeAdaptiveToneFrames(')
+Fixture SourceToneMethods ((Method $tone 'float CDX11VideoProcessor::AdaptiveToneWeight(') +
+    (Method $tone 'bool CDX11VideoProcessor::SourceToneEligible(') +
+    (Method $tone 'ID3D11Texture2D* CDX11VideoProcessor::PrepareSourceTone('))
+Fixture DepthSourceToneSr (Method (Read-Production 'Source/Edition/DX11SuperResolution.cpp') 'Tex2D_t* CDX11VideoProcessor::EvaluateDlssSR(')
+$color = Read-Production 'Source/DX11VideoProcessorSvdLut.cpp'
+Fixture OptionalColorMethods ((Method $color 'void CDX11VideoProcessor::PrepareOptionalColorBytecode(') +
+    (Method $color 'void CDX11VideoProcessor::PrimeOptionalColorFrames('))
+Fixture PerceptualMethods ((Method $color 'bool CDX11VideoProcessor::PerceptualEnabled(') +
+    (Method $color 'HRESULT CDX11VideoProcessor::DrawCompletedSvdLut(') + (Method $color 'void CDX11VideoProcessor::DrawSvdLut('))
+$perceptualShader = Read-Production 'Source/DLSS/PerceptualColorShader.h'
+$toneShader = Read-Production 'Source/Edition/AdaptiveToneShader.h'
+$grade = Method $perceptualShader 'float4 SvdLutGradeMain('
+$activation = Fragment $grade '    float activation = saturate(DepthTuning.w);' "#endif`n    if (Enhancements.x"
+$tail = $grade.Substring($grade.IndexOf('    float3 toned =',[StringComparison]::Ordinal))
+Fixture AdaptiveToneComposition ((Method $perceptualShader 'float Smooth(') +
+    (Method $perceptualShader 'float3 Enhance(') + (Method $toneShader 'float3 ApplyAdaptiveTone(') +
+    "`nfloat4 Compose(float3 original,float3 grade,float depthWeight,float farWeight) { struct {float a=1;} src;`n" +
+    $activation + $tail)
+$control = Read-Production 'Source/Edition/RendererControls.cpp'
+$endHandler = "`nreturn {};`n}`n"
+Fixture EnhancementControlMethods ((Method $control 'void CMpcVideoRenderer::ApplyEnhancementStrengths()') +
+    (Fragment $control 'std::optional<HRESULT> CMpcVideoRenderer::SetEditionInt(' '    // One atomic MFG setting') + $endHandler +
+    (Fragment $control 'std::optional<HRESULT> CMpcVideoRenderer::GetEditionInt(' '    // Independent settings channel') + $endHandler +
+    (Fragment $control 'std::optional<HRESULT> CMpcVideoRenderer::SetEditionBool(' '    if (!strcmp(field,"adaptiveTone"))') + $endHandler +
+    (Fragment $control 'std::optional<HRESULT> CMpcVideoRenderer::GetEditionBool(' '    if (!strcmp(field, "adaptiveTone"))') + $endHandler)
+
 & $MSBuildPath (Join-Path $PSScriptRoot 'ProcessingSourceIntegration.vcxproj') @buildArguments
 if ($LASTEXITCODE -ne 0) { throw 'Processing-source test build failed.' }
 & (Join-Path $projectRoot '_bin\edition-tests\ProcessingSourceIntegration.exe')

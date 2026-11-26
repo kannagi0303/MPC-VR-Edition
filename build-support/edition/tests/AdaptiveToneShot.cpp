@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../../../Source/Edition/AdaptiveToneShot.h"
+#undef NDEBUG
 #include <cassert>
 #include <iostream>
 #include <random>
-#include <iomanip>
-#include <cstring>
-#ifdef _WIN32
-#include <io.h>
-#include <fcntl.h>
-#endif
+
+
 using namespace edition::adaptive_tone;
 using Image=std::array<float,SampleWidth*SampleHeight*4>;
 Image TestImage(float gain=1,float offset=0,bool cut=false) {
@@ -18,19 +15,7 @@ Image TestImage(float gain=1,float offset=0,bool cut=false) {
         a[4*(SampleWidth*y+x)+3]=1;
     }return a;
 }
-int main(int argc,char** argv) {
-    if(argc>1 && std::strcmp(argv[1],"binary")==0) {
-#ifdef _WIN32
-        _setmode(_fileno(stdin),_O_BINARY);
-#endif
-        Shot s;Image a;int64_t pts;
-        while(std::cin.read(reinterpret_cast<char*>(&pts),sizeof pts)) {
-            if(!std::cin.read(reinterpret_cast<char*>(a.data()),sizeof a))return 1;
-            s.Observe(ReadObservation(a.data(),SampleWidth*4),pts);
-            std::cout<<s.locked<<' '<<s.count<<' '<<s.active<<' '<<std::setprecision(8)<<s.Fade(pts);for(auto v:s.curve)std::cout<<' '<<v;std::cout<<'\n';
-        }return 0;
-    }
-    if(argc>1) {Shot s;Image a;int64_t pts;while(std::cin>>pts){for(auto& v:a)if(!(std::cin>>v))return 1;s.Observe(ReadObservation(a.data(),SampleWidth*4),pts);std::cout<<s.locked<<' '<<s.count<<' '<<s.active<<' '<<std::setprecision(8)<<s.Fade(pts);for(auto v:s.curve)std::cout<<' '<<v;std::cout<<'\n';}return 0;}
+int TestAdaptiveToneShot() {
     Shot s;auto a=TestImage();auto o=ReadObservation(a.data(),SampleWidth*4);
     for(int i=0;i<10;++i)s.Observe(o,i*800000); assert(s.locked==7200000 && s.active); assert(s.Fade(s.locked-1)==0 && s.Fade(s.locked)==1 && s.Fade(s.locked+1)==1 && s.Fade(s.locked+2500000)==1);
     const auto anchor=s.curve;auto previous=s.last;s.Observe(o,s.last);assert(s.last==previous);
@@ -67,9 +52,22 @@ int main(int argc,char** argv) {
         assert(q.Fade(pts)==(mask==15?1.f:0.f));
     }
     std::cout<<"PASS AT-06 pressure gap, genuine cut, seek/reset, unfinished gap, future activation boundary\n";
-    // Random observations, monotonicity and finite gamut after every accepted anchor.
+    // Random observations and finite, monotone luma after every accepted anchor.
     std::mt19937 rng(19);std::uniform_real_distribution<float> u(0,1);
-    for(int i=0;i<1000;++i){s.Reset();const float lo=.15f+.25f*u(rng),span=.2f+.35f*u(rng);for(unsigned k=0;k<SampleWidth*SampleHeight;++k)for(unsigned c=0;c<3;++c)a[k*4+c]=Unit(lo+span*u(rng));o=ReadObservation(a.data(),SampleWidth*4);for(int k=0;k<10;++k)s.Observe(o,k*800000);assert(s.locked>=0);for(size_t j=1;j<=N;++j)assert(s.curve[j]>=s.curve[j-1]-1e-6);for(int k=0;k<100;++k){std::array<float,3> rgb{u(rng),u(rng),u(rng)};auto v=Apply(s.curve,rgb);for(float x:v)assert(std::isfinite(x)&&x>=0&&x<=1);}}
+    for (int i = 0; i < 1000; ++i) {
+        s.Reset();
+        const float lo = .15f + .25f * u(rng), span = .2f + .35f * u(rng);
+        for (unsigned k = 0; k < SampleWidth * SampleHeight; ++k)
+            for (unsigned c = 0; c < 3; ++c) a[k * 4 + c] = Unit(lo + span * u(rng));
+        o = ReadObservation(a.data(), SampleWidth * 4);
+        for (int k = 0; k < 10; ++k) s.Observe(o, k * 800000);
+        assert(s.locked >= 0);
+        for (size_t j = 1; j <= N; ++j) assert(s.curve[j] >= s.curve[j - 1] - 1e-6f);
+        for (int k = 0; k < 100; ++k) {
+            const float y = Map(s.curve, u(rng));
+            assert(std::isfinite(y) && y >= 0 && y <= 1);
+        }
+    }
     // [AT-05] Pointwise median and all intermediate fade weights retain slope bounds.
     s.Reset();
     for(int i=0;i<10;++i){auto f=TestImage(1.f+.002f*i,.001f*i);s.Observe(ReadObservation(f.data(),SampleWidth*4),i*800000);}
@@ -77,5 +75,6 @@ int main(int argc,char** argv) {
     for(int k=0;k<=20;++k){float w=k/20.f;for(size_t j=1;j<=N;++j){float d=(1-w)+w*(s.curve[j]-s.curve[j-1])*N;assert(d>=.6499f && d<=1.6001f);}}
     for(int i=0;i<10000;++i){Histogram h{};int lo=int(u(rng)*180),hi=lo+1+int(u(rng)*(255-lo));for(int j=lo;j<=hi;++j)h[j]=1+int(u(rng)*1000);auto r=Analyze(h);const auto q=MidtoneCurve(GuardedToneProposal(r),r.median);assert(q.front()==0&&q.back()==1);for(size_t j=1;j<=N;++j){float d=(q[j]-q[j-1])*N;assert(d>=.6499f && d<=1.6001f);}}
     std::cout<<"PASS AT-05 production slope bounds, 10000 histograms, varied anchor, fade\n";
-    std::cout<<"PASS AT-03 stable anchor, immediate activation, cut, duplicate, gap, reset; 1000 anchors, 100000 RGB probes\n";
+    std::cout<<"PASS AT-03 stable anchor, immediate activation, cut, duplicate, gap, reset; 1000 anchors, 100000 luma probes\n";
+    return 0;
 }

@@ -1,7 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Run in a VS Developer Command Prompt, Windows SDK installed:
-// cl /nologo /EHsc /std:c++20 SvdLutReferenceShaders.cpp d3dcompiler.lib
-// SvdLutReferenceShaders.exe
 #include <d3dcompiler.h>
 #include <d3d11shader.h>
 #include <wrl/client.h>
@@ -44,7 +41,7 @@ bool Compile(const char* name, const char* source, const D3D_SHADER_MACRO* defin
     std::cout << "PASS " << name << '\n';
     return true;
 }
-int main()
+int TestSvdLutReferenceShaders()
 {
     const D3D_SHADER_MACRO m1[] = {{"SVDLUT_M1_SKIN_GUARD","1"},{nullptr,nullptr}};
     const D3D_SHADER_MACRO r1[] = {{"SVDLUT_R1_CONTINUOUS","1"},{nullptr,nullptr}};

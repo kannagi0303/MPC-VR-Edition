@@ -1,23 +1,14 @@
-#!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-3.0-or-later
-# [MFG-B10 | 2026-11-24 23:56 +08:00] Extract actual DXGI classification.
-from pathlib import Path
-import argparse, os, subprocess, tempfile
-ROOT = Path(__file__).resolve().parents[3]
-
-def main():
-    parser=argparse.ArgumentParser(); parser.add_argument('--cxx',default=os.environ.get('CXX','g++')); args=parser.parse_args()
-    s=(ROOT/'Source/Edition/DX11Statistics.cpp').read_text()
-    begin=s.index('const auto previousCount = m_mfgDxgiLastPresentCount;')
-    end=s.index('m_mfgRateTick=rateTick;',begin)
-    block=s[begin:end]
-    code=r'''
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Production method fragments are supplied by the Edition integration runner.
+#undef NDEBUG
 #include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
 #include <iostream>
 #include <random>
+
+namespace {
 using HRESULT=int32_t;
 constexpr HRESULT DXGI_ERROR_FRAME_STATISTICS_DISJOINT=-1, E_FAIL=-2, S_OK=0;
 #define SUCCEEDED(x) ((x)>=0)
@@ -32,10 +23,12 @@ struct State {
     int64_t m_mfgRateTick=0;
     void Observe(bool supported,HRESULT statsHr,DXGI_FRAME_STATISTICS dxgi,double seconds) {
         const int64_t rateTick=1000;
-''' + block + r'''
+
+#include "DxgiClassification.generated.inc"
+
     }
 };
-int main(){
+void Exercise(){
     State s;
     s.Observe(true,S_OK,{100},1); assert(!s.m_mfgDxgiAvailable && !std::wcscmp(s.m_mfgDxgiStatus,L"baseline"));
     s.Observe(true,S_OK,{160},1); assert(s.m_mfgDxgiAvailable && s.m_mfgDxgiDisplayFps==60);
@@ -63,9 +56,6 @@ int main(){
     }
     std::cout<<"PASS: DXGI status branches and 100000 B09-rate equivalence cases\n";
 }
-'''
-    with tempfile.TemporaryDirectory() as tmp:
-        src=Path(tmp)/'test.cpp';exe=Path(tmp)/'test';src.write_text(code)
-        subprocess.run([args.cxx,'-std=c++20','-Wall','-Wextra','-Werror','-O2',str(src),'-o',str(exe)],check=True)
-        subprocess.run([str(exe)],check=True)
-if __name__=='__main__':main()
+}
+
+void TestDxgiStatisticsAudit() { Exercise(); }

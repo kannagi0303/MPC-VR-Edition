@@ -1,38 +1,6 @@
-#!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-3.0-or-later
-# [MFG-B11 | 2026-11-25 09:55 +08:00] Compile production fairness hooks
-# against portable backend stand-ins. No driver latency claim.
-from pathlib import Path
-import argparse
-import os
-import subprocess
-import tempfile
-from ResizeGeometryAdmission import method
-
-ROOT = Path(__file__).resolve().parents[3]
-SOURCE = ROOT / 'Source/DX11VideoProcessorCompletedFrames.cpp'
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--cxx', default=os.environ.get('CXX', 'g++'))
-    parser.add_argument('--sanitize', action='store_true')
-    args = parser.parse_args()
-    src = SOURCE.read_text(encoding='utf-8')
-    canvas = method(src, 'bool CDX11VideoProcessor::CompletedFairProducerCanvas(')
-    service = method(src, 'bool CDX11VideoProcessor::TryServiceCompletedProducer(')
-    admission = method(src, 'const char* CDX11VideoProcessor::CompletedAdmissionBlock(')
-    head = admission[admission.index('    if (hasCompletedFrame) {'):admission.index('    if (completed == UINT64_MAX)')]
-    present = method(src, 'bool CDX11VideoProcessor::PresentCompletedFrame(')
-    permit = present[present.index('    if (!TryCompletedPresentPermit()) {'):present.index('    const auto completed = m_completedFence->GetCompletedValue();')]
-    tail = present[present.index('    if (hr == S_OK && CompletedFairProducerCanvas()) {'):]
-    next_frame = method(src, 'bool CDX11VideoProcessor::NextCompletedFrame(')
-    handoff = next_frame[next_frame.index('    const auto sourceTurn ='):next_frame.index('    // Complete a deferred window resize')]
-    target = method(src, 'HRESULT CDX11VideoProcessor::PrepareCompletedTarget(')
-    clear = method(src, 'void CDX11VideoProcessor::ClearCompletedFrames(')
-    assert target.index('m_completedTarget.emplace') < target.index('m_completedPresentFairness.ConsumeAdmission()')
-    assert 'm_completedPresentFairness.Reset();' in clear
-    assert 'PrepareCompletedBatch(stream, true)' not in service
-    code = r'''
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Production method fragments are supplied by the Edition integration runner.
+#undef NDEBUG
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -44,6 +12,8 @@ def main():
 #include <vector>
 #include <cstring>
 #include "Edition/CompletedBufferPolicy.h"
+
+namespace {
 using REFERENCE_TIME=int64_t;
 using CRefTime=int64_t;
 using UINT=unsigned;
@@ -109,24 +79,34 @@ struct CDX11VideoProcessor {
     bool Handoff(int64_t& deadline);
     bool After(int hr,int64_t started,int64_t finished);
 };
-''' + canvas + '\n' + service + r'''
+
+#include "FairProducerMethods.generated.inc"
+
 const char* CDX11VideoProcessor::Head(REFERENCE_TIME due,REFERENCE_TIME stream,uint64_t completed,std::optional<uint64_t>& deferredFrameFence) {
     const bool hasCompletedFrame=!m_completedFrames.empty();
     const auto margin=35000;
-''' + head + r'''
+
+#include "FairAdmission.generated.inc"
+
     return nullptr; // only extracted head gate; all downstream gates tested separately in B09
 }
 bool CDX11VideoProcessor::Permit(REFERENCE_TIME remaining) {
-''' + permit + r'''
+
+#include "FairPermit.generated.inc"
+
     return true;
 }
 bool CDX11VideoProcessor::Handoff(int64_t& deadline) {
-''' + handoff + r'''
+
+#include "FairHandoff.generated.inc"
+
     return false;
 }
 bool CDX11VideoProcessor::After(int hr,int64_t started,int64_t finished) {
-''' + tail + r'''
-int main(){
+
+#include "FairPresent.generated.inc"
+
+void Exercise(){
     constexpr int64_t slowTicks=160000,fastTicks=3000;
     CDX11VideoProcessor p;
     std::optional<uint64_t> deferred;
@@ -209,13 +189,6 @@ int main(){
     assert(old==0&&low>=80);
     std::cout<<"production fairness hooks PASS; 13 guard cases; synthetic 240 slow presents: old empty, candidate low="<<low<<" (assumed ready batches)\n";
 }
-'''
-    with tempfile.TemporaryDirectory() as tmp:
-        cpp = Path(tmp)/'test.cpp'; exe=Path(tmp)/('test.exe' if os.name=='nt' else 'test')
-        cpp.write_text(code)
-        flags=['-std=c++20','-O2','-Wall','-Wextra','-I',str(ROOT/'Source')]
-        if args.sanitize: flags+=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g']
-        subprocess.run([args.cxx,*flags,str(cpp),'-o',str(exe)],check=True)
-        subprocess.run([str(exe)],check=True)
+}
 
-if __name__=='__main__': main()
+void TestPresentationProducerFairness() { Exercise(); }

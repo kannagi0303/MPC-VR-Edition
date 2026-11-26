@@ -1,28 +1,13 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-# [FA-01 | 2026-11-25 14:07 +08:00] Extract actual fused scalar shader math.
-# Portable C++ surrogate for HLSL arithmetic, not a Windows shader/GPU test.
-from pathlib import Path
-import subprocess, tempfile, os
-root=Path(__file__).resolve().parents[3]
-s=(root/'Source/DLSS/PerceptualColorShader.h').read_text()
-a=(root/'Source/Edition/AdaptiveToneShader.h').read_text()
-def function(text,name):
-    begin=text.index(name); start=text.index('{',begin); n=1; end=start+1
-    while n:
-        n+=(text[end]=='{')-(text[end]=='}');end+=1
-    return text[begin:end]
-assert s.index('ApplyB22Chroma(original, grade)') < s.index('float3 toned = ApplyAdaptiveTone(grade') < s.index('float3 enhanced = Enhance(original, toned')
-main=function(s,'float4 SvdLutGradeMain(')
-tail=main[main.index('    float3 toned ='):]
-fade=main[main.index('    float activation = saturate(DepthTuning.w);'):main.index('#endif\n    if (Enhancements.x') ]
-assert 'lerp(toneOnly, enhanced' not in main
-code=r'''
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Execute production scalar HLSL in a CPU fixture for numerical regression checks.
+#undef NDEBUG
 #include <algorithm>
 #include <array>
 #include <cassert>
 #include <cmath>
 #include <iostream>
 #include <random>
+namespace {
 using uint=unsigned;
 struct float3 { float r,g,b; float3(float a=0):r(a),g(a),b(a){} float3(float x,float y,float z):r(x),g(y),b(z){} };
 struct float4 {float x,y,z,w; float4(float a=0,float b=0,float c=0,float d=0):x(a),y(b),z(c),w(d){} float4(float3 a,float d):x(a.r),y(a.g),z(a.b),w(d){} };
@@ -43,13 +28,12 @@ const float3 YW(.2126,.7152,.0722);
 float4 Enhancements(1,1,1,1), OutputQuantization, DepthTuning;
 std::array<float,257> curve;
 float ATValue(uint i){return curve[i];}
-'''
-code+=function(s,'float Smooth(')+'\n'+function(s,'float3 Enhance(')+'\n'+function(a,'float3 ApplyAdaptiveTone(')+'\n'
-code+='float4 Compose(float3 original,float3 grade,float depthWeight,float farWeight){ struct {float a=1;} src;\n'+fade+tail+'\n'
-code+=r'''
+
+#include "AdaptiveToneComposition.generated.inc"
+
 float err(float3 a,float3 b){return length(a-b);}
 float3 rgb(float4 a){return {a.x,a.y,a.z};}
-int main(){
+void Exercise(){
     for(uint i=0;i<=256;++i){float x=i/256.f;curve[i]=x+.10f*4*x*(1-x);}
     std::mt19937 r(523);std::uniform_real_distribution<float> u(0,1);
     unsigned changed=0;
@@ -101,8 +85,6 @@ int main(){
     std::cout<<"PASS 100000 independent strength/bypass probes and skin/foliage examples\n";
     assert(changed>0); std::cout<<"PASS 100000 extracted composition probes: full-strength parity, zero LUT standalone, intermediate LUT-only fade; non-identity perceptual "<<changed<<'\n';
 }
-'''
-with tempfile.TemporaryDirectory() as d:
-    p=Path(d);(p/'test.cpp').write_text(code)
-    subprocess.run([os.environ.get('CXX','g++'),'-std=c++20','-O2',str(p/'test.cpp'),'-o',str(p/'test')],check=True)
-    subprocess.run([str(p/'test')],check=True)
+}
+
+void TestAdaptiveToneComposition() { Exercise(); }

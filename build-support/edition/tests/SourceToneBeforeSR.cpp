@@ -1,16 +1,12 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-# Extract the actual FA-03B evaluation entry; only GPU collaborators are stubs.
-from pathlib import Path
-import os, subprocess, tempfile
-root=Path(__file__).resolve().parents[3]
-s=(root/'Source/Edition/DX11SuperResolution.cpp').read_text()
-start=s.index('Tex2D_t* CDX11VideoProcessor::EvaluateDlssSR(')
-end=s.index('Tex2D_t* CDX11VideoProcessor::TryDlssSR(',start)
-code=r'''
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Production method fragments are supplied by the Edition integration runner.
+#undef NDEBUG
 #include <cassert>
 #include <cstdint>
 #include <iostream>
 #include <optional>
+
+namespace {
 using REFERENCE_TIME=int64_t;
 constexpr int DXGI_FORMAT_R16G16B16A16_FLOAT=10;
 #define FAILED(x) ((x)<0)
@@ -31,8 +27,10 @@ struct CDX11VideoProcessor{
  bool BlendSourceDepthOverlay(ID3D11Texture2D*,ID3D11ShaderResourceView*,CRect,REFERENCE_TIME){return overlayEnabled;}
  Tex2D_t* EvaluateDlssSR(const Tex2D_t&,Tex2D_t&,const CRect&,REFERENCE_TIME,float,bool*,bool);
 };
-'''+s[start:end]+r'''
-int main(){ID3D11Texture2D raw{1},dst{2};ID3D11ShaderResourceView rawView{1};Tex2D_t in,out;in.pTexture.p=&raw;in.pShaderResource.p=&rawView;out.pTexture.p=&dst;
+
+#include "DepthSourceToneSr.generated.inc"
+
+void Exercise(){ID3D11Texture2D raw{1},dst{2};ID3D11ShaderResourceView rawView{1};Tex2D_t in,out;in.pTexture.p=&raw;in.pShaderResource.p=&rawView;out.pTexture.p=&dst;
  CRect rect{0,0,1920,1080};unsigned cases=0;
  for(unsigned mask=0;mask<2048;++mask){CDX11VideoProcessor p;
   p.m_dlssSRAfterMfg=mask&1;p.eligible=!(mask&2);p.overlayEnabled=mask&4;p.srDepth=mask&8;p.mfgDepth=mask&16;
@@ -54,18 +52,6 @@ int main(){ID3D11Texture2D raw{1},dst{2};ID3D11ShaderResourceView rawView{1};Tex
  p.eligible=true;p.drawOK=false;p.copyOK=false;assert(!p.EvaluateDlssSR(in,out,rect,300,40,&overlay,false));assert(!p.m_adaptiveTone.sourceToneBeforeUpscale);
  std::cout<<"PASS "<<cases<<" actual EvaluateDlssSR routing combinations + route transitions; fused native draw replaces copy, raw depth, failure fallback, no generated grading\n";
 }
-'''
-with tempfile.TemporaryDirectory() as d:
- p=Path(d)/'test.cpp';p.write_text(code);e=Path(d)/'test'
- subprocess.run([os.environ.get('CXX','g++'),'-std=c++20','-O2',str(p),'-o',str(e)],check=True)
- subprocess.run([str(e)],check=True)
-# Static integration: not a driver/GPU test.
-pipeline=(root/'Source/Edition/DX11VideoPipeline.cpp').read_text()
-assert pipeline.index('m_adaptiveTone.sourceToneBeforeUpscale=false;')<pipeline.index('const auto result = Process(')
-assert pipeline.index('if (m_adaptiveTone.sourceToneBeforeUpscale)')<pipeline.index('QueueCompletedFrame(std::move(*m_completedTarget))')
-mfg=(root/'Source/DX11VideoProcessorMfg.cpp').read_text()
-assert 'if(!upstreamTone && SourceToneEligible())' in mfg
-assert 'm_mfgLastToneBeforeUpscale != upstreamTone' in mfg
-assert 'if(upstreamTone && depth) depth->captureSource=false;' in mfg
-assert 'm_completedTarget->sourceColorFinal=sourceColorFinal;' in mfg
-print('PASS static producer/queue/presenter handoff guards')
+}
+
+void TestSourceToneBeforeSR() { Exercise(); }

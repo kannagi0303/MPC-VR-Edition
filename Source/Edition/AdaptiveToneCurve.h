@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
-// [AT-01 | 2026-11-25 11:05 +08:00] Offline research candidate, NOT connected to playback.
-// Full-range SDR Rec.709 code luma. No dependency on SVDLUT or renderer state.
+// Full-range SDR Rec.709 curve proposal for AdaptiveToneShot.
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -48,25 +47,4 @@ inline Result Analyze(const Histogram& h) {
     r.curve.front()=0; r.curve.back()=1; return r;
 }
 inline float Map(const Curve& c,float y) {const float p=Unit(y)*N; const auto i=(std::min)(size_t(p),N-1); return c[i]+(p-i)*(c[i+1]-c[i]);}
-// Filter the correction curve, NOT source brightness. Caller must supply verified
-// shot boundaries, flash/fade decisions and timeline discontinuities.
-struct Temporal {
-    Curve curve=Identity(); bool valid=false;
-    void Reset(){curve=Identity();valid=false;}
-    Curve Update(const Curve& target,float dt,bool cut,bool transient) {
-        if(cut || !std::isfinite(dt) || dt<0 || dt>1) Reset();
-        if(transient) { Reset(); return Identity(); }
-        if(!valid) {curve=target;valid=true;return curve;}
-        const float a=1-std::exp(-dt/.30f);
-        for(size_t i=0;i<=N;++i) curve[i]+=a*(target[i]-curve[i]);
-        return curve;
-    }
-};
-// Source-relative chroma ray; preserve requested code-luma without RGB clipping.
-inline std::array<float,3> Apply(const Curve& c,std::array<float,3> rgb) {
-    const float y=.2126f*rgb[0]+.7152f*rgb[1]+.0722f*rgb[2], z=Map(c,y);
-    float scale=1; for(float v:rgb){const float delta=v-y; if(delta>0) scale=(std::min)(scale,(1-z)/delta); else if(delta<0) scale=(std::min)(scale,-z/delta);}
-    for(auto& v:rgb) v=Unit(z+scale*(v-y));
-    return rgb;
-}
 }
