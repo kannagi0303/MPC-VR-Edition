@@ -1,5 +1,13 @@
 # 目前進度與接手
 
+## 2026-11-26 Depth Pro 2-S Safetensors 原生資源準備
+
+- 一般 build-x64.cmd 依序使用有效 split pair、舊驗證 native pack、固定 checkpoint Safetensors。最後一條在 Windows CPU 上直接由同一 DepthConvert 專案生成 dmlgraph／dmlweights。只有本機資源不足時才查驗既有 Hub 快取或下載。一般轉換器依賴 Windows 系統元件，沒有 Python、PyTorch、uv、Git、ORT 或 app-local DirectML。Renderer 的 DirectML 和播放設定維持原狀。
+- DepthPro2S-352x192.recipe 是可再生的固定 graph、6 項外部輔助常數和 201 項映射，另有 graph 內的 42 個短常數（90 B）。映射由 C++ 在原始權重上試算既有佈局、FP16 後提升 FP32、轉置、拼接與融合，再對驗證參照搜尋逐位元相同張量。位置編碼取自既有匯出，checkpoint 沒有 RoPE 參數。輸出每個 tensor 和完整 serial pack 都對固定 SHA-256；recipe 未包含轉換後的學習權重。
+- 固定參照 native pack SHA-256 7CA82ABAD9419E065B00828D473EBFB2326C0D1F33D6B73107C00440FF1F19E0。用鎖定的上游環境從 checkpoint 重匯出，經既有 adapter、ORT 1.24.4 / DirectML 1.15.4、新版 C++ generator 再生成後，recipe SHA-256 為 6281379D6D648F50E087290D525F22DF7C6DB4D1CC4331C8405A2ED9ED05D54A，與工作樹相同。回復舊轉換功能時在同專案改用 DepthOnnxMaintenance=true，操作載於 build-support/depth/README.md。改版本需重新走維護流程與既有數值驗證。
+- 真實 Windows 驗證：空模型快取能下載官方 config／97,264,508-byte Safetensors 並完成 x64 建置。獨立原始碼副本從無編譯產物完成建置，增量使用 pair，vendor 沒有 ORT。EXE 單獨複製後以僅系統目錄的 PATH 轉換約 1.67 s；完整拆分資料對新重匯出 pack 逐位元相等。錯誤 config 和既有輸出檔衝突拒絕後，原輸出 SHA-256 相同。
+- 最終獨立 EXE 產出的 pair 由 Renderer 的 DepthNative 載入，跑 10 幀 W4（第 0、8 幀重置），與 ONNX 相比每幀最大絕對差皆為 0。封包 1,000 案例、時序 100,000 次與 FlatBuffers 破損測試通過。MPC-BE 一般實播尚未執行，未 commit、push 或發布。驗證紀錄在 _bin/depth-regen-audit 及 _bin/depth-native-warm-final.log。
+
 ## 2026-11-26 Edition 0.3.0 研究資源與初始設定
 
 - 使用者同意同一個 x64 Release ZIP 隨附可選研究模型，版本指定 0.3.0。新版通知隨附 Apple 完整條款、指定署名、checkpoint、ONNX／DirectML 適配說明和兩個衍生檔名。模型、權重與 ZIP 是建置產物；來源提交保留授權文字，排除 notes。

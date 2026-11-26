@@ -40,8 +40,8 @@ inline Entries Open(View graph, View pool = {}) {
 struct Parts { Entries graph, weights; };
 inline Parts Partition(const Entries& source) {
     Parts parts;
-    // The pinned ORT exporter stores the fixed image-shape split masks as
-    // external constants. Keep those with the graph and its inline constants.
+    // The pinned ORT exporter stores the two halves of the fixed rotary
+    // position table externally. Keep them with the graph and its constants.
     for (const auto& [name, bytes] : source) {
         const bool graphConstant = name == GraphFile || name == "split_split_0.bin" || name == "split_split_1.bin";
         (graphConstant ? parts.graph : parts.weights).emplace(name, bytes);

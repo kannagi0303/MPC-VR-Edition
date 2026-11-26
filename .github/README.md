@@ -114,7 +114,7 @@ The **VR Projection** group appears when the renderer finds an `.ini` profile in
 
 ## Build from source
 
-Run **build-x64.cmd** to build incrementally and prepare the depth resources. It stages the renderer and the optional research resources in **dist/**. Keep the Apple agreement and research notice with the model files when packaging them.
+Run **build-x64.cmd** to build incrementally and prepare the depth resources. When the model pair is missing, the native converter reads the pinned Safetensors checkpoint and prepares the pair on the CPU. The build stages the renderer and the optional research resources in **dist/**. Keep the Apple agreement and research notice with the model files when packaging them.
 
 ## References
 

@@ -4,6 +4,6 @@ This source tree includes the SVDLUT FiveK sRGB color graph and its license. The
 
 The renderer looks for a matching **dp2-s-w4-352x192-fp16.dmlgraph** and **depthpro2-s-fp16.dmlweights** directly in **edition/**. The Release ZIP can include this pair as optional research resources. Depth is disabled by default. SR and MFG use neutral depth when estimation is disabled or the pair is unavailable.
 
-Run **build-x64.cmd** for a permitted local research build. The repository provides the converter source and resource preparation scripts. Their outputs and legal requirements are described in the [converter guide](../build-support/depth/README.md).
+Run **build-x64.cmd** for a permitted local research build. It reuses a verified resource pair or converts the pinned Safetensors checkpoint on the CPU. For standalone conversion and recipe regeneration, see the [converter guide](../build-support/depth/README.md).
 
 [Apple Machine Learning Research Model License Agreement](../licenses/LICENSE-Apple-DepthPro2.txt)

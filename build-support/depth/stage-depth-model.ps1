@@ -12,8 +12,6 @@ if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { throw 'LOCALAPPDATA is re
 $work = Join-Path $env:LOCALAPPDATA 'MPC-VR-Edition\DepthPro2Research'
 $pair = Join-Path $work 'split-352x192'
 $pack = Join-Path $work "$depthStem.dmlpack"
-$onnx = Join-Path $work "$depthStem.onnx"
-$source = Join-Path $work "$depthStem.source.onnx"
 $null = New-Item -ItemType Directory -Path $work -Force
 $lock = [IO.File]::Open((Join-Path $work 'prepare-352x192.lock'), 'OpenOrCreate', 'Write', 'None')
 
@@ -30,19 +28,10 @@ try {
         return
     }
     $validPack = Test-ValidatedDepthPack $pack
-    if (!$validPack -and !(Test-DepthAdaptedOnnx $onnx) -and !(Test-DepthSourceOnnx $source)) {
-        & (Join-Path $PSScriptRoot 'export-depthpro2.ps1') -WorkDirectory $work
-    }
     if ($EnsureConverter) { & $EnsureConverter }
     if (!$Converter -or !(Test-Path -LiteralPath $Converter -PathType Leaf)) {
         throw 'Building the depth resource requires the native converter.'
     }
-    if (!$validPack) {
-        & (Join-Path $PSScriptRoot 'convert-depthpro2.ps1') -Converter $Converter -WorkDirectory $work
-        if (!(Test-ValidatedDepthPack $pack)) { throw 'Native conversion did not produce a verified depth pack.' }
-    }
-
-
     $candidate = $pair + '.stage-' + [Guid]::NewGuid().ToString('N')
     $previous = $pair + '.previous-' + [Guid]::NewGuid().ToString('N')
     foreach ($path in @($pair,$candidate,$previous)) {
@@ -55,23 +44,28 @@ try {
     try {
         $graph = Join-Path $candidate $depthGraphName
         $weights = Join-Path $candidate $depthWeightName
-        foreach ($folder in @($PreviousEdition,(Join-Path $PreviousEdition 'DepthModels'))) {
-            $oldGraph = Join-Path $folder $depthGraphName
-            $oldWeights = Join-Path $folder $depthWeightName
-            if (!(Test-Path -LiteralPath $oldGraph -PathType Leaf) -or !(Test-Path -LiteralPath $oldWeights -PathType Leaf)) { continue }
-            & $Converter --verify-pair $pack $oldGraph $oldWeights
-            if ($LASTEXITCODE -ne 0) { continue }
-            Copy-Item -LiteralPath $oldGraph -Destination $graph
-            Copy-Item -LiteralPath $oldWeights -Destination $weights
-            break
-        }
-        if (!(Test-Path -LiteralPath $graph -PathType Leaf)) {
-            & $Converter --split $pack $graph $weights
-            if ($LASTEXITCODE -ne 0) { throw 'Native depth resource split failed.' }
+        if ($validPack) {
+            foreach ($folder in @($PreviousEdition,(Join-Path $PreviousEdition 'DepthModels'))) {
+                $oldGraph = Join-Path $folder $depthGraphName
+                $oldWeights = Join-Path $folder $depthWeightName
+                if (!(Test-Path -LiteralPath $oldGraph -PathType Leaf) -or !(Test-Path -LiteralPath $oldWeights -PathType Leaf)) { continue }
+                & $Converter --verify-pair $pack $oldGraph $oldWeights
+                if ($LASTEXITCODE -ne 0) { continue }
+                Copy-Item -LiteralPath $oldGraph -Destination $graph
+                Copy-Item -LiteralPath $oldWeights -Destination $weights
+                break
+            }
+            if (!(Test-Path -LiteralPath $graph -PathType Leaf)) {
+                & $Converter --split $pack $graph $weights
+                if ($LASTEXITCODE -ne 0) { throw 'Native depth resource split failed.' }
+            }
+        } else {
+            $checkpoint = Get-PinnedDepthCheckpoint $work
+            & $Converter --from-safetensors ($checkpoint['model.safetensors']) ($checkpoint['config.json']) $graph $weights
+            if ($LASTEXITCODE -ne 0) { throw 'Safetensors depth conversion failed.' }
         }
         @{
             format=1
-            pack=(Get-DepthSha256Hex $pack)
             graph=(Get-DepthSha256Hex $graph)
             weights=(Get-DepthSha256Hex $weights)
         } | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $candidate 'split-352x192.json') -Encoding ASCII

@@ -10,4 +10,5 @@
 *.dmlpack binary
 *.dmlgraph binary
 *.dmlweights binary
+build-support/depth/DepthPro2S-352x192.recipe binary
 licenses/LICENSE-Apple-DepthPro2.txt text eol=lf

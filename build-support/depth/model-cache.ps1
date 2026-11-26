@@ -27,6 +27,48 @@ $depthStem = 'dp2-s-w4-352x192-fp16'
 $depthGraphName = "$depthStem.dmlgraph"
 $depthWeightName = 'depthpro2-s-fp16.dmlweights'
 
+# Use the public revision already used to validate the embedded C++ recipe.
+function Get-PinnedDepthCheckpoint([string]$WorkDirectory) {
+    $ProgressPreference = 'SilentlyContinue'
+    $revision = '903a1c1ade918831d138adcc4aedbcc8f4da0078'
+    $resources = [ordered]@{
+        'config.json' = '42E0A8202B5260A1ACBF4E8924745EDF96FEB0EBFF75455C1E291E10505E8C04'
+        'model.safetensors' = '583C4D630779FD231F969C738733624963AD34BD3C29F9C64088257E3436F97C'
+    }
+    $hubCache = if ($env:HF_HUB_CACHE) { $env:HF_HUB_CACHE }
+        elseif ($env:HF_HOME) { Join-Path $env:HF_HOME 'hub' }
+        else { Join-Path $env:USERPROFILE '.cache\huggingface\hub' }
+    $snapshot = Join-Path $hubCache "models--apple--DepthPro2-S\snapshots\$revision"
+    $uris = "https://huggingface.co/apple/DepthPro2-S/resolve/$revision"
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $result = @{}
+    foreach ($file in $resources.Keys) {
+        $destination = Join-Path $WorkDirectory ("DepthPro2-S-" + $file)
+        $cached = Join-Path $snapshot $file
+        $expected = $resources[$file]
+        if ((Test-Path -LiteralPath $destination -PathType Leaf) -and (Get-DepthSha256Hex $destination) -eq $expected) {
+            $result[$file] = $destination
+            continue
+        }
+        if ((Test-Path -LiteralPath $cached -PathType Leaf) -and (Get-DepthSha256Hex $cached) -eq $expected) {
+            $result[$file] = $cached
+            continue
+        }
+        $temp = $destination + '.partial-' + [guid]::NewGuid().ToString('N')
+        try {
+            Write-Host "[INFO] Downloading pinned Depth Pro 2-S $file."
+            Invoke-WebRequest -Uri "$uris/$file" -UseBasicParsing -TimeoutSec 300 -OutFile $temp
+            if ((Get-DepthSha256Hex $temp) -ne $expected) { throw "Depth checkpoint SHA-256 mismatch: $file" }
+            if (Test-Path -LiteralPath $destination -PathType Leaf) { [IO.File]::Replace($temp,$destination,[NullString]::Value) }
+            else { [IO.File]::Move($temp,$destination) }
+        } finally {
+            if (Test-Path -LiteralPath $temp -PathType Leaf) { Remove-Item -LiteralPath $temp -Force }
+        }
+        $result[$file] = $destination
+    }
+    return $result
+}
+
 function Test-DepthSourceOnnx([string]$Source) {
     if (!(Test-Path -LiteralPath $Source -PathType Leaf)) { return $false }
     try {

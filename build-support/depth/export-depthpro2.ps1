@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Build-only resource acquisition. Called by package-release.ps1; no manual step.
+# Maintenance-only export for regenerating the fixed DirectML recipe.
 # The unmodified upstream exporter and its dependencies live outside Edition.
 [CmdletBinding()]
 param([Parameter(Mandatory=$true)][string]$WorkDirectory)

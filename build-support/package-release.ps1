@@ -181,6 +181,7 @@ try {
       'The pinned exporter produces a 352x192 W4 ONNX using its mixed FP16 policy.',
       'Edition binds the focal-length input, applies a DirectML Reshape compatibility fix,',
       'and converts the adapted graph to a DirectML graph and a separate weight file.',
+      'The CPU converter reconstructs learned weights from the original Safetensors using the validated graph recipe.',
       'Keep this notice and the full Apple agreement with the model files.') |
         Set-Content -LiteralPath (Join-Path $stage 'RESEARCH-ONLY.txt') -Encoding ASCII
 

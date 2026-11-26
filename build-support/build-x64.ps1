@@ -39,7 +39,7 @@ try {
 
     $step.Restart()
     $ensureConverter = {
-        & $prepareDirectML -VisualStudioRoot $vs -WithConverter
+        & $prepareDirectML -WithConverter
         Invoke-BuildTarget 'DepthConvert' 'depth-converter.log'
     }
     & (Join-Path $support 'depth\stage-depth-model.ps1') -Converter $converter -EnsureConverter $ensureConverter -Edition $stage -PreviousEdition (Join-Path $root 'dist\edition')

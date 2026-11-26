@@ -28,27 +28,35 @@
     <TargetExt>.exe</TargetExt>
     <OutDir>$(SolutionDir)_bin\depth-converter\</OutDir>
     <OutDir Condition="'$(Configuration)'=='Debug'">$(SolutionDir)_bin\depth-converter-debug\</OutDir>
+    <OutDir Condition="'$(DepthOnnxMaintenance)'=='true'">$(SolutionDir)_bin\depth-converter-maintenance\</OutDir>
+    <IntDir Condition="'$(DepthOnnxMaintenance)'=='true'">$(SolutionDir)_obj\DepthConvertMaintenance\$(Platform)\$(Configuration)\</IntDir>
+    <DepthRecipeDefine Condition="Exists('$(MSBuildProjectDirectory)\DepthPro2S-352x192.recipe')">DEPTH_HAS_RECIPE;</DepthRecipeDefine>
+    <DepthMaintenanceDefine Condition="'$(DepthOnnxMaintenance)'=='true'">DEPTH_ONNX_MAINTENANCE;</DepthMaintenanceDefine>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)vendor\directml\include;$(SolutionDir)vendor\directml\flatbuffers\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions Condition="'$(DepthOnnxMaintenance)'=='true'">DEPTH_ONNX_MAINTENANCE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <ResourceCompile>
-      <AdditionalIncludeDirectories>$(SolutionDir)vendor\directml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory);$(SolutionDir)vendor\directml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(DepthRecipeDefine)$(DepthMaintenanceDefine)%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <AdditionalDependencies>d3d12.lib;dxgi.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ole32.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(DepthOnnxMaintenance)'=='true'">d3d12.lib;dxgi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="DepthConvert.cpp" />
-    <ClCompile Include="..\..\Source\Depth\DepthNative.cpp" />
+    <ClCompile Include="SafetensorsDepth.cpp" />
+    <ClCompile Include="..\..\Source\Depth\DepthNative.cpp" Condition="'$(DepthOnnxMaintenance)'=='true'" />
     <ClInclude Include="ConverterResources.h" />
     <ResourceCompile Include="DepthConvert.rc" />
   </ItemGroup>
-  <Target Name="CopyDepthConverterRuntime" AfterTargets="Build">
+  <Target Name="CopyDepthConverterRuntime" AfterTargets="Build" Condition="'$(DepthOnnxMaintenance)'=='true'">
     <Copy SourceFiles="$(SolutionDir)vendor\directml\DirectML.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

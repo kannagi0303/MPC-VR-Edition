@@ -1,6 +1,6 @@
-# Pinned DirectML runtime and offline ONNX converter build dependencies.
+# Pinned DirectML runtime and converter build dependencies.
 [CmdletBinding()]
-param([string]$VisualStudioRoot, [switch]$WithConverter)
+param([string]$VisualStudioRoot, [switch]$WithConverter, [switch]$WithOnnxMaintenance)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -97,6 +97,29 @@ Download 'https://raw.githubusercontent.com/nlohmann/json/v3.12.0/single_include
     'aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63'
 Download 'https://raw.githubusercontent.com/nlohmann/json/v3.12.0/LICENSE.MIT' (Join-Path $runtime 'LICENSE-nlohmann-json.txt') `
     '46a65cffd1ea955132d95a8dd921640714a8d6b537d2e4e482d31145ae95b603'
+
+. (Join-Path $PSScriptRoot 'license-notices.ps1')
+if (!$WithOnnxMaintenance) {
+    $nativeLicense = Join-Path $include 'ConverterNativeLicenses.md'
+    $notices = [ordered]@{
+        'Apple Depth Pro 2-S research model recipe' = (Join-Path $root 'licenses\LICENSE-Apple-DepthPro2.txt')
+        'DxDispatch graph format' = (Join-Path $root 'Source\Depth\DirectMLGraph\LICENSE-DxDispatch.txt')
+        'ONNX Runtime graph format' = (Join-Path $root 'Source\Depth\DirectMLGraph\LICENSE-ONNXRuntime.txt')
+        'FlatBuffers' = (Join-Path $runtime 'LICENSE-FlatBuffers.txt')
+        'JSON for Modern C++' = (Join-Path $runtime 'LICENSE-nlohmann-json.txt')
+    }
+    Write-LicenseDocument -Destination $nativeLicense `
+        -ProjectLicense (Join-Path $root '.github\LICENSE.md') -Notices $notices
+    $nativeHeader = Join-Path $include 'ConverterNativePaths.h'
+    $nativeDefinition = '#define DEPTH_CONVERTER_LICENSES_PATH "{0}" // {1}' -f $nativeLicense.Replace('\','\\'), (Sha256 $nativeLicense)
+    if (!(Test-Path -LiteralPath $nativeHeader -PathType Leaf) -or
+        ((Get-Content -LiteralPath $nativeHeader -Raw).Trim() -cne $nativeDefinition)) {
+        Set-Content -LiteralPath $nativeHeader -Value $nativeDefinition -Encoding ASCII
+    }
+    Write-Host '[OK] Prepared the CPU-only Safetensors converter dependencies.'
+    return
+}
+
 Download "$nuget/microsoft.ml.onnxruntime.directml/1.24.4/$ortName" $ortPackage `
     '57e9f11b73437bef7a309496135d4c1f96b1a8e9ddba60013fa27bfc1d788681'
 
@@ -132,8 +155,8 @@ if (-not $crt) {
     throw "Cannot find the x64 VC++ redistributable DLLs under $redist. Restore the Visual Studio C++ redistributable component."
 }
 
-. (Join-Path $PSScriptRoot 'license-notices.ps1')
 $converterNotices = [ordered]@{
+    'Apple Depth Pro 2-S research model recipe' = (Join-Path $root 'licenses\LICENSE-Apple-DepthPro2.txt')
     'Microsoft ONNX Runtime DirectML package' = (Join-Path $runtime 'LICENSE-ONNXRuntime.txt')
     'Microsoft ONNX Runtime third-party notices' = (Join-Path $runtime 'THIRD-PARTY-ONNXRuntime.txt')
     'Microsoft DirectML runtime (required alongside the converter)' = (Join-Path $runtime 'LICENSE-DirectML.txt')

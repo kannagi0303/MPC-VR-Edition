@@ -4,6 +4,7 @@
 #endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#ifdef DEPTH_ONNX_MAINTENANCE
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 #include <dml_provider_factory.h>
@@ -11,12 +12,14 @@
 #include <json.hpp>
 
 #include "../../Source/Depth/DirectMLGraph/DmlGraphDesc_generated.h"
-#include "../../Source/Depth/DepthPack.h"
-#include "../../Source/Depth/DepthSplitPack.h"
 #include "../../Source/Depth/DepthNative.h"
 #include "../../Source/Depth/DepthStreamContract.h"
-#include "ConverterResources.h"
 #include "DmlGraphDiagnostics.h"
+#endif
+#include "../../Source/Depth/DepthPack.h"
+#include "../../Source/Depth/DepthSplitPack.h"
+#include "ConverterResources.h"
+#include "SafetensorsDepth.h"
 
 #include <objbase.h>
 #include <cmath>
@@ -27,7 +30,9 @@
 #include <system_error>
 
 namespace fs = std::filesystem;
+#ifdef DEPTH_ONNX_MAINTENANCE
 using Microsoft::WRL::ComPtr;
+#endif
 
 void Check(HRESULT hr, const char* stage)
 {
@@ -38,6 +43,7 @@ void Check(HRESULT hr, const char* stage)
     }
 }
 
+#ifdef DEPTH_ONNX_MAINTENANCE
 void CheckWin(bool success, const char* stage)
 {
     if (!success) throw std::system_error(GetLastError(), std::system_category(), stage);
@@ -373,7 +379,8 @@ std::vector<float> ExportGraph(const fs::path& model, const fs::path& runtime, c
     return ValidateStream(api, session.value);
 }
 
-void ValidateNative(const fs::path& model, const fs::path& directml, std::span<const float> reference)
+void ValidateNative(const fs::path& model, const fs::path& directml, std::span<const float> reference,
+    const fs::path& splitWeights = {})
 {
     const auto device = OpenDevice();
     constexpr auto uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
@@ -396,14 +403,16 @@ void ValidateNative(const fs::path& model, const fs::path& directml, std::span<c
             IID_PPV_ARGS(result.GetAddressOf())), "Create native test buffer");
         return result;
     };
-    const auto pack = DepthPack::ReadFile(model);
+    const auto pack = DepthPack::ReadFile(model, DepthPack::Limit + depthsplit::PrefixSize);
+    const auto weights = splitWeights.empty() ? DepthPack::Bytes{} :
+        DepthPack::ReadFile(splitWeights, DepthPack::Limit + depthsplit::PrefixSize);
     const auto Pixels = DepthPack::Pixels;
     const auto inBytes = 3 * Pixels * sizeof(float), outBytes = Pixels * sizeof(float);
     const auto upload = makeBuffer(inBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
     const auto input = makeBuffer(inBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
     const auto output = makeBuffer(outBytes, D3D12_HEAP_TYPE_DEFAULT, uav);
     const auto readback = makeBuffer(outBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
-    const DepthNative native(device.Get(), queue.Get(), input.Get(), output.Get(), pack, directml);
+    const DepthNative native(device.Get(), queue.Get(), input.Get(), output.Get(), pack, directml, weights);
 
     constexpr unsigned frames = StreamFrames;
     if (reference.size() != size_t(frames) * Pixels) throw std::runtime_error("Native stream reference length mismatch");
@@ -541,6 +550,8 @@ void WritePack(const fs::path& graphDirectory, const fs::path& destination,
     }
 }
 
+#endif
+
 void VerifyPair(const fs::path& source, const fs::path& graph, const fs::path& weights)
 {
     const auto packedBytes = DepthPack::ReadFile(source);
@@ -599,6 +610,18 @@ void SplitPack(wchar_t** argv)
 
 int wmain(int argc, wchar_t** argv)
 {
+    if (argc == 6 && (std::wstring_view(argv[1]) == L"--from-safetensors" ||
+                      std::wstring_view(argv[1]) == L"--make-recipe")) {
+        try {
+            if (std::wstring_view(argv[1]) == L"--from-safetensors")
+                depthrecipe::Convert(argv[2], argv[3], argv[4], argv[5]);
+            else depthrecipe::Generate(argv[2], argv[3], argv[4], argv[5]);
+            return 0;
+        } catch (const std::exception& error) {
+            std::cerr << "Safetensors conversion failed: " << error.what() << '\n';
+            return 1;
+        }
+    }
     if (argc == 5 && (std::wstring_view(argv[1]) == L"--split" ||
                       std::wstring_view(argv[1]) == L"--verify-pair")) {
         try {
@@ -625,22 +648,31 @@ int wmain(int argc, wchar_t** argv)
         return std::cout ? 0 : 1;
     }
     if (argc == 2 && std::wstring_view(argv[1]) == L"--help") {
-        std::cout << "Usage: depth-convert.exe INPUT.onnx OUTPUT.dmlpack\n"
+        std::cout << "Usage: depth-convert.exe --from-safetensors MODEL.safetensors CONFIG.json OUTPUT.dmlgraph OUTPUT.dmlweights\n"
+#ifdef DEPTH_ONNX_MAINTENANCE
+                     "       depth-convert.exe INPUT.onnx OUTPUT.dmlpack (maintenance build)\n"
+                     "       depth-convert.exe --validate-split INPUT.onnx INPUT.dmlgraph INPUT.dmlweights (maintenance build)\n"
+#endif
+                     "       depth-convert.exe --make-recipe MODEL.safetensors CONFIG.json VERIFIED.dmlpack OUTPUT.recipe\n"
                      "       depth-convert.exe --split INPUT.dmlpack OUTPUT.dmlgraph OUTPUT.dmlweights\n"
                      "       depth-convert.exe --verify-pair INPUT.dmlpack INPUT.dmlgraph INPUT.dmlweights\n"
                      "       depth-convert.exe --licenses\n";
         return 0;
     }
-    if (argc != 3) {
-        std::cerr << "Usage: depth-convert.exe INPUT.onnx OUTPUT.dmlpack\n";
+#ifdef DEPTH_ONNX_MAINTENANCE
+    const bool validateSplit = argc == 5 && std::wstring_view(argv[1]) == L"--validate-split";
+    if (argc != 3 && !validateSplit) {
+        std::cerr << "Run depth-convert.exe --help for usage.\n";
         return 2;
     }
     try {
-        const auto input = fs::absolute(argv[1]);
-        const auto output = fs::absolute(argv[2]);
+        const auto input = fs::absolute(argv[validateSplit ? 2 : 1]);
+        const auto output = fs::absolute(argv[validateSplit ? 3 : 2]);
+        const auto weights = validateSplit ? fs::absolute(argv[4]) : fs::path{};
         if (_wcsicmp(input.extension().c_str(), L".onnx") != 0 ||
-            _wcsicmp(output.extension().c_str(), L".dmlpack") != 0)
-            throw std::runtime_error("Expected .onnx input and .dmlpack output");
+            _wcsicmp(output.extension().c_str(), validateSplit ? L".dmlgraph" : L".dmlpack") != 0 ||
+            (validateSplit && _wcsicmp(weights.extension().c_str(), L".dmlweights") != 0))
+            throw std::runtime_error("Expected adapted ONNX and native model resource paths");
         if (!fs::is_regular_file(input)) throw std::runtime_error("Input ONNX file is missing");
         if (!fs::is_directory(output.parent_path())) throw std::runtime_error("Output directory is missing");
 
@@ -652,6 +684,10 @@ int wmain(int argc, wchar_t** argv)
         fs::copy_file(input, model);
         fs::current_path(temp.path);
         const auto reference = ExportGraph(model, temp.path, directml);
+        if (validateSplit) {
+            ValidateNative(output, directml, reference, weights);
+            return 0;
+        }
         WritePack(temp.path / L"depth", output, directml, reference, input);
         std::cout << "Depth Pro 2 model pack ready." << std::endl;
         return 0;
@@ -659,4 +695,8 @@ int wmain(int argc, wchar_t** argv)
         std::cerr << "Conversion failed: " << error.what() << '\n';
         return 1;
     }
+#else
+    std::cerr << "Run depth-convert.exe --help for usage. ONNX export requires the maintenance build.\n";
+    return 2;
+#endif
 }
