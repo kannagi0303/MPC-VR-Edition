@@ -81,6 +81,16 @@ Tex2D_t* CDX11VideoProcessor::EvaluateDlssSR(const Tex2D_t& source, Tex2D_t& inp
         if(tone.srSourceToneRoute && *tone.srSourceToneRoute!=sourceTone) m_dlssSR.ResetHistory();
         tone.srSourceToneRoute=sourceTone;
     }
+    const bool originalDepth=sourceFrame && timestamp>=0 && source.pShaderResource &&
+        (UsesDepthSr() || UsesDepthMfg()) && sourceRect==native;
+    if(originalDepth && !depthPrepared) {
+        m_pDeviceContext->OMSetRenderTargets(0,nullptr,nullptr);
+        ID3D11ShaderResourceView* empty=nullptr;
+        m_pDeviceContext->PSSetShaderResources(0,1,&empty);
+        m_depth.Update(m_pDevice,m_pDeviceContext,source.pShaderResource,sourceRect,sourceRect.Size(),timestamp);
+    }
+    // Submit before the FP16 draw; wait only after that draw (or within the
+    // color stage if it needs the map earlier). No wait on generated SR.
     const bool toneDrawn=sourceTone && PrepareSourceTone(source,sourceRect,timestamp,input.pTexture.p)==input.pTexture.p;
 	if (!toneDrawn && FAILED(TextureCopyRect(source, input.pTexture, sourceRect, sourceRect, m_pPS_Simple, nullptr, 0, false))) {
 		m_dlssSRInputStatus = L"source conversion failed";
@@ -90,13 +100,16 @@ Tex2D_t* CDX11VideoProcessor::EvaluateDlssSR(const Tex2D_t& source, Tex2D_t& inp
 	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
 	ID3D11ShaderResourceView* empty = nullptr;
 	m_pDeviceContext->PSSetShaderResources(0, 1, &empty);
+    if(originalDepth) {
+        const auto ticket=m_pFilter->m_playbackCancel.Capture();
+        m_depth.AwaitOriginal(timestamp,m_sampleDuration,ticket->Event());
+        if(ticket->Cancelled()) return nullptr;
+    }
 	const bool overlay = sourceFrame && overlayInputHandled && !m_mfgMultiplier &&
 		!depthPrepared && BlendSourceDepthOverlay(input.pTexture, source.pShaderResource, sourceRect, timestamp);
-    // Keep both depth consumers and SR scene detection on ungraded source.
-    // A projected source has already submitted raw depth in RenderEditionVideo.
-    if(sourceTone && !depthPrepared && (UsesDepthSr() || UsesDepthMfg()))
-        m_depth.Update(m_pDevice,m_pDeviceContext,source.pShaderResource,sourceRect,sourceRect.Size(),timestamp);
-	ID3D11ShaderResourceView* cleanSource = depthPrepared || overlay || sourceTone ? source.pShaderResource.p : nullptr;
+    // Original capture is already submitted or projected; never recapture a
+    // corrected SR input. Generated SR uses the original consumer policy.
+	ID3D11ShaderResourceView* cleanSource = depthPrepared || overlay || sourceTone || originalDepth ? source.pShaderResource.p : nullptr;
 	auto* output = m_dlssSR.Evaluate(timestamp, frameTimeMs, UsesDepthSr() ? &m_depth : nullptr,
 		sourceFrame, cleanSource);
     // A failed evaluation leaves normal raw fallback in charge. Only a
@@ -128,6 +141,21 @@ Tex2D_t* CDX11VideoProcessor::TryDlssSR(const CRect& srcRect, const CRect& dstRe
 	if (preparedSource) {
 		return EvaluateDlssSR(*preparedSource, *input, nativeRect, timestamp, frameTimeMs, overlayInputHandled, true);
 	}
+    // Only after the actual SR input is ready. This is a native RGB source,
+    // not a projected/previously depth-prepared surface: preserve W4 capture.
+    if (const auto* early = ReuseEarlyOriginal(srcRect, dstRect, timestamp, second, true)) {
+        auto* output = EvaluateDlssSR(*early, *input, nativeRect, timestamp, frameTimeMs, overlayInputHandled);
+        if (!output) {
+            // The attempted SR route was not presented. Do not carry its
+            // speculative successor into a different fallback colour route.
+            DiscardEarlyOriginal(m_futureOriginal);
+            m_futureOriginal = {};
+            // The original was not consumed by a successful SR output.
+            if (m_earlyOriginal.ready) m_earlyOriginal.consumed = false;
+            FinishEarlyOriginal();
+        }
+        return output;
+    }
 	if (FAILED(m_dlssSRSource.CheckCreate(m_pDevice, m_D3D11OutputFmt, srcRect.Width(), srcRect.Height(), Tex2D_DefaultShaderRTarget)) ||
 	    FAILED(D3D11VPPass(m_dlssSRSource.pTexture, srcRect, nativeRect, second))) {
 		m_dlssSRInputStatus = L"source conversion failed";

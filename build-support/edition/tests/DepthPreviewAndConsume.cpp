@@ -12,14 +12,15 @@ namespace {
 using std::int64_t;
 struct CDepth {
     static constexpr int64_t MaxEstimateAge = 2000000;
-    struct Estimate { bool view; int64_t pts; };
+    struct Estimate { bool view=false; int64_t pts=-1; };
     Estimate map{false,-1}, ready{false,-1};
-    int64_t scene=-1;
+    int64_t scene=-1,m_playbackPts=-1,m_previousPlaybackPts=-1,m_selectedSourcePts=-1,m_selectedDepthPts=-1,m_originalDuration=400000;
     bool m_depthShader=true;
     struct Counters { int64_t rawMfgCheckAge=-1; const wchar_t* rawMfgCheck=L"not checked"; } m_counters;
     void PollCompleted() { if(ready.view) { map=ready; ready={false,-1}; } }
     Estimate EstimateAtOrBefore(int64_t pts) const { return map.view && map.pts<=pts ? map : Estimate{false,-1}; }
     int64_t SceneStart(int64_t) const { return scene; }
+    Estimate SelectOriginal(int64_t pts); Estimate ForFrame(int64_t pts) const;
 bool Check(int64_t pts,float frameTimeMs,bool inverted) {
 
 #include "DepthConsumerGate.generated.inc"
@@ -28,6 +29,7 @@ bool Check(int64_t pts,float frameTimeMs,bool inverted) {
     return true;
 }
 };
+#include "DepthOriginalSelection.generated.inc"
 void Exercise(){
     using std::wstring_view;
     CDepth a;
@@ -50,6 +52,14 @@ void Exercise(){
     assert(!a.Check(400000,40,true));
     assert(wstring_view(a.m_counters.rawMfgCheck)==L"no map");
     assert(a.m_counters.rawMfgCheckAge==-1);
+    // Current-original selection is pinned, not replaced by late completion.
+    CDepth pin;pin.m_playbackPts=400000;pin.m_previousPlaybackPts=0;pin.map={true,0};
+    assert(pin.Check(400000,40,true));pin.ready={true,400000};
+    assert(!pin.Check(400000,40,true)); // mocked single-slot eviction of pinned map
+    CDepth miss;miss.m_playbackPts=400000;miss.m_previousPlaybackPts=0;
+    assert(!miss.Check(400000,40,true));miss.ready={true,400000};assert(!miss.Check(400000,40,true));
+    CDepth interval;interval.m_playbackPts=800000;interval.m_previousPlaybackPts=400000;interval.map={true,600000};
+    assert(!interval.Check(800000,40,true));
     std::mt19937 rng(26);
     for(int i=0;i<100000;++i){
         CDepth b;

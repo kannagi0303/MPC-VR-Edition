@@ -300,6 +300,7 @@ public:
 	HRESULT SetRectangles(const RECT * pSrcRect, const RECT* pDstRect);
 	void SetRotation(D3D11_VIDEO_PROCESSOR_ROTATION rotation);
 	void SetProcAmpValues(DXVA2_ProcAmpValues *pValues);
+	void SetExternalProcAmpValues(const DXVA2_ProcAmpValues& values);
 
 private:
 	HRESULT CheckColorSpaceNew(

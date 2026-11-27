@@ -11,7 +11,17 @@
 #include <memory>
 #include <cstdint>
 #include <functional>
+#include <utility>
 namespace mfg {
+// Legacy-only presentation provenance. Completed groups keep their own batch
+// contract; their default route is unused by the completed presenter.
+struct LegacyPictureRoute {
+    bool videoOnly = false;
+    bool projected = false;
+    uint64_t postVsrGeneration = 0;
+    bool retired = false;
+    bool directFallback = false; // independently captured final legacy picture
+};
 struct QueuedFrame {
     int64_t deadline=0,timestamp=0;
     uint64_t serial=0;
@@ -20,6 +30,7 @@ struct QueuedFrame {
     std::shared_ptr<OriginalSnapshot> original; // populated only for source frames
     int64_t interpolationStart=-1;
     int64_t presentationTime=0; // graph time, including the configured video delay
+    LegacyPictureRoute legacyRoute{};
 };
 using GeneratedReady = std::function<bool(uint64_t, unsigned)>;
 struct QueueDrops {
@@ -39,6 +50,17 @@ class FrameQueue {
     }
 public:
     void Clear() {frames_.clear();}
+    // Preserve the old source snapshots and their exact deadlines. Only
+    // generated bank views are invalid at a successful-route handoff.
+    unsigned RetireLegacyRoute() {
+        const auto generated = PendingGenerated();
+        for (auto& frame : frames_)
+            if (frame.index == MaxGenerated) frame.legacyRoute.retired = true;
+        frames_.erase(std::remove_if(frames_.begin(), frames_.end(), [](const QueuedFrame& frame) {
+            return frame.index != MaxGenerated;
+        }), frames_.end());
+        return generated;
+    }
     unsigned PendingOriginals() const {
         return unsigned(std::count_if(frames_.begin(),frames_.end(),[](const auto& f){return f.index==MaxGenerated;}));
     }
@@ -64,7 +86,8 @@ public:
     }
     QueueDrops Add(const Batch& b,int64_t qpc,int64_t stream,double frequency,
                    int64_t videoDelay,double refreshHz,bool nativeInput,unsigned bankCount,
-                   bool autoCadence=false, const PresentationTiming& timing={}) {
+                   bool autoCadence=false, const PresentationTiming& timing={},
+                   LegacyPictureRoute route={}) {
         QueueDrops drops;
         if(!b.serial || !b.original) return drops;
         bankCount=std::clamp(bankCount,2u,3u);
@@ -76,6 +99,12 @@ public:
             if(expired)drops.Count(f.index);
             return expired;
         }),frames_.end());
+        // Only a direct-fallback overlap needs an ordering barrier. A
+        // newly mapped QPC deadline may be earlier after a clock reanchor;
+        // do not let it overtake older retained originals. Old deadlines and
+        // media PTS are never changed, even on the first recovery batch.
+        const bool fallbackOverlap = route.directFallback || std::any_of(frames_.begin(),frames_.end(),
+            [](const QueuedFrame& f){return f.legacyRoute.directFallback;});
         const bool clockOk=std::isfinite(frequency)&&frequency>0;
         const auto append=[&](int64_t timestamp,int64_t presentAt,unsigned index) {
             // Bad clock mapping must never silently discard a source frame.
@@ -87,14 +116,25 @@ public:
                     deadline=qpc+int64_t(offset);
                 else if(index!=MaxGenerated) {drops.Count(index);return;}
             } else if(index!=MaxGenerated) {drops.Count(index);return;}
+            if (fallbackOverlap) {
+                for (const auto& f : frames_) {
+                    if (f.index==MaxGenerated && f.legacyRoute.retired && f.timestamp<=timestamp)
+                        deadline=(std::max)(deadline,f.deadline);
+                }
+            }
             // Keep generated work strictly bounded; pending source frames are
             // never removed to make room for interpolation.
             if(index!=MaxGenerated && frames_.size()>=MaxMultiplier*3) {
                 drops.Count(index);return;
             }
-            frames_.push_back({deadline,timestamp,b.serial,index,nativeInput,
-                               index==MaxGenerated ? b.original : nullptr,
-                               index==MaxGenerated ? -1 : b.previous});
+            QueuedFrame frame{deadline,timestamp,b.serial,index,nativeInput,
+                              index==MaxGenerated ? b.original : nullptr,
+                              index==MaxGenerated ? -1 : b.previous, 0, route};
+            // Insert after equal keys during the bridge; no extra sort or
+            // allocation after the one-source fallback admission commits.
+            if (fallbackOverlap)
+                frames_.insert(std::upper_bound(frames_.begin(),frames_.end(),frame,Earlier),std::move(frame));
+            else frames_.push_back(std::move(frame));
         };
         const int64_t span=b.previous>=0&&b.current>b.previous?b.current-b.previous:0;
         if(b.generated && b.generated<=MaxGenerated && span>0 && span<=2500000) {
@@ -108,7 +148,7 @@ public:
             }
         }
         append(b.current,timing.End(b.current),MaxGenerated);
-        std::sort(frames_.begin(),frames_.end(),Earlier);
+        if (!fallbackOverlap) std::sort(frames_.begin(),frames_.end(),Earlier);
         return drops;
     }
     std::optional<QueuedFrame> TakeReplacement(int64_t now, int64_t leadTicks, int64_t refreshTicks,
@@ -121,7 +161,7 @@ public:
         const auto source = std::find_if(frames_.begin(), due, [now](const QueuedFrame& frame) {
             return frame.index == MaxGenerated && frame.deadline <= now;
         });
-        if (source == due) return std::nullopt;
+        if (source == due || source->legacyRoute.retired) return std::nullopt;
 
         // Look from the latest eligible frame back to the original. Leave
         // the queue intact if no replacement is ready.
@@ -129,6 +169,11 @@ public:
             if (!CanReplaceOriginal(mode, source->deadline, source->timestamp,
                     it->deadline, it->timestamp, it->interpolationStart, refreshTicks)) continue;
             if (it->index != MaxGenerated && !ready(it->serial, it->index)) continue;
+            // Even with a clock reanchor, do not let a replacement erase
+            // another retired original outside the candidate's due range.
+            if (std::any_of(frames_.begin(), end, [&](const QueuedFrame& f) {
+                return f.legacyRoute.retired && f.timestamp <= it->timestamp;
+            })) continue;
             const auto selected = *it;
             frames_.erase(std::remove_if(frames_.begin(), end, [&](const QueuedFrame& frame) {
                 if (frame.timestamp > selected.timestamp) return false;

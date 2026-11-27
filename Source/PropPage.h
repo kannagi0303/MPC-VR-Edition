@@ -39,9 +39,9 @@ class __declspec(uuid("DA46D181-07D6-441D-B314-019AEB10148A"))
 	Settings_t m_SetsPP;
 
 	int m_oldSDRDisplayNits = SDR_NITS_DEF;
-    int m_colorStrengths[4]{100,100,100,100};
-    int m_oldColorStrengths[4]{100,100,100,100};
-    bool m_colorCaptured[4]{};
+    int m_colorStrengths[5]{100,100,100,100,1};
+    int m_oldColorStrengths[5]{100,100,100,100,1};
+    bool m_colorCaptured[5]{};
     bool m_editionTab=false;
     bool m_enhancementEnabled=true, m_oldEnhancementEnabled=true, m_masterCaptured=false;
     bool m_updatingNumeric=false;

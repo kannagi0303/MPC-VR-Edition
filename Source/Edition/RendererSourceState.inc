@@ -35,7 +35,10 @@
 	// while publishing this renderer-lock waiter. Presenter reads it only
 	// to schedule a bounded, lock-free handoff after a measured slow Present.
 	std::atomic<bool> m_completedSourceWaiting{false};
-	std::optional<HRESULT> ReceiveCompletedSample(IMediaSample* sample);
+	std::optional<HRESULT> ReceiveCompletedSample(IMediaSample* sample, uint64_t lookaheadEpoch = 0,
+        mpcvr::edition::PlaybackCancellation::Ticket ticket = {});
+    HRESULT ReceiveLookaheadOriginal(IMediaSample* sample, uint64_t epoch,
+        const mpcvr::edition::PlaybackCancellation::Ticket& ticket);
 	std::atomic<bool> m_completedEndOfStream{false};
 	HRESULT EndOfStream() override;
 	bool TryCompleteBufferedEndOfStream();
@@ -48,7 +51,8 @@
 	bool LookaheadCancelled(uint64_t epoch) const;
 	bool PrefetchDepth(IMediaSample* sample, int64_t pts, uint64_t epoch);
 	void DrainLookahead();
-	void ReportLookaheadError(HRESULT hr);
+	bool OriginalDeliveryIdle();
+	void ReportLookaheadError(HRESULT hr, uint64_t epoch = 0);
 	std::optional<LRESULT> HandleEditionWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 	void NormalizeEditionSettings();
 	void OnEditionSettingsConfigured();

@@ -393,10 +393,33 @@ std::optional<size_t> CDX11VideoProcessor::AppendEditionStatistics(std::wstring&
 		}
 		if (PerceptualEnabled() && (m_perceptual.failedStandalone || m_perceptual.failedB))
 			str += L"\nPerceptual    shader compile failed (fallback)";
+        if (m_adaptiveTone.earlyCaptures) {
+            const auto& at = m_adaptiveTone;
+            str += std::format(L"\nAT early      {} captures | {} observations | {} same PTS",
+                at.earlyCaptures, at.earlyObservations, at.earlyExact);
+        }
 		if (svdRaw) {
 			const auto& b = m_svdLutRawTest;
-			str += std::format(L"\nVE temporal   {}/{} analyzed | {} graded | {} ungraded",
-				b.completed, b.requests, b.presentedGraded, b.presentedUngraded);
+			// Producer-side grading now precedes SR/VSR/MFG. Count actual LUT draw
+			// submissions separately from legacy non-final Completed Presents.
+			// A draw is not a unique original or a successful DXGI Present.
+			str += std::format(L"\nVE temporal   {}/{} jobs | {} LUT draws | {} capture skips",
+				b.completed, b.requests, b.appliedDraws, b.skippedCapture);
+            if (b.sourceLutChecks)
+                str += std::format(L"\nVE source     {}/{} exact ready | {} future ready",
+                    b.sourceLutExactReady, b.sourceLutChecks, b.sourceLutFutureReady);
+            if (b.sourceLutDraws)
+                str += std::format(L"\nVE mix        {}/{} future LUT draws | {:.1f}% mean future share",
+                    b.sourceLutFutureDraws, b.sourceLutDraws,
+                    100.0 * b.sourceLutFutureShareSum / b.sourceLutDraws);
+            const auto& early = m_earlyOriginal;
+            str += std::format(L"\nVE early      {} prepared | {} captures | {} reused | {} abandoned",
+                early.prepared, early.captures, early.reused, early.abandoned);
+            str += std::format(L"\nVE ahead      {} future prepared | {} future reused",
+                early.futurePrepared, early.futureReused);
+			if (b.presentedGraded || b.presentedUngraded)
+				str += std::format(L"\nVE post-grade {} graded | {} ungraded",
+					b.presentedGraded, b.presentedUngraded);
 			if (b.b2MemoryShaderFailed) str += L"\nVE chroma     shader compile failed";
 			if (b.b2ShaderFailed) str += L"\nVE luma       shader compile failed";
 			if (b.model.GetState() == svdlut::ModelWorker::State::Failed || b.failed)

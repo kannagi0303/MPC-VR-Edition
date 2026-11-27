@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "stdafx.h"
 #include "FlowMotionCheck.h"
-#include <d3dcompiler.h>
+#include "Edition/FixedShaderBytecode.h"
 
 namespace mfg {
 namespace {
@@ -70,8 +70,7 @@ void main(uint3 id : SV_DispatchThreadID, uint index : SV_GroupIndex)
 bool FlowMotionCheck::Initialize(ID3D11Device* device)
 {
     Microsoft::WRL::ComPtr<ID3DBlob> code;
-    if (FAILED(D3DCompile(ReduceFlow, sizeof(ReduceFlow) - 1, nullptr, nullptr, nullptr,
-            "main", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, nullptr)) ||
+    if (FAILED((edition::CompileFixedShader<ReduceFlow,"main","cs_5_0">(&code))) ||
         FAILED(device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(),
             nullptr, &reduce_))) return false;
 

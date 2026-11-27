@@ -29,10 +29,10 @@ using SourceSamples = std::array<float, SampleValues>;
 // before evaluating a nonlinear LUT is intentionally avoided: LUT(E[RGB])
 // generally differs from E[LUT(RGB)]. Stride/pixel order are the SAME as
 // ReadSignature(): mapped RGBA32F, R/G/B float code values; not BGRA.
-inline SourceSamples ReadSamples(const uint8_t* data, size_t rowPitch)
+template<class Read>
+inline SourceSamples ReadSamplesWith(Read read)
 {
     SourceSamples output{};
-    if (!data || rowPitch < input::MinPitch) return output;
     constexpr unsigned pixelsPerCell = 256 / Cells;
     for (unsigned cy = 0; cy < Cells; ++cy) {
         for (unsigned cx = 0; cx < Cells; ++cx) {
@@ -47,11 +47,19 @@ inline SourceSamples ReadSamples(const uint8_t* data, size_t rowPitch)
                                     y0 + pixelsPerCell / 4};
             for (unsigned s = 0; s < SamplesPerCell; ++s) {
                 for (unsigned c = 0; c < 3; ++c)
-                    output[(base + s) * 3 + c] = input::Code(data, rowPitch, px[s], py[s], c);
+                    output[(base + s) * 3 + c] = read(px[s], py[s], c);
             }
         }
     }
     return output;
+}
+
+inline SourceSamples ReadSamples(const uint8_t* data, size_t rowPitch)
+{
+    if (!data || rowPitch < input::MinPitch) return {};
+    return ReadSamplesWith([&](unsigned x, unsigned y, unsigned c) {
+        return input::Code(data, rowPitch, x, y, c);
+    });
 }
 
 struct Point {

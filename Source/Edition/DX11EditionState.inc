@@ -119,14 +119,25 @@
 	bool m_mfgInputModeKnown=false;
 	bool m_mfgLastNativeInput=false;
     bool m_mfgLastPostVsrInput=false;
+    // Independent VP cache domain and identity. Zero denotes no post-VSR
+    // in a completed batch; each reset invalidates its old VP identity.
+    UINT m_mfgPostVsrDecodedWidth=0, m_mfgPostVsrDecodedHeight=0, m_mfgPostVsrExFmt=0;
+    uint64_t m_mfgPostVsrGeneration=0;
+    // The decoded-source CSC owns ProcAmp; changing it must not retire the post-VSR route.
+    std::optional<std::array<LONG, 4>> m_mfgPreVsrProcAmp;
     bool m_mfgLastVideoOnlyInput = false;
     std::optional<bool> m_mfgLastSourceColorFinal; // FA-03A: no pair across colour routing changes
     bool m_mfgLastToneBeforeUpscale=false; // FA-03B: distinguish native SR input from post-SR tone
+    // RendererLock-owned bridge, only during a failed legacy MFG handoff.
+    bool m_mfgLegacyFallbackActive=false;
+    bool RetireLegacyMfgForFallback();
+    std::optional<HRESULT> QueueLegacyMfgFallback(ID3D11Texture2D* image,
+        REFERENCE_TIME timestamp, bool projected);
 	bool QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timestamp, bool& overlayInputHandled,
 		bool nativeInput, bool postVsrInput, bool videoOnlyInput = false, bool projected = false);
 	bool PresentMfg();
 	bool NextMfg(int64_t& deadline);
-	void StopMfg(bool release=true, bool fastShutdown=false);
+	void StopMfg(bool release=true, bool fastShutdown=false, bool preserveLegacyRoute=false);
     // Settings changes run under RendererLock. Retire the old timeline and
     // present its independent ORIGINAL snapshots before moving the upscaler.
     void SwitchMfgUpscaleSlot(unsigned requestedMode);
@@ -158,10 +169,11 @@
     CTex2DRing m_processingPostScale;
     Tex2D_t m_completedResizeTexture;
 
-	HRESULT CompositeMfg(const mfg::FrameSurface& surface,REFERENCE_TIME timestamp,bool nativeInput, uint64_t serial,bool original);
+	HRESULT CompositeMfg(const mfg::FrameSurface& surface, const mfg::QueuedFrame& frame);
     HRESULT RenderMfgVideo(const mfg::FrameSurface& surface, bool nativeInput, ID3D11Texture2D* target,
                            REFERENCE_TIME timestamp, const CRect& targetPicture, bool videoOnlyInput,
-                           bool bypassUpscale = false, bool projected = false);
+                           bool bypassUpscale = false, bool projected = false,
+                           std::optional<uint64_t> postVsrGeneration = {});
     HRESULT FinishMfgPresent(ID3D11Texture2D* preparedVideo, REFERENCE_TIME timestamp, uint64_t serial,
                              bool completed = false, const CRect* pictureOverride = nullptr,
                              bool svdLutHandled = false, bool alreadyComposited = false,bool original = true);
@@ -184,6 +196,7 @@
         CompletedFrame target;
         std::vector<mfg::QueuedFrame> phases;
         bool videoOnlyInput = false;
+        uint64_t postVsrGeneration = 0;
     };
     static constexpr REFERENCE_TIME CompletedLead = 2 * UNITS;
     static constexpr REFERENCE_TIME CompletedStartupLead = UNITS / 4;

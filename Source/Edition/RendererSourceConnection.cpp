@@ -58,13 +58,18 @@ HRESULT CMpcVideoRenderer::CompleteConnect(IPin* pReceivePin)
 			filter.Release();
 		}
 	}
-	if (m_localFile && !m_depthLookahead && depthsettings::LookaheadMs()) {
-		try {
-			m_depthLookahead = std::make_unique<DecodedFrameLookahead>(*this, depthsettings::LookaheadMs());
-		} catch (...) {
-			DLog(L"depth lookahead worker unavailable");
-		}
-	}
+	if (m_localFile && !m_depthLookahead) {
+        const auto depthMs = depthsettings::LookaheadMs();
+        // Preserve the old opt-in depth path. Default color staging uses
+        // the Completed producer, and does not bypass AVC time correction.
+        if (depthMs || !m_avcSourceClock) {
+            try {
+                m_depthLookahead = std::make_unique<DecodedFrameLookahead>(*this, depthMs, !depthMs);
+            } catch (...) {
+                DLog(L"original lookahead worker unavailable; retaining synchronous delivery");
+            }
+        }
+    }
 	const HRESULT hr = __super::CompleteConnect(pReceivePin);
 	if (SUCCEEDED(hr)) {
 		auto profile = jvr::FindMediaProfile(g_hInst, m_strFilm);
@@ -80,8 +85,12 @@ HRESULT CMpcVideoRenderer::CompleteConnect(IPin* pReceivePin)
 
 HRESULT CMpcVideoRenderer::BreakConnect()
 {
+    // DirectShow normally stops before disconnecting. Do not wait under
+    // graph locks, and do not retire a live timeline on a failed disconnect.
+    if (!OriginalDeliveryIdle() && !m_playbackCancel.Capture()->Cancelled()) return VFW_E_WRONG_STATE;
 	const HRESULT hr = __super::BreakConnect();
 	if (SUCCEEDED(hr)) {
+        if (m_depthLookahead && m_depthLookahead->OriginalColor()) CancelEditionDelivery();
 		CAutoLock render(&m_RendererLock);
 		m_jvrMediaProfile.reset();
 	}

@@ -46,7 +46,10 @@ try {
     Write-Host ("[INFO] Depth resources: {0:F1} s" -f $step.Elapsed.TotalSeconds)
 
     $step.Restart()
-    Invoke-BuildTarget 'MpcVideoRenderer' 'x64-release.log'
+    # Incremental ZIP overlays can preserve older file timestamps. Rebuild the
+    # renderer to prevent mixing translation units with different class layouts.
+    Write-Host '[INFO] Renderer: full rebuild (Clean + Build).'
+    Invoke-BuildTarget 'MpcVideoRenderer:Rebuild' 'x64-release.log'
     Write-Host ("[INFO] Renderer build: {0:F1} s" -f $step.Elapsed.TotalSeconds)
 
     $step.Restart()

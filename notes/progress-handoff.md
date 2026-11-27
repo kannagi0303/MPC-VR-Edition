@@ -1,5 +1,9 @@
 # 目前進度與接手
 
+## VE01-FIX30：第五階段整體第三輪
+
+FIX29 已由使用者確認穩定，SR Early/Ahead 實機非零。FIX30 合併相鄰 MFG D3D12 barrier API 呼叫、略過完全相同的私有常數 buffer 提交，並補齊五個固定 Shader 的 CPU 位元碼快取。兩套 C++ 模擬測試與既有可攜回歸通過；Windows 建置、原生測試及 GPU 量測待驗。驗收後進入最後一輪收斂，修正過時測試並保留未驗證邊界，不為結案強制重構。詳見 [ve01-fix30-phase5-submission-reuse.md](ve01-fix30-phase5-submission-reuse.md)。
+
 ## 2026-11-27 語言與依賴重整
 
 - 工作樹的專案 Python 由 34 檔／189,804 B 降為 0。移除失效的 DirectML header 適配、White Balance 研究及其殘留 header、研究影像與模型驅動程式，以及被原生工具取代的轉換腳本。Adaptive Tone 保留正式曲線與 shot 邏輯，移除舊 Temporal 候選與重複色彩映射。歷史結論留在原有 notes，舊程式可從 Git 歷史取得。
@@ -303,3 +307,39 @@ Verification: seven shape/header round-trip and raw dispatch alignment C++ tests
 
 ## 2026-11-26 — DP2-11 SPLIT-FP16
 User requests actual separate weights/Graph files, keeps upstream mixed FP16, fixed 352x192 W4, no runtime dynamic generation; startup/seek/rapid change primary. DP2-11 implements offline native pack split and direct two-buffer runtime views, byte-identical original Graph and named tensors, checked pair ID and disjoint names. `build-x64.cmd` stages only 352x192 DP2 graph + weights in DepthModels; prior variants remain cache-only and valid 384x224/320x192 serve as optional exact-byte comparison references. Build log prints raw graph and real files sizes, reference status; no claim weights all shared or graph file necessarily 0.5 MiB. If no matches/reference, separate all external tensor data, label unverified common. Pair-specific format (not interchangeable graph library); no extra GPU graph compile or reconstruction, no runtime hash, no model/precision/W4/RAW/PTS/MFG/queue changes. Local research package migrates first selection to new graph, preserves later choices; ZipDepth retained temporary fallback and ReleaseOnly public default. Apple model license remains. See handoff for exact paths, scope and portable test results. Clang sanitizer split/legacy/model-choice/queue/state tests plus RAW/preview/statistics passed. Windows build, property page tests, real weights/Graph sizes and latency/playback not run. No commit/push.
+
+
+## 2026-11-27 -- VE01-FIX22
+User accepted FIX21. Exact uploaded baseline verified. FIX22 adds full independent post-MFG VSR cache domain and completed-batch VP generation identity; old invalid VP falls back to existing shader resize, no new scheduling or queue mutation. ProcAmp parity deliberately deferred: naive neutral-only guard creates legacy route-change queue-clear risk; do not add it without safe source-frame handoff. Three production files changed; 1,282 C++ mocked cases passed each in Clang ASan/UBSan and GCC UBSan; Windows build and playback pending. See root handoff.md for manifest, limitations and next steps. No commit/push.
+
+
+## 2026-11-27 — VE01-FIX23
+User accepts FIX22 build/playback. FIX23 syncs actual requested ProcAmp to independent pre-MFG CSC VP, applies pending filters before external blit, no route/generation reset for control changes. 362 mock C++ scenarios pass per sanitizer toolchain. Legacy live route-transition clearing still open; do not claim Phase 4 complete. See root handoff.md for exact source audit, test scope and manifest. Windows build, upstream boundary and post-VSR driver/ProcAmp runtime pending. No commit/push.
+
+
+## 2026-11-28 -- VE01-FIX24
+User requested continuation after FIX23; FIX23 Windows acceptance not explicitly provided. Reconstructed exact 573-file baseline. Legacy QPC queue picture route identity now accompanies each frame; only QueueMfg in-timeline layout transition preserves old independent snapshots/deadlines and retires generated phases, old originals use plain resize and cannot be replaced. Completed route unchanged. 91,694 queue assertions passed per Clang ASan/UBSan and GCC UBSan; normal scheduler checksum identical in differential randomized exercise. Direct fallback, failure/format/settings reset and paced configuration drain are not resolved. Windows/MSVC, real playback and upstream PowerShell audit pending. See root handoff.md for exact scope and manifest. No commit/push.
+
+
+## 2026-11-28 -- VE01-FIX25
+User accepts FIX24 normal playback and performance. Exact 574-file baseline. Bounded SDR BGRA legacy direct-fallback bridge preserves old originals/deadlines, snapshots current final ordinary picture only when overlap exists, reuses paced worker, protects flat scheduler ordering during clock reanchor. Completed path unchanged; HDR/DoVi/RTX HDR, invalid clock, device/presenter failure and format/reset boundaries are not solved. 105,606 new + 91,694 prior queue assertions and 104 extracted-method mock checks pass per toolchain; ordinary randomized scheduler digest matches FIX24. Windows build/real GPU/PowerShell audits pending. See root handoff.md for full reasoning, risks and SHA-256 manifest. No commit/push.
+
+
+## 2026-11-28 — VE01-FIX26
+User accepts FIX25 normal playback. Exact 575-file baseline. Explicit NewSegment now retires legacy QPC worker/queues/prepared/fallback frames if still owned, preserving permanent NGX failure, resetting healthy history and auto/layout state. Existing Completed clear and normal paths unchanged. 1,026 extracted-method mock cases per compiler, both existing legacy queue suites and five portable regression suites passed; Windows build/GPU/NewSegment runtime and upstream guard pending. Scoped Phase 4 closeout after normal FIX26 acceptance; HDR metadata, internal DoVi/VP/swap-chain reconfiguration, settings drain, legacy EOS and device failure boundaries remain not universally solved. See notes/ve01-fix26-phase4-closeout.md and root handoff.md for exact scope, evidence and Phase 5 measurement plan. No commit/push.
+
+
+## 2026-11-28 — VE01-FIX27
+FIX26 accepted in normal operation; Phase 4 scoped SDR closeout. Phase 5 first candidate eliminates one redundant full-frame color copy only in the unpublished identical private videoOnly BGRA completed fallback/bypass target by swapping the complete scratch/target wrappers. No change to MFG success, depth, shaders, queue/fence timing, budget or thresholds. 1,296 identity/descriptor + 20,000 ownership cases per sanitizer toolchain pass, unchanged regression binaries pass; no Windows/GPU performance validation. See `notes/ve01-fix27-completed-color-transfer.md` and root handoff.md. No commit/push.
+
+
+## 2026-11-28 — VE01-FIX28
+FIX27 normal operation accepted. User requests each Phase 5 iteration handle 5.1–5.6 as one integrated resource audit, not per-substage patches. Exact 578-file FIX27 baseline. First integrated candidate: bounded successful fixed CPU HLSL bytecode cache across MFG/SR/W4/letterbox (15 keys, 18 init uses) and reuse normalized SVDLUT model input for exact signature/B2 samples, retain fallback. No GPU resource/fence, model, shader text, scheduling, PTS or quality changes. 208,896 bit-exact evidence checks + 128 eight-thread races per toolchain; mock cross-TU cache and prior portable suites pass. No Windows SDK/real GPU/guard or matched playback profiling; not Phase 5 complete. See `notes/ve01-fix28-phase5-integrated-pass.md` and root handoff.md. No commit/push.
+
+
+## 2026-11-28 — VE01-FIX29
+FIX28 user accepts 4K MFG and 720p SR+MFG; asks for Phase 5 endpoint before proceeding. Four bounded integrated work rounds: baseline dedup (FIX27–28 accepted), cross-feature reuse (FIX29 candidate), scheduling/init evidence, convergence/closure. All 5.1–5.6 reviewed per round, no arbitrary GPU %, no patch by obligation, freeze after concrete endpoint acceptance; document deferred limits. Candidate extends existing original-first SR early/future native RGB route only with exact sample, color domain, PTS/epoch and scratch-owner identity; reuse after actual SR Prepare, preserve W4 capture/await, route-specific return, speculative failure/config cleanup, existing bounded staging/budget; no change to math, fences, W4, buffer or MFG order. 74,000 route/reuse/return/SR cases + 4,096 Evaluate cases per toolchain passed; prior binaries rerun PASS. Existing baseline SourceToneRouting fixture stale and Windows native runner/driver and matched GPU measurements remain pending. Full details and endpoint conditions in `notes/ve01-fix29-phase5-sr-source-reuse.md` and handoff.md. No commit/push.
+
+
+## 2026-11-28 — VE01-FIX31 Phase 5 final convergence
+FIX30 accepted by user in normal 4K and 720p SR+MFG playback. Exact 587-file base reconstructed. All six resource endpoints reviewed, 19 cumulative Source changes since FIX26; no new production modification justified. FIX31 refreshes stale test fixtures and existing Windows integration runner (11 test-related files), 27 C++ suites each passed Clang ASan/UBSan and GCC UBSan from current source. Freeze accepted production architecture; test/docs only. Full native Windows runner/guard/real GPU profiling and additional lifecycle/rare-route checks remain unverified; distinguish engineering closure from all-platform validation. See notes/ve01-fix31-phase5-closeout.md and root handoff.md. No commit/push.

@@ -33,9 +33,19 @@ void CDX11VideoProcessor::ResetAdaptiveTone(bool release) {
     // An old asynchronous copy may still own this staging allocation. On seek
     // leave it pending, but discard its result; reuse only after DO_NOT_WAIT succeeds.
     a.capturePts=INVALID_TIME; a.capturePrimed=false; a.primeTick=0;
+    a.captureEarly=a.captureSpeculative=false; a.captureEpoch=0;
+    a.previousRequestPts=INVALID_TIME;
+    a.earlyCaptures=a.earlyObservations=a.earlyExact=0;
     a.suspended=a.captureAfterSuspend=false;
     if(release) {
+        ClearEarlyOriginal(true);
         a.sourceOutput.Release();
+        a.sourceRaw.Release();
+        a.sourceVsrOutput.Release();
+        a.sourceCscVP.ReleaseVideoDevice();
+        a.sourceVsrVP.ReleaseVideoDevice();
+        a.sourceVsrKey = {};
+        a.sourceVsrReady = false;
         a.srSourceToneRoute.reset();
         a.sourceToneBeforeUpscale=false;
         a.pending=false; a.thumbnail.Release(); a.staging.Release();
@@ -82,7 +92,17 @@ void CDX11VideoProcessor::PollAdaptiveTone(REFERENCE_TIME pts,REFERENCE_TIME pri
         return;
     }
     const bool priming=primeLimit!=INVALID_TIME;
-    if(!a.pending)return;
+    if(a.captureEarly && (a.captureEpoch!=m_pFilter->m_completedEpoch ||
+        m_pFilter->m_playbackCancel.Capture()->Cancelled())) {
+        // A segment can change before the old early slot is visited again.
+        // Retire its copy without trusting either its timestamp or cadence.
+        a.capturePts=a.requestPts=INVALID_TIME;
+        a.captureEarly=a.captureSpeculative=false; a.captureEpoch=0;
+        a.previousRequestPts=INVALID_TIME;
+        a.suspended=a.suspended || a.captureAfterSuspend;
+        a.capturePrimed=a.captureAfterSuspend=false;
+    }
+    if(!a.pending || a.captureSpeculative)return;
     // Only the initial, not-yet-locked anchor may consume future observations.
     // Ordinary presentation never consumes an observation beyond its PTS.
     const bool prime=priming && a.capturePrimed;
@@ -94,13 +114,22 @@ void CDX11VideoProcessor::PollAdaptiveTone(REFERENCE_TIME pts,REFERENCE_TIME pri
     if(SUCCEEDED(hr)) {
         if(a.capturePts!=INVALID_TIME && map.RowPitch>=SampleWidth*4*sizeof(float)) {
             const auto sample=ReadObservation(static_cast<const float*>(map.pData),map.RowPitch/sizeof(float));
-            if(AdaptiveToneSupported()) a.shot.Observe(sample,a.capturePts,a.captureAfterSuspend,a.capturePrimed?pts:INVALID_TIME);
+            if(AdaptiveToneSupported()) {
+                const bool fresh = a.capturePts > a.shot.last;
+                a.shot.Observe(sample,a.capturePts,a.captureAfterSuspend,a.capturePrimed?pts:INVALID_TIME);
+                if(a.captureEarly && fresh) {
+                    ++a.earlyObservations;
+                    if(a.sourceComposition && a.capturePts==pts) ++a.earlyExact;
+                }
+            }
         }
         m_pDeviceContext->Unmap(a.staging.pTexture,0);
         
     }
     if(FAILED(hr) && a.captureAfterSuspend) a.suspended=true;
     a.capturePts=INVALID_TIME; a.capturePrimed=a.captureAfterSuspend=false;
+    a.captureEarly=a.captureSpeculative=false; a.captureEpoch=0;
+    a.previousRequestPts=INVALID_TIME;
 }
 void CDX11VideoProcessor::ObserveAdaptiveTone(const Tex2D_t& source,const CRect& sample,REFERENCE_TIME pts,bool buffered,bool primed) {
     if(!AdaptiveToneCaptureAllowed(pts,buffered) || !source.pShaderResource || !Supported(source.desc.Format) ||
@@ -125,6 +154,59 @@ void CDX11VideoProcessor::ObserveAdaptiveTone(const Tex2D_t& source,const CRect&
     a.pending=true; a.capturePts=pts; a.capturePrimed=primed;
     a.captureAfterSuspend=a.suspended; a.suspended=false;
 }
+// FIX19: move an existing observation into the already admitted early RGB
+// preparation. Never allocate new GPU resources or replace a pending readback.
+// A future original may not take the sampling opportunity of its predecessor.
+void CDX11VideoProcessor::PrepareEarlyAdaptiveTone(const Tex2D_t& source, const CRect& picture,
+    REFERENCE_TIME pts, uint64_t epoch, REFERENCE_TIME precedingPts)
+{
+    auto& a=m_adaptiveTone;
+    if (!a.sampleShader || !a.sampleConstants || !a.thumbnail.pTexture || !a.staging.pTexture ||
+        a.pending || a.captureSpeculative || epoch != m_pFilter->m_completedEpoch ||
+        m_pFilter->m_playbackCancel.Capture()->Cancelled()) return;
+    if (precedingPts>=0 && (a.requestPts==INVALID_TIME || precedingPts-a.requestPts>=Interval)) return;
+    const auto previous=a.requestPts;
+    ObserveAdaptiveTone(source,picture,pts,true);
+    if (a.pending && a.capturePts==pts) {
+        a.captureEarly=a.captureSpeculative=true;
+        a.captureEpoch=epoch;
+        a.previousRequestPts=previous;
+        ++a.earlyCaptures;
+    } else {
+        // A failed speculative attempt must not suppress normal sampling.
+        a.requestPts=previous;
+    }
+}
+
+void CDX11VideoProcessor::ConfirmEarlyAdaptiveTone(const Tex2D_t& source, const CRect& picture, REFERENCE_TIME pts)
+{
+    auto& a=m_adaptiveTone;
+    if (!a.captureSpeculative || a.capturePts!=pts) return;
+    const auto& e=m_earlyOriginal;
+    if (e.ready && e.approved && e.consumed && e.pts==pts && e.epoch==a.captureEpoch &&
+        e.epoch==m_pFilter->m_completedEpoch && e.rgb.pTexture.p==source.pTexture.p &&
+        picture==CRect(0,0,source.desc.Width,source.desc.Height) &&
+        !m_pFilter->m_playbackCancel.Capture()->Cancelled()) {
+        a.captureSpeculative=false;
+        a.previousRequestPts=INVALID_TIME;
+    } else DiscardEarlyAdaptiveTone(pts,a.captureEpoch);
+}
+
+void CDX11VideoProcessor::DiscardEarlyAdaptiveTone(REFERENCE_TIME pts, uint64_t epoch)
+{
+    auto& a=m_adaptiveTone;
+    if (!a.captureSpeculative || a.capturePts!=pts || a.captureEpoch!=epoch) return;
+    if (a.requestPts==pts) a.requestPts=a.previousRequestPts;
+    // Keep pending true until the original DO_NOT_WAIT Map retires the GPU
+    // copy. Never reuse staging memory while an abandoned copy owns it.
+    a.suspended=a.suspended || a.captureAfterSuspend;
+    a.capturePts=INVALID_TIME;
+    a.capturePrimed=a.captureAfterSuspend=false;
+    a.captureEarly=a.captureSpeculative=false;
+    a.captureEpoch=0;
+    a.previousRequestPts=INVALID_TIME;
+}
+
 // [AT-06 | 2026-11-25 12:18 +08:00] Borrow only READY originals in the
 // existing presenter slack. No extra timer, wait, queue ownership or producer
 // admission change. Never advance an already established shot into the future.
@@ -174,45 +256,113 @@ float CDX11VideoProcessor::AdaptiveToneWeight(REFERENCE_TIME pts) const {
     return m_adaptiveTone.shot.Fade(pts) * (m_pFilter->m_adaptiveTone.load()/100.f);
 }
 
-// Keep a single analysis time domain while old post-colour pictures drain.
-// VE still needs its unmodified future thumbnails; do not move AT ahead
-// of that legacy composition (which would invert the calibrated order).
+// VE-SOURCE: only original-frame callers may enter the producer stage.
+// Completed SDR originals are finalized even when controls are zero; a later
+// settings change must not repaint previously queued originals or descendants.
 bool CDX11VideoProcessor::SourceToneEligible() const {
-    if(!m_completingSample || !m_completedTarget || !OptionalColorSupported() || PerceptualEnabled() ||
-        m_fastShutdown || m_pFilter->m_bFlushing || m_pFilter->m_playbackCancel.Capture()->Cancelled()) return false;
-    if(m_completedLast && !m_completedLast->sourceColorFinal) return false;
-    for(const auto& f:m_completedFrames) if(!f.sourceColorFinal) return false;
-    for(const auto& b:m_completedBatches) if(!b.target.sourceColorFinal) return false;
-    return true;
+    return ((m_completingSample && m_completedTarget) || PerceptualEnabled() || OptionalColorSupported()) &&
+        !SourceIsHDR() && !m_bVPUseRTXVideoHDR && !m_pPSHalfOUtoInterlace &&
+        m_currentSwapChainColorSpace==DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 &&
+        !m_fastShutdown && !m_pFilter->m_bFlushing &&
+        !m_pFilter->m_playbackCancel.Capture()->Cancelled();
 }
 
 ID3D11Texture2D* CDX11VideoProcessor::PrepareSourceTone(const Tex2D_t& source, const CRect& picture, REFERENCE_TIME pts, ID3D11Texture2D* directTarget) {
     auto& a=m_adaptiveTone;
+    // An approved early thumbnail must describe exactly the raw RGB consumed
+    // by the grade. Any alternate composition route invalidates it first.
+    if (m_earlyOriginal.ready && m_earlyOriginal.approved &&
+        (pts != m_earlyOriginal.pts || source.pTexture.p != m_earlyOriginal.rgb.pTexture.p))
+        FinishEarlyOriginal();
+    // A successor's speculative LUT is allowed to contribute only when the
+    // current picture actually used its matching early RGB route. In a
+    // fallback (different SR/VP route, projection, changed crop/ProcAmp, etc.) remove that
+    // successor and dependent cached transforms BEFORE selecting a LUT.
+    if (m_futureOriginal.ready &&
+        (!m_earlyOriginal.consumed || !m_earlyOriginal.approved ||
+         pts != m_earlyOriginal.pts || source.pTexture.p != m_earlyOriginal.rgb.pTexture.p ||
+         picture != CRect(0,0,source.desc.Width,source.desc.Height) ||
+         m_futureOriginal.srSource != m_earlyOriginal.srSource ||
+         !EarlyOriginalDomainMatches(m_earlyOriginal) || !EarlyOriginalDomainMatches(m_futureOriginal) ||
+         !EarlyOriginalRoute(m_srcRect, ProcessingRect()))) {
+        DiscardEarlyOriginal(m_futureOriginal);
+        m_futureOriginal = {};
+    }
     auto* raw=source.pTexture.p;
-    if(!raw || !source.pShaderResource || !OptionalColorSupported() || pts<0 ||
-        !Supported(source.desc.Format) || m_fastShutdown || m_pFilter->m_bFlushing ||
-        m_pFilter->m_playbackCancel.Capture()->Cancelled()) return raw;
+    const bool perceptual=PerceptualEnabled();
+    const bool adaptive=OptionalColorSupported();
+    if(!raw || !source.pShaderResource || (!perceptual && !adaptive) || pts<0 ||
+        !Supported(source.desc.Format) || !SourceToneEligible()) return raw;
     const CRect area(0,0,source.desc.Width,source.desc.Height);
     CRect visible;
     if(!visible.IntersectRect(picture,area) || visible.Width()<2 || visible.Height()<2) return raw;
-    a.allowDraw=true; a.applied=false; a.sourceComposition=true;
+    m_pDeviceContext->OMSetRenderTargets(0,nullptr,nullptr);
+    ID3D11ShaderResourceView* unbindSource=nullptr;
+    m_pDeviceContext->PSSetShaderResources(0,1,&unbindSource);
+    // Capture ungraded originals at the native geometry. The existing depth
+    // producer deduplicates by PTS; SR/MFG may also request that same original.
+    const auto modelSize=ProcessingSourceRect(CanProjectJvr()).Size();
+    const bool fullOriginal=visible==area && visible==picture && area.Size()==modelSize &&
+        MfgDepthSourceEligible() && !m_bInterlaced;
+    if(fullOriginal && (UsesDepthSr() || UsesDepthMfg()))
+        m_depth.Update(m_pDevice,m_pDeviceContext,source.pShaderResource,visible,modelSize,pts);
+    if(UsesDepthSr() || UsesDepthMfg()) m_depth.PollCompleted();
+    a.allowDraw=adaptive; a.applied=false; a.sourceComposition=true;
     struct Restore { bool& draw; bool& source; ~Restore(){draw=false;source=false;} } restore{a.allowDraw,a.sourceComposition};
-    // The SRV is the original, never the output or a generated picture.
-    // Keep nonblocking readback and existing resource pressure gates.
-    PollAdaptiveTone(pts);
-    ObserveAdaptiveTone(source,visible,pts,false);
-    if(!AdaptiveToneSupported() || AdaptiveToneWeight(pts)<=0) return raw;
-    if(a.shaderFailed || (!a.shader && (!a.job || !a.job->ready.load(std::memory_order_acquire)))) return raw;
-    // [FA-03B | 2026-11-25 15:09 +08:00] For DLSS SR use its existing
-    // native-size FP16 input as the destination: replace the simple copy,
-    // rather than render to a UNORM scratch and copy/quantize again.
+    if(adaptive) {
+        ConfirmEarlyAdaptiveTone(source,visible,pts);
+        PollAdaptiveTone(pts);
+    }
+    // Observation queues a readback; it does not change the current shot/curve.
+    // Preserve it even on a neutral frame or output allocation failure.
+    const auto observeTone=[&] {
+        if(adaptive) ObserveAdaptiveTone(source,visible,pts,false);
+    };
+    const bool tone=adaptive && AdaptiveToneWeight(pts)>0;
+    if(!perceptual && !tone) { observeTone(); return raw; }
     if(!directTarget) {
-        if(FAILED(a.sourceOutput.CheckCreate(m_pDevice,source.desc.Format,source.desc.Width,source.desc.Height,Tex2D_DefaultShaderRTarget))) return raw;
+        if(FAILED(a.sourceOutput.CheckCreate(m_pDevice,source.desc.Format,source.desc.Width,source.desc.Height,Tex2D_DefaultShaderRTarget))) {
+            observeTone();
+            return raw;
+        }
         directTarget=a.sourceOutput.pTexture.p;
     }
-    if(directTarget==raw) return raw;
-    const auto hr=DrawAdaptiveTone(source,directTarget,area,area,pts,&visible);
+    if(!directTarget || directTarget==raw) { observeTone(); return raw; }
+    // B1/B2.1/B2.2 remain fused with Adaptive Tone and perceptual colour.
+    // The current original's asynchronous thumbnail may not be ready; never
+    // stall the decoder, and never grade the MFG descendants to compensate.
+    auto& b=m_svdLutRawTest;
+    b.active=false;
+    HRESULT hr=S_FALSE;
+    const bool allowDepth=fullOriginal || (visible==area && visible==picture &&
+        MfgDepthSourceEligible() && !CanProjectJvr() && m_renderRect==m_videoRect &&
+        m_depth.MatchesColorSource(modelSize.cx,modelSize.cy));
+    bool observedWithLut=false;
+    if(m_pFilter->m_videoEnhancement.load() && !b.failed &&
+        (b.activationPts!=INVALID_TIME || VideoEnhancementMayStart(false))) {
+        if(!b.attempted) StartSvdLutRawTest();
+        if(!b.failed && b.model.GetState()==svdlut::ModelWorker::State::Ready) {
+            if(FAILED(PrepareSvdLutRawResources())) b.failed=true;
+            else {
+                // The actual ungraded RGB is the analysis input. Capture
+                // and grade are separate entry points, preserving FIX10's
+                // order: poll/capture -> AT observation -> poll/select/draw.
+                observedWithLut=true;
+                const bool pausedReplay=BeginSvdLutAnalysis(source,visible,pts,0,true);
+                if(a.sourceComposition && a.allowDraw) ObserveAdaptiveTone(source,visible,pts,false);
+                hr=ApplySvdLutRawFrame(source,directTarget,area,visible,CPoint(0,0),pts,0,true,allowDepth,pausedReplay);
+            }
+        }
+    }
+    if(!observedWithLut) observeTone();
+    if(hr!=S_OK && perceptual)
+        hr=ApplyPerceptual(source,directTarget,area,visible,CPoint(0,0),pts,
+            0,nullptr,{1.0f,1.0f,1.0f},false,1.0f,allowDepth);
+    if(hr!=S_OK && tone)
+        hr=DrawAdaptiveTone(source,directTarget,area,area,pts,&visible);
     m_pDeviceContext->OMSetRenderTargets(0,nullptr,nullptr);
+    ID3D11ShaderResourceView* empty=nullptr;
+    m_pDeviceContext->PSSetShaderResources(0,1,&empty);
     return hr==S_OK ? directTarget : raw;
 }
 
@@ -272,7 +422,7 @@ void CDX11VideoProcessor::DrawAdaptiveToneTarget(ID3D11Texture2D* target,const C
     if(CopyAdaptiveTonePicture(target,picture,visible,local)) DrawAdaptiveTone(m_svdLut.picture,target,local,visible,pts);
 }
 void CDX11VideoProcessor::BeginAdaptiveToneLegacy(ID3D11Texture2D* target,const CRect& picture,REFERENCE_TIME pts,bool allowCapture) {
-    auto& a=m_adaptiveTone; a.allowDraw=OptionalColorSupported();a.applied=false;
+    auto& a=m_adaptiveTone; a.allowDraw=!a.sourceToneBeforeUpscale && OptionalColorSupported();a.applied=false;
     if(!a.allowDraw) return;
     PollAdaptiveTone(pts);
     if(!allowCapture || !AdaptiveToneCaptureAllowed(pts,false)) return;

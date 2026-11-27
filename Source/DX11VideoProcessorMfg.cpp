@@ -9,6 +9,7 @@
 #include "Mfg/CadenceTrace.h"
 #include <algorithm>
 #include <limits>
+#include <new>
 #include <vector>
 #include <cwchar>
 extern bool g_bPresent;
@@ -86,6 +87,9 @@ void CDX11VideoProcessor::ResetMfgPostVsr() {
     m_mfgPreVsrVP.ReleaseVideoDevice();
     m_mfgPostVsrVP.ReleaseVideoDevice();
     m_mfgPostVsrReady = false;
+    ++m_mfgPostVsrGeneration;
+    m_mfgPreVsrProcAmp.reset();
+    m_mfgPostVsrDecodedWidth = m_mfgPostVsrDecodedHeight = m_mfgPostVsrExFmt = 0;
     m_mfgPostVsrWidth = m_mfgPostVsrHeight = 0;
     m_mfgPostVsrSourceFmt = DXGI_FORMAT_UNKNOWN;
     m_mfgPostVsrSetting = SUPERRES_Disable;
@@ -96,10 +100,25 @@ bool CDX11VideoProcessor::EnsureMfgPostVsr() {
         !m_bVPUseSuperRes || m_VendorId != PCIV_NVIDIA ||
         m_srcDXGIFormat == DXGI_FORMAT_UNKNOWN || !m_srcWidth || !m_srcHeight ||
         !m_srcRectWidth || !m_srcRectHeight || m_srcParams.CDepth != 8) return false;
-    if (m_mfgPostVsrReady && m_mfgPostVsrWidth == UINT(m_srcRectWidth) &&
+    // This is a property of the source CSC, not of the post-MFG RGB VP
+    // or its generation. Existing queued RGB frames are already corrected.
+    const auto syncProcAmp = [this] {
+        const auto& p = m_DXVA2ProcAmpValues;
+        const std::array<LONG, 4> key{p.Brightness.ll, p.Contrast.ll, p.Hue.ll, p.Saturation.ll};
+        if (!m_mfgPreVsrProcAmp || *m_mfgPreVsrProcAmp != key) {
+            m_mfgPreVsrVP.SetExternalProcAmpValues(p);
+            m_mfgPreVsrProcAmp = key;
+        }
+    };
+    if (m_mfgPostVsrReady && m_mfgPostVsrDecodedWidth == m_srcWidth &&
+        m_mfgPostVsrDecodedHeight == m_srcHeight && m_mfgPostVsrExFmt == m_srcExFmt.value &&
+        m_mfgPostVsrWidth == UINT(m_srcRectWidth) &&
         m_mfgPostVsrHeight == UINT(m_srcRectHeight) &&
         m_mfgPostVsrSourceFmt == m_srcDXGIFormat &&
-        m_mfgPostVsrSetting == m_iVPSuperRes) return true;
+        m_mfgPostVsrSetting == m_iVPSuperRes) {
+        syncProcAmp();
+        return true;
+    }
     ResetMfgPostVsr();
     const auto fail=[this](const wchar_t* stage,HRESULT hr) {
         DLog(L"Hybrid post-MFG RTX VSR not available at {}: {} (keeping Golden path)",stage,HR2Str(hr));
@@ -126,11 +145,15 @@ bool CDX11VideoProcessor::EnsureMfgPostVsr() {
         return fail(L"post-VP RGB input",FAILED(hr)?hr:E_INVALIDARG);
     hr=m_mfgPostVsrVP.SetSuperRes(m_iVPSuperRes);
     if (hr!=S_OK) return fail(L"post-VP NVIDIA VSR extension",hr);
+    m_mfgPostVsrDecodedWidth=m_srcWidth;
+    m_mfgPostVsrDecodedHeight=m_srcHeight;
+    m_mfgPostVsrExFmt=m_srcExFmt.value;
     m_mfgPostVsrWidth=UINT(m_srcRectWidth);
     m_mfgPostVsrHeight=UINT(m_srcRectHeight);
     m_mfgPostVsrSourceFmt=m_srcDXGIFormat;
     m_mfgPostVsrSetting=m_iVPSuperRes;
     m_mfgPostVsrReady=true;
+    syncProcAmp();
     DLog(L"Hybrid MFG -> RTX VSR: D3D11 driver accepted RGB VP extension at {}x{}; visual effect NOT yet verified",
         m_mfgPostVsrWidth,m_mfgPostVsrHeight);
     return true;
@@ -186,7 +209,9 @@ void CDX11VideoProcessor::SwitchMfgUpscaleSlot(unsigned requestedMode) {
         if (m_pDXGISwapChain1 && m_pFilter->m_filterState == State_Running &&
             !m_videoRect.IsRectEmpty()) {
             if (source.prepared) {
-                hr = FinishMfgPresent(m_mfgPreparedTexture, source.frame.timestamp, source.frame.serial);
+                const auto picture = PictureForPlayback(source.frame.legacyRoute.projected);
+                hr = FinishMfgPresent(m_mfgPreparedTexture, source.frame.timestamp,
+                    source.frame.legacyRoute.retired ? 0 : source.frame.serial, false, &picture);
             } else if (source.frame.original && source.frame.original->texture && source.frame.original->view) {
                 const mfg::FrameSurface surface{source.frame.original->texture.Get(),
                                                 source.frame.original->view.Get()};
@@ -195,11 +220,13 @@ void CDX11VideoProcessor::SwitchMfgUpscaleSlot(unsigned requestedMode) {
                 // safe when switching AWAY from a failing post-SR route.
                 CComPtr<ID3D11Texture2D> back;
                 hr = m_pDXGISwapChain1->GetBuffer(0, IID_PPV_ARGS(&back));
+                const auto picture = PictureForPlayback(source.frame.legacyRoute.projected);
                 if (SUCCEEDED(hr))
                     hr = RenderMfgVideo(surface, source.frame.nativeInput, back,
-                                        source.frame.timestamp, PictureForPlayback(CanProjectJvr()), m_mfgLastVideoOnlyInput, true);
+                                        source.frame.timestamp, picture, source.frame.legacyRoute.videoOnly, true);
                 if (SUCCEEDED(hr))
-                    hr = FinishMfgPresent(back, source.frame.timestamp, source.frame.serial);
+                    hr = FinishMfgPresent(back, source.frame.timestamp,
+                        source.frame.legacyRoute.retired ? 0 : source.frame.serial, false, &picture);
             }
         }
         if (SUCCEEDED(hr)) {
@@ -274,7 +301,11 @@ std::wstring CDX11VideoProcessor::MfgFrameAnalysisStatus() const {
     return status;
 }
 
-void CDX11VideoProcessor::StopMfg(bool release, bool fastShutdown) {
+void CDX11VideoProcessor::StopMfg(bool release, bool fastShutdown, bool preserveLegacyRoute) {
+    // The preservation mode is ONLY for an in-timeline legacy handoff.
+    // Stop/Flush/device teardown retain their existing clearing semantics.
+    const bool retainLegacy = preserveLegacyRoute && !release && !fastShutdown;
+    m_mfgLegacyFallbackActive=false;
     ResetMfgFrameAnalysis();
     m_mfgLastSourceColorFinal.reset();
     m_mfgLastToneBeforeUpscale=false;
@@ -286,7 +317,13 @@ void CDX11VideoProcessor::StopMfg(bool release, bool fastShutdown) {
         m_dlssSR.ResetHistory();
         m_dlssSRAfterMfg = false;
     }
-    DiscardMfgPreparedFrame();
+    unsigned retiredGenerated = 0;
+    if (retainLegacy && m_mfgPreparedFrame && m_mfgPreparedFrame->index == mfg::MaxGenerated) {
+        m_mfgPreparedFrame->legacyRoute.retired = true;
+    } else {
+        if (retainLegacy && m_mfgPreparedFrame) ++retiredGenerated;
+        DiscardMfgPreparedFrame();
+    }
     m_mfgPrepareLeadUs.store(0,std::memory_order_relaxed);
     m_mfgPrepareLastDrawUs.store(0,std::memory_order_relaxed);
     m_mfgPrepareReadyMarginUs.store(0,std::memory_order_relaxed);
@@ -295,7 +332,19 @@ void CDX11VideoProcessor::StopMfg(bool release, bool fastShutdown) {
     m_mfgDisplayLastLateUs.store(0,std::memory_order_relaxed);
     m_mfgDisplayP95NeedUs.store(0,std::memory_order_relaxed);
     m_mfgDisplaySamples.store(0,std::memory_order_relaxed);
-    {std::lock_guard guard(m_mfgQueueLock);m_mfgQueue.Clear();m_mfgLiveFlowGroups.Clear();}
+    {
+        std::lock_guard guard(m_mfgQueueLock);
+        if (retainLegacy) {
+            retiredGenerated += m_mfgQueue.RetireLegacyRoute() + m_mfgLiveFlowGroups.RetireLegacyRoute();
+        } else {
+            m_mfgQueue.Clear();
+            m_mfgLiveFlowGroups.Clear();
+        }
+    }
+    if (retiredGenerated) {
+        m_mfgSkipped.fetch_add(retiredGenerated, std::memory_order_relaxed);
+        m_mfgLostGenerated.fetch_add(retiredGenerated, std::memory_order_relaxed);
+    }
 	{
 		std::lock_guard paceGuard(m_mfgPacingLock);
 		m_mfgPacing.Reset();
@@ -326,6 +375,121 @@ void CDX11VideoProcessor::StopMfg(bool release, bool fastShutdown) {
         ResetMfgPostVsr();m_mfgPostVsrBroken=false;
     }
 }
+// A refused NGX producer is not a failed DXGI presenter. Keep independent
+// legacy originals in their existing paced scheduler, including when a
+// layout-change StopMfg already stopped the worker. Never run this on the
+// completed, cancelled, clock-stalled or failed-presenter timeline.
+bool CDX11VideoProcessor::RetireLegacyMfgForFallback() {
+    const auto ticket=m_pFilter->m_playbackCancel.Capture();
+    if (m_completingSample || m_mfgPresentFailed || m_mfgThread.Failed() || m_pPSHalfOUtoInterlace ||
+        m_pFilter->m_filterState != State_Running || m_pFilter->m_bClockStalled ||
+        ticket->Cancelled()) return false;
+    // HDR metadata is still owned by the live decoder/SwapChain, not the
+    // legacy snapshots. Do not extend delayed direct presentation into HDR
+    // or a dynamic output color-space transition without a separate contract.
+    if (SourceIsHDR() || m_bVPUseRTXVideoHDR || m_bVPRTXVideoHDR || m_Dovi.bValid ||
+        m_SwapChainFmt!=DXGI_FORMAT_B8G8R8A8_UNORM ||
+        m_currentSwapChainColorSpace!=DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709) return false;
+    {
+        std::lock_guard guard(m_mfgQueueLock);
+        if (!(m_mfgPreparedFrame && m_mfgPreparedFrame->index==mfg::MaxGenerated) &&
+            !m_mfgQueue.PendingOriginals() && !m_mfgLiveFlowGroups.PendingOriginals()) return false;
+    }
+    StopMfg(false,false,true);
+    if (ticket->Cancelled()) return false; // Stop/Flush owns the old timeline
+    // A later successful NGX submission must not interpolate across a
+    // source that was rendered by the ordinary fallback pipeline. Preserve
+    // a permanent NGX failure (ResetHistory on a failed Session clears it).
+    if (!m_mfg.Failed()) m_mfg.ResetHistory();
+    m_mfgAutoEpoch=m_mfgAutoLastPts=-1;
+    try {
+        m_mfgThread.Start([this](int64_t& deadline){return NextMfg(deadline);},[this]{return PresentMfg();});
+        m_mfgLegacyFallbackActive=true;
+        m_mfgThread.Wake();
+        return true;
+    } catch (...) {
+        StopMfg(false);
+        DLog(L"MFG legacy fallback: presenter restart failed");
+        return false;
+    }
+}
+
+std::optional<HRESULT> CDX11VideoProcessor::QueueLegacyMfgFallback(ID3D11Texture2D* image,
+    REFERENCE_TIME timestamp, bool projected) {
+    if (!m_mfgLegacyFallbackActive || m_completingSample) return {};
+    const auto ticket=m_pFilter->m_playbackCancel.Capture();
+    if (ticket->Cancelled()) return S_OK;
+    if (m_mfgPresentFailed || m_mfgThread.Failed() || SourceIsHDR() ||
+        m_bVPUseRTXVideoHDR || m_bVPRTXVideoHDR || m_Dovi.bValid ||
+        m_SwapChainFmt!=DXGI_FORMAT_B8G8R8A8_UNORM ||
+        m_currentSwapChainColorSpace!=DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709) {
+        StopMfg(false);
+        return {};
+    }
+    if (!LegacyFramesPending()) {
+        // No ordering conflict remains: ordinary direct presentation needs
+        // neither a texture copy nor another queue entry.
+        StopMfg(false); // the bridge is drained; release its idle worker
+        return {};
+    }
+    CRefTime stream;
+    if (FAILED(m_pFilter->StreamTime(stream))) {
+        StopMfg(); // existing invalid-clock teardown, not a paced handoff
+        return {};
+    }
+    // The ordinary render path has finished CSC, SR/VSR, VE and resize.
+    // Copy this exact video-only backbuffer (including bars, without OSD)
+    // before the producer releases RendererLock. Do not borrow it from DXGI
+    // or from the failed NGX session. Same immediate context orders the copy
+    // before its later read; no fence, Flush or CPU wait is introduced.
+    auto fail=[this](HRESULT hr) -> std::optional<HRESULT> {
+        ++m_mfgLostReal;
+        ++m_mfgSkipped;
+        DLog(L"MFG legacy fallback: current original snapshot failed: {}",HR2Str(hr));
+        // Do not present the current picture ahead of older originals.
+        // Their worker is still running, so this failure cannot strand them.
+        return hr;
+    };
+    if (!image) return fail(E_POINTER);
+    D3D11_TEXTURE2D_DESC desc{};
+    image->GetDesc(&desc);
+    if (desc.Format!=DXGI_FORMAT_B8G8R8A8_UNORM || desc.ArraySize!=1 ||
+        desc.MipLevels!=1 || desc.SampleDesc.Count!=1) return fail(E_INVALIDARG);
+    desc.Usage=D3D11_USAGE_DEFAULT;
+    desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    desc.CPUAccessFlags=0;
+    desc.MiscFlags=0;
+    std::shared_ptr<mfg::OriginalSnapshot> snapshot;
+    try { snapshot=std::make_shared<mfg::OriginalSnapshot>(); }
+    catch (...) { return fail(E_OUTOFMEMORY); }
+    auto hr=m_pDevice->CreateTexture2D(&desc,nullptr,snapshot->texture.GetAddressOf());
+    if (FAILED(hr)) return fail(hr);
+    hr=m_pDevice->CreateShaderResourceView(snapshot->texture.Get(),nullptr,snapshot->view.GetAddressOf());
+    if (FAILED(hr)) return fail(hr);
+    if (ticket->Cancelled()) return S_OK;
+    m_pDeviceContext->OMSetRenderTargets(0,nullptr,nullptr);
+    ID3D11ShaderResourceView* empty=nullptr;
+    m_pDeviceContext->PSSetShaderResources(0,1,&empty);
+    m_pDeviceContext->CopyResource(snapshot->texture.Get(),image);
+    if (ticket->Cancelled()) return S_OK;
+    // Serial is a nonzero admission marker only. The retired, source-only
+    // route never queries NGX banks or draws bank-dependent overlays.
+    const mfg::Batch batch{1,0,-1,timestamp,std::move(snapshot)};
+    const mfg::LegacyPictureRoute route{false,projected,0,true,true};
+    const auto qpc=int64_t(GetPreciseTick());
+    const auto frequency=GetPreciseTicksPerSecond();
+    const double hz=m_dRefreshPeriodMs>0.0?1000.0/m_dRefreshPeriodMs:0.0;
+    try {
+        std::lock_guard guard(m_mfgQueueLock);
+        if (LiveFlowCoreEnabled())
+            m_mfgLiveFlowGroups.Add(batch,qpc,stream,frequency,m_rtVideoDelay,hz,false,2,
+                false,false,false,{},mfg::LiveFlowGroups::DeadlineMode::Qpc,route);
+        else m_mfgQueue.Add(batch,qpc,stream,frequency,m_rtVideoDelay,hz,false,2,false,{},route);
+    } catch (const std::bad_alloc&) { return fail(E_OUTOFMEMORY); }
+    m_mfgThread.Wake();
+    return S_OK;
+}
+
 bool CDX11VideoProcessor::NextMfg(int64_t& deadline) {
     const double hz=m_dRefreshPeriodMs>0.0?1000.0/m_dRefreshPeriodMs:0.0;
     const double leadMs=DisplayPacingEnabled()?m_mfgDisplayPacing.Start(hz):0.0;
@@ -351,7 +515,10 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
     m_mfg.SetCancellation(ticket);
     if(m_mfgThread.Failed())m_mfgPresentFailed=true;
     if(m_mfgPresentFailed) {StopMfg(false);return false;}
-    if(m_mfg.Failed())return false;
+    if(m_mfg.Failed()) {
+        if (!m_mfgLegacyFallbackActive) RetireLegacyMfgForFallback();
+        return false;
+    }
     const unsigned requested=m_mfgMultiplier.load(std::memory_order_relaxed);
     const double refreshHz=m_dRefreshPeriodMs>0.0 ? 1000.0/m_dRefreshPeriodMs : 0.0;
     const auto inputPeriod=m_pFilter->m_FrameStats.GetAverageFrameDuration();
@@ -361,11 +528,20 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
     const bool routeChanged = m_mfgInputModeKnown && (m_mfgLastNativeInput != nativeInput ||
         m_mfgLastPostVsrInput != postVsrInput || m_mfgLastVideoOnlyInput != videoOnlyInput);
     const Tex2D_t* sourceToneInput = nullptr;
+    Tex2D_t borrowedColorSource;
     const bool upstreamTone=m_adaptiveTone.sourceToneBeforeUpscale;
-    if(!upstreamTone && SourceToneEligible()) {
+    if(!upstreamTone && image && (PerceptualEnabled() || OptionalColorSupported()) && SourceToneEligible()) {
         const auto* raw = nativeInput ? (projected ? &m_jvrFrame : &m_mfgNativeInput) :
-            (m_completedTarget->image.pTexture.p == image ? &m_completedTarget->image : &m_processingTexture);
+            (m_completedTarget && m_completedTarget->image.pTexture.p == image ?
+                &m_completedTarget->image : &m_processingTexture);
         if(raw->pTexture.p == image && raw->pShaderResource) sourceToneInput=raw;
+        else {
+            borrowedColorSource.pTexture=image;
+            image->GetDesc(&borrowedColorSource.desc);
+            if((borrowedColorSource.desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) &&
+                SUCCEEDED(m_pDevice->CreateShaderResourceView(image,nullptr,&borrowedColorSource.pShaderResource)))
+                sourceToneInput=&borrowedColorSource;
+        }
     }
     const bool sourceColorFinal = upstreamTone || sourceToneInput != nullptr;
     const bool colorRouteChanged = m_mfgLastSourceColorFinal.has_value() &&
@@ -448,6 +624,9 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
         m_mfgLowMotionActive = m_mfgLowMotionStreak == EnterSavingAfter && m_mfgQuietFlowCredit > 0;
         if (difference == mfg::FrameDifference::Cut) {
             if (UsesDepthSr() || UsesDepthMfg()) m_depth.MarkSceneCut(timestamp);
+            // The current native original has not been composed yet. Do not
+            // carry an old-shot grade across a confirmed decoded scene cut.
+            if (!upstreamTone && m_pFilter->m_videoEnhancement.load()) ResetSvdLutTemporalQueue();
         }
         if (difference == mfg::FrameDifference::Cut || m_mfgRepeatHold || (repeatPending && !repeatBridge)) {
             m_mfg.ResetHistory();
@@ -499,7 +678,10 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
     // A same-sized texture can change meaning when a display mode toggles.
     // Do not interpolate across native-video and full-backbuffer layouts.
     if (routeChanged) {
-        StopMfg(false);
+        // Completed admission already drains the legacy presenter. On the
+        // legacy path keep independent original snapshots at their deadlines.
+        // Old synthetic phases must not survive a layout/session transition.
+        StopMfg(false, false, !m_completingSample);
         m_mfg.ResetHistory();
         m_mfgRepeatTiming.Observe(-1, timestamp, inputPeriod, 0, false, m_mfgAutoEpoch, refreshHz, maxMultiplier);
     }
@@ -539,23 +721,108 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
         }
     }
 
-    // [FA-03A | 2026-11-25 14:57 +08:00] Independent AT only, on
-    // Completed originals. Depth and decoded difference remain raw. The
-    // same D3D11 context copies the corrected texture into MFG's owned bank.
-    // FA-03B: DLSS SR already received the original-size graded image;
-    // its depth capture also used the ungraded original. Do not repeat either.
+    // VE01-FIX02: depth preview is a producer-side diagnostic, not a
+    // separate matte sampled against generated-frame presentation PTS.
+    // Reuse the existing overlay capture texture, but never modify the
+    // raw input: a refused MFG submission must still have the original.
+    const CRect overlayPicture(sourcePicture);
+    const SIZE overlayModelSize{frameSource.Width(), frameSource.Height()};
+    bool prepareDepthOverlay = false;
+    if (DepthOverlayEnabled() && !overlayInputHandled && image &&
+        (projected || nativeInput || videoOnlyInput || m_renderRect == m_videoRect) &&
+        overlayModelSize.cx > 0 && overlayModelSize.cy > 0 && !overlayPicture.IsRectEmpty()) {
+        D3D11_TEXTURE2D_DESC desc{};
+        image->GetDesc(&desc);
+        if (desc.ArraySize == 1 && desc.MipLevels == 1 && desc.SampleDesc.Count == 1 &&
+            overlayPicture.left >= 0 && overlayPicture.top >= 0 &&
+            overlayPicture.right <= LONG(desc.Width) && overlayPicture.bottom <= LONG(desc.Height) &&
+            image != m_depthOverlayCapture.pTexture.p &&
+            SUCCEEDED(m_depthOverlayCapture.CheckCreate(m_pDevice, desc.Format, desc.Width,
+                desc.Height, Tex2D_DefaultShaderRTarget))) {
+            prepareDepthOverlay = true;
+            // Only capture a clean original. SR/VE and projection may have
+            // already submitted it; the depth producer deduplicates by PTS.
+            if (!upstreamTone && !projected && (!depth || depth->captureSource)) {
+                m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+                ID3D11ShaderResourceView* empty = nullptr;
+                m_pDeviceContext->PSSetShaderResources(0, 1, &empty);
+                m_pDeviceContext->CopyResource(m_depthOverlayCapture.pTexture, image);
+                m_depth.Update(m_pDevice, m_pDeviceContext, m_depthOverlayCapture.pShaderResource,
+                    overlayPicture, overlayModelSize, timestamp);
+                // Never let NGX recapture the false-colour input as depth.
+                if (depth) depth->captureSource = false;
+            }
+        }
+    }
+
+    // MFG-only originals need the same exact-first depth opportunity even
+    // with all colour controls and the diagnostic overlay disabled.
+    if (depth && depth->captureSource && !upstreamTone && !sourceToneInput && image) {
+        D3D11_TEXTURE2D_DESC desc{};
+        image->GetDesc(&desc);
+        CComPtr<ID3D11ShaderResourceView> rawView;
+        const auto* known = nativeInput ? (projected ? &m_jvrFrame : &m_mfgNativeInput) :
+            (m_completedTarget && m_completedTarget->image.pTexture.p == image ?
+                &m_completedTarget->image : &m_processingTexture);
+        if (known->pTexture.p == image && known->pShaderResource)
+            rawView=known->pShaderResource;
+        else if (desc.BindFlags & D3D11_BIND_SHADER_RESOURCE)
+            m_pDevice->CreateShaderResourceView(image,nullptr,&rawView);
+        if (!rawView && image != m_depthOverlayCapture.pTexture.p &&
+            desc.ArraySize == 1 && desc.MipLevels == 1 && desc.SampleDesc.Count == 1 &&
+            SUCCEEDED(m_depthOverlayCapture.CheckCreate(m_pDevice,desc.Format,desc.Width,desc.Height,Tex2D_DefaultShaderRTarget))) {
+            m_pDeviceContext->OMSetRenderTargets(0,nullptr,nullptr);
+            ID3D11ShaderResourceView* empty=nullptr;
+            m_pDeviceContext->PSSetShaderResources(0,1,&empty);
+            m_pDeviceContext->CopyResource(m_depthOverlayCapture.pTexture,image);
+            rawView=m_depthOverlayCapture.pShaderResource;
+        }
+        if (rawView) {
+            m_pDeviceContext->OMSetRenderTargets(0,nullptr,nullptr);
+            m_depth.Update(m_pDevice,m_pDeviceContext,rawView,depth->picture,depth->modelSize,timestamp);
+            depth->captureSource=false;
+        }
+    }
+
+    // VE-SOURCE: preserve raw depth capture and finish colour on the
+    // original surface before MFG owns/copies it. Upstream SR/VSR already
+    // received the composed original; never compose their output twice.
     if(upstreamTone && depth) depth->captureSource=false;
     if(sourceToneInput) {
-        auto* corrected=PrepareSourceTone(*sourceToneInput, CRect(sourcePicture), timestamp);
-        if(corrected != image) {
-            // Preserve the existing raw depth input and avoid capturing
-            // again from the corrected MFG snapshot.
-            if(depth && depth->captureSource) {
-                m_depth.Update(m_pDevice,m_pDeviceContext,sourceToneInput->pShaderResource,
-                    depth->picture,depth->modelSize,timestamp);
-                depth->captureSource=false;
-            }
-            image=corrected;
+        if(depth && depth->captureSource) {
+            m_pDeviceContext->OMSetRenderTargets(0,nullptr,nullptr);
+            ID3D11ShaderResourceView* empty=nullptr;
+            m_pDeviceContext->PSSetShaderResources(0,1,&empty);
+            m_depth.Update(m_pDevice,m_pDeviceContext,sourceToneInput->pShaderResource,
+                depth->picture,depth->modelSize,timestamp);
+            depth->captureSource=false;
+        }
+        auto* corrected=PrepareSourceTone(*sourceToneInput,CRect(sourcePicture),timestamp);
+        if(corrected) image=corrected;
+    }
+    if (UsesDepthSr() || UsesDepthMfg()) {
+        m_depth.AwaitOriginal(timestamp,m_sampleDuration,ticket->Event());
+        if (ticket->Cancelled()) return false;
+    }
+    // Freeze the preview into this original BEFORE either CaptureOriginal
+    // or Generate. Both original and generated descendants now inherit it.
+    // Exact original PTS is preferred; only the preceding original may
+    // substitute when that map misses its bounded producer deadline.
+    if (prepareDepthOverlay && image && image != m_depthOverlayCapture.pTexture.p) {
+        m_depth.PollCompleted();
+        const auto estimate = m_depth.ForFrame(timestamp);
+        if (estimate.view && m_depth.MatchesColorSource(overlayModelSize.cx, overlayModelSize.cy)) {
+            m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+            ID3D11ShaderResourceView* empty = nullptr;
+            m_pDeviceContext->PSSetShaderResources(0, 1, &empty);
+            m_pDeviceContext->CopyResource(m_depthOverlayCapture.pTexture, image);
+            const auto tensor = m_depth.TensorSize();
+            DrawDepthView(m_depthOverlayCapture.pTexture, overlayPicture, estimate.view, tensor,
+                CRect(0, 0, tensor.cx, tensor.cy), estimate.rotated ? 270 : 0, false);
+            m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+            m_pDeviceContext->PSSetShaderResources(0, 1, &empty);
+            if (depth) depth->captureSource = false;
+            image = m_depthOverlayCapture.pTexture.p;
         }
     }
     mfg::Batch batch;
@@ -590,7 +857,8 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
     if (generateEnd>generateStart) m_mfgGenerateTicks.fetch_add(uint64_t(generateEnd-generateStart),std::memory_order_relaxed);
     m_mfgGenerateCount.fetch_add(1,std::memory_order_relaxed);
     if(!generated) {
-        StopMfg(false);DLog(L"MFG unavailable: {}",m_mfg.Status());return false;
+        if (!RetireLegacyMfgForFallback()) StopMfg(false);
+        DLog(L"MFG unavailable: {}",m_mfg.Status());return false;
     }
     m_mfgLastSourceColorFinal=sourceColorFinal;
     m_mfgLastToneBeforeUpscale=upstreamTone;
@@ -625,8 +893,11 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
         m_mfgSkipped += lost.generated;
         auto phases = m_completedGroups.TakeBufferedGroup();
         if (phases.empty()) return false;
-        m_completedTarget->sourceColorFinal=sourceColorFinal;
-        m_completedBatches.push_back({std::move(*m_completedTarget), std::move(phases), videoOnlyInput});
+        // Even neutral startup/fallback frames are final; their generated
+        // descendants must never get a separate colour/depth repaint.
+        m_completedTarget->sourceColorFinal=true;
+        m_completedBatches.push_back({std::move(*m_completedTarget), std::move(phases), videoOnlyInput,
+            postVsrInput ? m_mfgPostVsrGeneration : 0});
         m_completedTarget.reset();
         m_completedPresenter.Wake();
         return true;
@@ -654,13 +925,15 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
             m_mfgExtraAheadTicks.store(int64_t(extraMs*10000.0),std::memory_order_relaxed);
         }
     }
+    const mfg::LegacyPictureRoute legacyRoute{videoOnlyInput, projected,
+        postVsrInput ? m_mfgPostVsrGeneration : 0};
     {std::lock_guard guard(m_mfgQueueLock);
         const auto lost=LiveFlowCoreEnabled()
             ? m_mfgLiveFlowGroups.Add(batch,qpc,stream,GetPreciseTicksPerSecond(),m_rtVideoDelay,
                 m_dRefreshPeriodMs>0?1000./m_dRefreshPeriodMs:0.,nativeInput,m_mfg.BankCount(),autoMode,
-                DynamicSourceTimingEnabled(), repeatBridge, batchTiming)
+                DynamicSourceTimingEnabled(), repeatBridge, batchTiming, mfg::LiveFlowGroups::DeadlineMode::Qpc, legacyRoute)
             : m_mfgQueue.Add(batch,qpc,stream,GetPreciseTicksPerSecond(),m_rtVideoDelay,
-                m_dRefreshPeriodMs>0?1000./m_dRefreshPeriodMs:0.,nativeInput,m_mfg.BankCount(),autoMode,batchTiming);
+                m_dRefreshPeriodMs>0?1000./m_dRefreshPeriodMs:0.,nativeInput,m_mfg.BankCount(),autoMode,batchTiming,legacyRoute);
         if(lost.Total()) {
             m_mfgSkipped.fetch_add(lost.Total(),std::memory_order_relaxed);
             m_mfgLostReal.fetch_add(lost.real,std::memory_order_relaxed);
@@ -676,6 +949,7 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
             m_mfgLostGenerated.load(std::memory_order_relaxed),0);
     try {
         m_mfgThread.Start([this](int64_t& deadline){return NextMfg(deadline);},[this]{return PresentMfg();});
+        m_mfgLegacyFallbackActive=false;
         m_mfgThread.Wake();return true;
     }catch(...) {StopMfg();return false;}
 }
@@ -728,7 +1002,8 @@ bool CDX11VideoProcessor::PresentMfg() {
                    SUCCEEDED(m_pDXGISwapChain1->GetBuffer(0,IID_PPV_ARGS(&back)))) {
                     drawn=EnsureMfgPreparedTexture(back);
                     if(SUCCEEDED(drawn)) drawn=RenderMfgVideo(surface,candidate->nativeInput,m_mfgPreparedTexture,
-                        candidate->timestamp, PictureForPlayback(CanProjectJvr()), m_mfgLastVideoOnlyInput, false, CanProjectJvr());
+                        candidate->timestamp, PictureForPlayback(candidate->legacyRoute.projected), candidate->legacyRoute.videoOnly,
+                        candidate->legacyRoute.retired, candidate->legacyRoute.projected, candidate->legacyRoute.postVsrGeneration);
                 }
                 if(SUCCEEDED(drawn)) {
                     const int64_t drawFinished=int64_t(GetPreciseTick());
@@ -840,7 +1115,9 @@ bool CDX11VideoProcessor::PresentMfg() {
     const auto composeStart=int64_t(GetPreciseTick());
     HRESULT presentHr=E_FAIL;
     if(alreadyPrepared) {
-        presentHr=FinishMfgPresent(m_mfgPreparedTexture,frame->timestamp,frame->serial,false,nullptr,false,false,frame->index==mfg::MaxGenerated);
+        const auto picture = PictureForPlayback(frame->legacyRoute.projected);
+        presentHr=FinishMfgPresent(m_mfgPreparedTexture,frame->timestamp,
+            frame->legacyRoute.retired ? 0 : frame->serial,false,&picture,false,false,frame->index==mfg::MaxGenerated);
     } else {
         const auto surface=frame->index==mfg::MaxGenerated
             ? mfg::FrameSurface{frame->original ? frame->original->texture.Get() : nullptr,
@@ -860,7 +1137,7 @@ bool CDX11VideoProcessor::PresentMfg() {
                     m_mfgLostGenerated.load(std::memory_order_relaxed),long(E_FAIL));
             return true;
         }
-        presentHr=CompositeMfg(surface,frame->timestamp,frame->nativeInput,frame->serial,frame->index==mfg::MaxGenerated);
+        presentHr=CompositeMfg(surface,*frame);
         if(frame->index!=mfg::MaxGenerated) m_mfg.MarkConsumed(frame->serial);
     }
     const auto composeEnd=int64_t(GetPreciseTick());
@@ -871,7 +1148,12 @@ bool CDX11VideoProcessor::PresentMfg() {
         std::lock_guard guard(m_mfgQueueLock);m_mfgQueue.Clear();m_mfgLiveFlowGroups.Clear();
         m_mfgPresentFailed=true;
     } else if(presentHr==S_OK) {
-        if(frame->index==mfg::MaxGenerated)++m_mfgRealPresents;
+        if(frame->index==mfg::MaxGenerated) {
+            if (frame->legacyRoute.directFallback) {
+                ++m_mfgFallbackPresents;
+                m_startupHasPicture=true;
+            } else ++m_mfgRealPresents;
+        }
         else ++m_mfgGeneratedPresents;
     }
     if(mfg::SourceCadenceTrace().Enabled())
@@ -904,7 +1186,8 @@ HRESULT CDX11VideoProcessor::EnsureMfgPreparedTexture(ID3D11Texture2D* reference
 
 HRESULT CDX11VideoProcessor::RenderMfgVideo(const mfg::FrameSurface& surface, bool nativeInput, ID3D11Texture2D* target,
                                             REFERENCE_TIME timestamp, const CRect& targetPicture, bool videoOnlyInput,
-                                            bool bypassUpscale, bool projected) {
+                                            bool bypassUpscale, bool projected,
+                                            std::optional<uint64_t> postVsrGeneration) {
     if(!surface.texture || !surface.view || !target) return E_POINTER;
     Tex2D_t texture;texture.pTexture=surface.texture;texture.pShaderResource=surface.view;
     surface.texture->GetDesc(&texture.desc);
@@ -930,7 +1213,14 @@ HRESULT CDX11VideoProcessor::RenderMfgVideo(const mfg::FrameSurface& surface, bo
             return ResizeShaderPass(texture, target, sourceRect, targetPicture, 0, false);
         }
         const auto processingRect = m_processingSize.cx > 0 ? ProcessingRect() : targetPicture;
-        if(m_mfgLastPostVsrInput && m_mfgPostVsrReady && !m_mfgPostVsrBroken) {
+        // Completed batches own their route, not the latest producer's route.
+        // An invalidated VP must never be reused for an old batch. Keep the
+        // original and use the same plain resize as the existing fallback.
+        const bool postVsrInput = postVsrGeneration ? *postVsrGeneration != 0 : m_mfgLastPostVsrInput;
+        if (postVsrGeneration && postVsrInput &&
+            (*postVsrGeneration != m_mfgPostVsrGeneration || !m_mfgPostVsrReady || m_mfgPostVsrBroken))
+            return ResizeShaderPass(texture, target, sourceRect, targetPicture, 0);
+        if(postVsrInput && m_mfgPostVsrReady && !m_mfgPostVsrBroken) {
             auto vsrDestination = targetPicture;
             ID3D11Texture2D* vpInput=surface.texture;
             if(texture.desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM) {
@@ -994,7 +1284,7 @@ HRESULT CDX11VideoProcessor::RenderMfgVideo(const mfg::FrameSurface& surface, bo
 void CDX11VideoProcessor::DrawMfgPresentOverlays(ID3D11Texture2D* target, const CRect& picture,
     REFERENCE_TIME timestamp, uint64_t serial)
 {
-    if (DepthOverlayEnabled()) DrawDepthOverlay(target, picture, timestamp);
+    // Depth preview is already part of the original MFG input (FIX02).
     if (m_showMfgMotion) DrawMfgMotion(target, serial, timestamp, picture);
     const auto saved=m_rtStart;m_rtStart=timestamp;
     DrawSubtitles(target, &picture);m_rtStart=saved;
@@ -1027,12 +1317,10 @@ HRESULT CDX11VideoProcessor::FinishMfgPresent(ID3D11Texture2D* preparedVideo,REF
             // immediate context. No CPU fence wait is needed for the staged image.
             m_pDeviceContext->CopyResource(back,preparedVideo);
         }
-        if (!svdLutHandled) {
-            BeginAdaptiveToneLegacy(back,picture,timestamp,original);
-            DrawSvdLut(back,picture,timestamp,original);
-            DrawAdaptiveToneTarget(back,picture,timestamp);
-            m_adaptiveTone.allowDraw=false;
-        }
+        // MFG originals and generated frames already carry the producer's
+        // colour (or a neutral fallback). Only overlays remain at Present.
+        (void)svdLutHandled;
+        (void)original;
         DrawMfgPresentOverlays(back, picture, timestamp, serial);
     }
     // A DO_NOT_WAIT retry may reuse the exact same already-composited buffer.
@@ -1066,14 +1354,27 @@ HRESULT CDX11VideoProcessor::FinishMfgPresent(ID3D11Texture2D* preparedVideo,REF
     return hr;
 }
 
-HRESULT CDX11VideoProcessor::CompositeMfg(const mfg::FrameSurface& surface,REFERENCE_TIME timestamp,bool nativeInput,uint64_t serial,bool original) {
+HRESULT CDX11VideoProcessor::CompositeMfg(const mfg::FrameSurface& surface, const mfg::QueuedFrame& frame) {
     CComPtr<ID3D11Texture2D> back;
     HRESULT hr=m_pDXGISwapChain1->GetBuffer(0,IID_PPV_ARGS(&back));
     if(FAILED(hr))return hr;
-    const bool projected = CanProjectJvr();
-    hr=RenderMfgVideo(surface, nativeInput, back, timestamp, PictureForPlayback(projected), m_mfgLastVideoOnlyInput, false, projected);
+    const auto& route = frame.legacyRoute;
+    const auto picture = PictureForPlayback(route.projected);
+    if (route.directFallback) {
+        D3D11_TEXTURE2D_DESC source{}, target{};
+        surface.texture->GetDesc(&source);
+        back->GetDesc(&target);
+        if (source.Width==target.Width && source.Height==target.Height && source.Format==target.Format &&
+            source.SampleDesc.Count==target.SampleDesc.Count && source.SampleDesc.Quality==target.SampleDesc.Quality)
+            return FinishMfgPresent(surface.texture,frame.timestamp,0,false,&picture,false,false,true);
+    }
+    // Old originals retain their layout, but never evaluate a new temporal
+    // upscaler or borrow a bank from a reset session. No extra colour pass.
+    hr=RenderMfgVideo(surface, frame.nativeInput, back, frame.timestamp, picture, route.videoOnly,
+        route.retired, route.projected, route.postVsrGeneration);
     if(FAILED(hr))return hr;
-    return FinishMfgPresent(back,timestamp,serial,false,nullptr,false,false,original);
+    return FinishMfgPresent(back,frame.timestamp,route.retired ? 0 : frame.serial,false,&picture,
+        false,false,frame.index==mfg::MaxGenerated);
 }
 
 int CDX11VideoProcessor::GetRenderAhead() {

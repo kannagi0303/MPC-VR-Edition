@@ -6,6 +6,7 @@
 #include <deque>
 #include <mutex>
 #include <thread>
+#include "Edition/PlaybackCancellation.h"
 
 class CMpcVideoRenderer;
 
@@ -13,9 +14,14 @@ class CMpcVideoRenderer;
 // clock; a separate worker keeps depth fed from the oldest queued sample.
 class DecodedFrameLookahead {
 public:
-    explicit DecodedFrameLookahead(CMpcVideoRenderer& renderer, unsigned durationMs);
+    explicit DecodedFrameLookahead(CMpcVideoRenderer& renderer, unsigned durationMs, bool originalColor = false);
     ~DecodedFrameLookahead();
-    bool Push(IMediaSample* sample, int64_t pts, uint64_t bytes, uint64_t epoch);
+    using Ticket = mpcvr::edition::PlaybackCancellation::Ticket;
+    bool Push(IMediaSample* sample, int64_t pts, uint64_t bytes, uint64_t epoch, Ticket ticket = {});
+    bool OriginalColor() const noexcept { return m_originalColor; }
+    // Borrow a reference to the actual next original; never wait for one.
+    CComPtr<IMediaSample> NextOriginal(uint64_t epoch);
+    bool Idle();
     void Drain();
     void Cancel();
     void Shutdown();
@@ -28,6 +34,7 @@ private:
         uint64_t bytes;
         uint64_t epoch;
         bool depthSubmitted = false;
+        Ticket ticket;
     };
 
     void Present();
@@ -35,6 +42,7 @@ private:
 
     CMpcVideoRenderer& m_renderer;
     const int64_t m_lead;
+    const bool m_originalColor;
     std::mutex m_lock;
     std::condition_variable m_changed;
     std::deque<Frame> m_frames;

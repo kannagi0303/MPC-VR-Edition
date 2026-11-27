@@ -57,6 +57,25 @@ void CMpcVideoRenderer::BeginEditionSegment(double rate)
 		dx11->m_mfgDisplayRate.BreakContinuity();
 		dx11->m_editionOriginalDropsBase = dx11->m_mfgLostReal.load(std::memory_order_relaxed);
 		dx11->ClearCompletedFrames(false);
+        // NewSegment can arrive without BeginFlush/EndFlush. Unlike an
+        // in-timeline route handoff, old legacy PTS/deadlines are now invalid.
+        // Check even a stopped/failed worker: a retained source can still
+        // be owned by one of the legacy schedulers.
+        bool legacyPending = dx11->m_mfgThread.Running() || dx11->m_mfgPreparedFrame.has_value() ||
+            dx11->m_mfgLegacyFallbackActive;
+        if (!legacyPending) {
+            std::lock_guard queue(dx11->m_mfgQueueLock);
+            legacyPending = dx11->m_mfgQueue.PendingOriginals() || dx11->m_mfgQueue.PendingGenerated() ||
+                dx11->m_mfgLiveFlowGroups.PendingOriginals() || dx11->m_mfgLiveFlowGroups.PendingGenerated();
+        }
+        if (legacyPending) {
+            // RendererLock is already held; StopMfg joins only the existing
+            // TryLock presenter. Never join while holding the queue lock.
+            dx11->StopMfg(false);
+            if (!dx11->m_mfg.Failed()) dx11->m_mfg.ResetHistory();
+            dx11->m_mfgAutoEpoch = dx11->m_mfgAutoLastPts = -1;
+            dx11->m_mfgInputModeKnown = false;
+        }
 	}
 }
 

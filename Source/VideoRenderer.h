@@ -112,9 +112,10 @@ private:
     std::atomic_int m_adaptiveTone = 100;
     std::atomic_int m_memoryColor = 100;
     std::atomic_int m_skinTone = 100;
+    std::atomic_int m_farDimming = 1;
     // Requested values and master are accessed under RendererLock. Effective atomics feed existing GPU paths.
     bool m_enhancementEnabled = true;
-    int m_requestedColorStrengths[4]{100,100,100,100};
+    int m_requestedColorStrengths[5]{100,100,100,100,1};
     void ApplyEnhancementStrengths();
 
 	FILTER_STATE m_filterState = State_Stopped;

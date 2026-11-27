@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "DepthGpu.h"
 #include "DepthGpuShaders.h"
+#include "Edition/FixedShaderBytecode.h"
 #include "DepthLookahead.h"
 #include "DepthNative.h"
 #include "DepthPack.h"
@@ -25,7 +26,7 @@
 using Microsoft::WRL::ComPtr;
 
 namespace {
-constexpr unsigned RangeEntries = 6 + 3 * 1024; // Extrema, validity and previous RGB samples.
+constexpr unsigned RangeEntries = 6 + 3 * 1024; // Extrema, validity, scale reference, tile extrema and previous RGB.
 constexpr unsigned RangeBytes = RangeEntries * sizeof(uint32_t);
 constexpr unsigned RawTilePixels = 1024; // Must match DepthGpuShaders.h.
 static_assert(2 * ((DepthPack::Pixels + RawTilePixels - 1) / RawTilePixels) <= 2 * 1024,
@@ -181,11 +182,11 @@ struct CDepthGpu::Impl {
         Check(list->Close());
     }
 
-    ComPtr<ID3D12PipelineState> Pipeline(const char* entry)
+    template<edition::FixedShaderString Entry>
+    ComPtr<ID3D12PipelineState> Pipeline()
     {
         ComPtr<ID3DBlob> code, errors;
-        const auto hr = D3DCompile(DepthGpuShaders, sizeof(DepthGpuShaders) - 1, nullptr, nullptr, nullptr,
-            entry, "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+        const auto hr = edition::CompileFixedShader<DepthGpuShaders,Entry,"cs_5_0">(&code, &errors);
         if (FAILED(hr) && errors) throw std::runtime_error(static_cast<const char*>(errors->GetBufferPointer()));
         Check(hr);
         D3D12_COMPUTE_PIPELINE_STATE_DESC desc{};
@@ -256,10 +257,10 @@ struct CDepthGpu::Impl {
         ComPtr<ID3DBlob> blob;
         Check(D3D12SerializeRootSignature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, &blob, nullptr));
         Check(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&root)));
-        packPipeline = Pipeline("Pack");
-        rawTilePipeline = Pipeline("RawRangeTiles");
-        rangePipeline = Pipeline("RawRange");
-        normalizePipeline = Pipeline("RawNormalize");
+        packPipeline = Pipeline<"Pack">();
+        rawTilePipeline = Pipeline<"RawRangeTiles">();
+        rangePipeline = Pipeline<"RawRange">();
+        normalizePipeline = Pipeline<"RawNormalize">();
         CreateList(packAllocator, packList);
         CreateList(postAllocator, postList);
 
@@ -301,7 +302,7 @@ struct CDepthGpu::Impl {
         }
     }
 
-    void Bind(ID3D12GraphicsCommandList* list, const Job& frame, int64_t cut)
+    void Bind(ID3D12GraphicsCommandList* list, const Job& frame, int64_t cut, bool reuseScale = false)
     {
         ID3D12DescriptorHeap* heaps[]{heap.Get()};
         list->SetDescriptorHeaps(1, heaps);
@@ -311,7 +312,11 @@ struct CDepthGpu::Impl {
         list->SetComputeRootDescriptorTable(0, descriptors);
         const bool hasPrevious = frame.frame.generation == sceneSampleGeneration &&
             sceneSamplePts >= 0 && frame.frame.pts > sceneSamplePts && !(sceneSampleCut < cut && cut <= frame.frame.pts);
-        const UINT constants[]{UINT(hasPrevious), UINT(modelSize.cx), UINT(modelSize.cy)};
+        // Preserve the original RGB scene history decision. Scale history is
+        // stricter: it must also belong to the last accepted W4 inference.
+        const bool scaleHistory = hasPrevious && reuseScale && streamValid &&
+            sceneSampleGeneration == streamGeneration && sceneSamplePts == streamPts;
+        const UINT constants[]{UINT(hasPrevious) | (UINT(scaleHistory) << 1), UINT(modelSize.cx), UINT(modelSize.cy)};
         list->SetComputeRoot32BitConstants(1, UINT(std::size(constants)), constants, 0);
     }
 
@@ -367,9 +372,9 @@ struct CDepthGpu::Impl {
             Check(postAllocator->Reset());
             Check(postList->Reset(postAllocator.Get(), rawTilePipeline.Get()));
             cut = sceneStart.load(std::memory_order_relaxed);
-            Bind(postList.Get(), work, cut);
+            Bind(postList.Get(), work, cut, !resetState);
             UavBarrier(postList.Get(), prediction.Get());
-            // Full-map extrema, no percentile clipping or previous-depth alignment.
+            // Full-map extrema and same-sequence scale reference; no previous-map blending.
             const UINT pixels = UINT(modelSize.cx) * UINT(modelSize.cy);
             postList->Dispatch((pixels + RawTilePixels - 1) / RawTilePixels, 1, 1);
             UavBarrier(postList.Get(), range.Get());

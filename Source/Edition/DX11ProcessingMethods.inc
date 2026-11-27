@@ -19,8 +19,25 @@
     void PollAdaptiveTone(REFERENCE_TIME pts, REFERENCE_TIME primeLimit=INVALID_TIME);
     void PrimeAdaptiveToneFrames();
     void ObserveAdaptiveTone(const Tex2D_t& source,const CRect& sample,REFERENCE_TIME pts,bool buffered,bool primed=false);
+    void PrepareEarlyAdaptiveTone(const Tex2D_t& source, const CRect& picture,
+        REFERENCE_TIME pts, uint64_t epoch, REFERENCE_TIME precedingPts);
+    void ConfirmEarlyAdaptiveTone(const Tex2D_t& source, const CRect& picture, REFERENCE_TIME pts);
+    void DiscardEarlyAdaptiveTone(REFERENCE_TIME pts, uint64_t epoch);
     float AdaptiveToneWeight(REFERENCE_TIME pts) const;
     bool SourceToneEligible() const;
+    bool EarlyOriginalRoute(const CRect& source, const CRect& destination);
+    bool EarlyOriginalDomainMatches(const EarlyOriginalImage& image) const;
+    bool CanStageOriginal(IMediaSample* sample);
+    bool PrepareEarlyOriginal(IMediaSample* sample, REFERENCE_TIME pts, uint64_t epoch, bool future = false);
+    bool PrepareFutureOriginal(IMediaSample* sample, REFERENCE_TIME currentPts, uint64_t epoch);
+    void ServiceFutureOriginal(uint64_t epoch);
+    void ActivateFutureOriginal(IMediaSample* sample, REFERENCE_TIME pts, uint64_t epoch);
+    void DiscardEarlyOriginal(EarlyOriginalImage& image);
+    void ServiceEarlyOriginal(REFERENCE_TIME pts, uint64_t epoch);
+    void FinishEarlyOriginal();
+    void ClearEarlyOriginal(bool release = false);
+    const Tex2D_t* ReuseEarlyOriginal(const CRect& source, const CRect& destination,
+        REFERENCE_TIME pts, bool second, bool srConsumer = false);
     ID3D11Texture2D* PrepareSourceTone(const Tex2D_t& source, const CRect& picture, REFERENCE_TIME pts, ID3D11Texture2D* directTarget = nullptr);
     float BindAdaptiveTone(REFERENCE_TIME pts);
     void UnbindAdaptiveTone();
@@ -41,6 +58,9 @@
     // No-model fallback, or fused temporal grade + colour enhancement. Cached depth only.
     bool PerceptualEnabled() const;
     HRESULT PreparePerceptualShader(int mode);
+    void ResetFarDimmingField(bool release = false);
+    ID3D11ShaderResourceView* PrepareFarDimmingField(const Tex2D_t& source,
+        const CRect& picture, REFERENCE_TIME pts, const CDepth::Estimate& estimate);
     HRESULT ApplyPerceptual(const Tex2D_t& source, ID3D11Texture2D* target,
         const CRect& area, const CRect& visible, CPoint offset, REFERENCE_TIME pts,
         int mode, ID3D11ShaderResourceView* lut = nullptr,
@@ -57,18 +77,25 @@
 	HRESULT EnsureSvdLutRawPicture(DXGI_FORMAT format, UINT width, UINT height);
 	void ResetSvdLutTemporalQueue();
 	void PollSvdLutTemporalQueue();
+    // Separate capture from composition; source must be the ungraded RGB
+    // used for this original, not a completed/generated image.
+    bool BeginSvdLutAnalysis(const Tex2D_t& source, const CRect& sample,
+        REFERENCE_TIME pts, uint64_t fence, bool allowTemporalCapture);
+    void RecordSourceLutReadiness(REFERENCE_TIME pts, uint64_t fence);
+    double SourceLutFutureShare(REFERENCE_TIME pts, ID3D11ShaderResourceView* lut) const;
 	void PrimeSvdLutTemporalFrames();
 	SvdLutRawFrame* QueueSvdLutTemporalFrame(const Tex2D_t& source,
 		const CRect& sample, REFERENCE_TIME pts, uint64_t fence);
-	ID3D11ShaderResourceView* SvdLutTemporalReadyView(REFERENCE_TIME pts, uint64_t fence);
+	ID3D11ShaderResourceView* SvdLutTemporalReadyView(REFERENCE_TIME pts, uint64_t fence,
+        REFERENCE_TIME originalPts = INVALID_TIME);
     std::array<float, 3> SvdLutB2ToneForView(REFERENCE_TIME pts, uint64_t fence,
         ID3D11ShaderResourceView* selected);
     void RememberPresentedSvdLutB2(REFERENCE_TIME pts, uint64_t fence);
-	ID3D11ShaderResourceView* SvdLutRawViewForFrame(SvdLutRawFrame& frame);
+	ID3D11ShaderResourceView* SvdLutRawViewForFrame(SvdLutRawFrame& frame, REFERENCE_TIME originalPts);
 	void PrefetchSvdLutRawFuture(const CompletedFrame& current, bool geometryChanging);
 	HRESULT ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Texture2D* target,
 		const CRect& area, const CRect& visible, CPoint offset, REFERENCE_TIME pts, uint64_t fence,
-		bool allowTemporalCapture = true, bool allowDepth = false);
+		bool allowTemporalCapture = true, bool allowDepth = false, std::optional<bool> analysisPausedReplay = {});
 	HRESULT DrawCompletedSvdLutRaw(const CompletedFrame& frame, ID3D11Texture2D* target,
 		const CRect& picture, bool geometryChanging);
 	void DrawSvdLutRaw(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME pts,bool allowTemporalCapture=true);

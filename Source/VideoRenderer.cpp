@@ -584,6 +584,11 @@ HRESULT CMpcVideoRenderer::SetMediaType(const CMediaType *pmt)
 	m_VideoProcessor->GetAspectRatio(aspect.cx, aspect.cy);
 
 	CMediaType mt(*pmt);
+    // In-band media changes are drained by ReceiveEditionSample. An
+    // out-of-band reconnect must not reconfigure the VP while an earlier
+    // acknowledged original is still in the delivery worker. Never wait
+    // here: this call already owns the interface and renderer locks.
+    if (mt != m_inputMT && !OriginalDeliveryIdle()) return VFW_E_WRONG_STATE;
 
 	m_bSetNewMediaTypeToInputPin = false;
 

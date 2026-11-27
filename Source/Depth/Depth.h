@@ -52,6 +52,14 @@ public:
             (m_capturePicture.right - m_capturePicture.left) == width &&
             (m_capturePicture.bottom - m_capturePicture.top) == height;
     }
+    // The normalized model describes the full source content, irrespective
+    // of an ordinary scale used for a producer snapshot. No new state.
+    bool MatchesColorSource(LONG width,LONG height) const noexcept {
+        return m_initialized && width>0 && height>0 && m_modelSize.cx==width && m_modelSize.cy==height &&
+            m_capturePicture.right>m_capturePicture.left && m_capturePicture.bottom>m_capturePicture.top;
+    }
+    uint64_t ColorGeneration() const noexcept { return m_generation; }
+    bool SameColorScene(int64_t a,int64_t b) const { return a>=0 && b>=0 && SceneStart(a)==SceneStart(b); }
     static constexpr int64_t MaxEstimateAge = 2'000'000; // 200 ms in media time
 
     void Prepare(ID3D11Device1* device);
@@ -62,9 +70,12 @@ public:
     bool PrefetchNv12(ID3D11Device1* device, ID3D11DeviceContext1* context,
         ID3D11Texture2D* frame, const RECT& picture, bool fullRange, int64_t pts);
     void PlaybackFrame(int64_t pts, int64_t duration);
-    void StopLookahead() { m_lookahead = false; m_playbackPts = -1; }
+    void StopLookahead() { m_lookahead = false; m_playbackPts = -1; ClearOriginalSelection(); }
     // Harvest on the renderer's serialized source/presentation paths.
     void PollCompleted();
+    // Give an already submitted original a bounded opportunity to finish.
+    // Called only from original-frame producer paths, never generated phases.
+    void AwaitOriginal(int64_t pts, int64_t duration, HANDLE cancelEvent);
     Estimate ForFrame(int64_t pts) const;
     Estimate LatestPreview() const;
     CacheStats GetCacheStats(int64_t playbackPts) const;
@@ -93,6 +104,12 @@ private:
     template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
     int64_t SceneStart(int64_t pts) const;
     Estimate EstimateAtOrBefore(int64_t pts) const;
+    // Serialized original producer only. Pin a cache entry by its PTS, not a
+    // naked SRV: the existing capture fence orders GPU reads before reuse.
+    void ClearOriginalSelection() noexcept {
+        m_selectedSourcePts = m_selectedDepthPts = -1;
+    }
+    Estimate SelectOriginal(int64_t pts);
     void RecordResultAge(int64_t age, uint64_t now);
     bool Initialize(ID3D11Device1* device);
     void Capture(ID3D11Device1* device, ID3D11DeviceContext1* context,
@@ -118,6 +135,11 @@ private:
     bool m_initialized = false;
     bool m_lookahead = false;
     int64_t m_playbackPts = -1;
+    int64_t m_previousPlaybackPts = -1;
+    int64_t m_originalDuration = 0;
+    int64_t m_waitedOriginalPts = -1;
+    int64_t m_selectedSourcePts = -1;
+    int64_t m_selectedDepthPts = -1; // -1 is an intentional neutral decision
     SIZE m_modelSize{};
     SIZE m_captureSize{};
     RECT m_capturePicture{};

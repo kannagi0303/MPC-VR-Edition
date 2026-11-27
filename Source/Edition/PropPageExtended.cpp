@@ -418,7 +418,7 @@ void CVRMainPPage::AddEditionHints()
 		L"For non-commercial scientific research or academic development, choose where to use the model.\n"
 		L"See RESEARCH-ONLY.txt and LICENSE-Apple-DepthPro2.txt in the package.");
     AddHint(IDC_ENHANCEMENT_MASTER,L"Enable or bypass all four video enhancements without changing their saved strengths.");
-    AddHint(IDC_VIDEO_ENHANCEMENT,L"SDR calibrated SVDLUT color grade. 0% off; 100% full calibrated effect.");
+    AddHint(IDC_VIDEO_ENHANCEMENT,L"SDR calibrated SVDLUT color grade and stable far-depth exposure. 100% includes up to 7.5% linear-light dimming when valid depth is available.");
     AddHint(IDC_MEMORY_COLOR,L"Independent SDR preferred sky and foliage colors.");
     AddHint(IDC_SKIN_TONE,L"Independent SDR skin tone enhancement.");
     AddHint(IDC_ADAPTIVE_TONE,L"Independent SDR adaptive shot contrast.");

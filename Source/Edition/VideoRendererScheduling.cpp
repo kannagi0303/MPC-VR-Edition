@@ -235,8 +235,54 @@ HRESULT CMpcVideoRenderer::WaitForRenderTime(uint64_t epoch,
 HRESULT CMpcVideoRenderer::ReceiveEditionSample(IMediaSample* pSample)
 {
 	if (!m_depthLookahead) {
-		return ReceiveWithSourceTime(pSample);
-	}
+        return ReceiveWithSourceTime(pSample);
+    }
+    if (m_depthLookahead->OriginalColor()) {
+        const auto ticket = m_playbackCancel.Capture();
+        const auto epoch = m_depthLookahead->Epoch();
+        if (ticket->Cancelled()) return S_OK;
+        REFERENCE_TIME pts = -1, end = -1;
+        AM_MEDIA_TYPE* changed = nullptr;
+        const bool formatChange = pSample->GetMediaType(&changed) == S_OK;
+        if (changed) DeleteMediaType(changed);
+        bool stage = false;
+        if (m_localFile && !m_avcSourceClock && !formatChange && pSample->IsPreroll() != S_OK &&
+            pSample->IsDiscontinuity() != S_OK && pSample->GetTime(&pts, &end) == S_OK && pts >= 0 && end > pts) {
+            CAutoLock render(&m_RendererLock);
+            auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get());
+            // Keep startup, pause, live/unsupported routes and state changes
+            // on synchronous DirectShow delivery. Only stable native SDR.
+            if (dx11 && !ticket->Cancelled() && !LookaheadCancelled(epoch) && !m_bFlushing &&
+                m_State == State_Running && m_bStreaming && !m_Stepping && m_completedSegmentRate == 1.0 &&
+                dx11->CanBufferCompletedSample() && dx11->m_completedLast &&
+                dx11->m_completedLast->sourceColorFinal && dx11->m_processingSize.cx > 0 &&
+                !dx11->m_extendedStartupPending && !dx11->m_resizePending && !dx11->CompletedGeometryChanging() &&
+                dx11->m_svdLutRawTest.activationPts != INVALID_TIME && !dx11->m_svdLutRawTest.failed &&
+                dx11->m_svdLutRawTest.model.GetState() == svdlut::ModelWorker::State::Ready &&
+                dx11->EarlyOriginalRoute(dx11->m_srcRect, dx11->ProcessingRect())) {
+                // The allocator retains the decoder surface while this sample
+                // is referenced. No clone, metadata loss or texture copy.
+                stage = dx11->CanStageOriginal(pSample);
+            }
+        }
+        if (stage) {
+            try {
+                // The queue never waits for a FUTURE frame. It only provides
+                // bounded backpressure when the one pending slot is occupied.
+                if (m_depthLookahead->Push(pSample, pts, 0, epoch, ticket)) return S_OK;
+                // False is cancellation/shutdown, never an accepted original.
+                if (ticket->Cancelled() || LookaheadCancelled(epoch)) return S_OK;
+            } catch (const std::bad_alloc&) {
+                // No sample was acknowledged: drain older originals first.
+            }
+        }
+        DrainLookahead();
+        if (ticket->Cancelled() || LookaheadCancelled(epoch)) return S_OK;
+        // Keep the captured delivery identity across the drain barrier.
+        // AVC correction is never moved into the worker.
+        return m_avcSourceClock ? ReceiveWithSourceTime(pSample) :
+            ReceiveLookaheadOriginal(pSample, epoch, ticket);
+    }
 	if (!m_depthLookahead || !m_localFile || m_bFlushing) return ReceiveScheduled(pSample, 0);
 	const auto epoch = m_depthLookahead->Epoch();
 	CComPtr<IMediaSample> detached;
@@ -329,11 +375,23 @@ BOOL CMpcVideoRenderer::ScheduleSample(IMediaSample* sample)
 	return TRUE;
 }
 
-std::optional<HRESULT> CMpcVideoRenderer::ReceiveCompletedSample(IMediaSample* sample)
+HRESULT CMpcVideoRenderer::ReceiveLookaheadOriginal(IMediaSample* sample, uint64_t epoch,
+    const mpcvr::edition::PlaybackCancellation::Ticket& ticket)
 {
+    if (!ticket || ticket->Cancelled() || LookaheadCancelled(epoch)) return S_OK;
+    if (const auto hr = ReceiveCompletedSample(sample, epoch, ticket)) return *hr;
+    if (ticket->Cancelled() || LookaheadCancelled(epoch)) return S_OK;
+    // The route may become ineligible while queued. Preserve this original,
+    // in order, through the same legacy fallback as synchronous Receive.
+    return ReceiveScheduled(sample, epoch);
+}
+
+std::optional<HRESULT> CMpcVideoRenderer::ReceiveCompletedSample(IMediaSample* sample, uint64_t lookaheadEpoch,
+    mpcvr::edition::PlaybackCancellation::Ticket ticket)
+{
+    if (!ticket) ticket = m_playbackCancel.Capture();
+    if (ticket->Cancelled() || LookaheadCancelled(lookaheadEpoch)) return S_OK;
     if (!m_localFile) return {};
-    const auto ticket = m_playbackCancel.Capture();
-    if (ticket->Cancelled()) return S_OK;
     REFERENCE_TIME pts = 0, end = 0;
 	AM_MEDIA_TYPE* changed = nullptr;
 	const bool changesFormat = sample->GetMediaType(&changed) == S_OK;
@@ -343,6 +401,7 @@ std::optional<HRESULT> CMpcVideoRenderer::ReceiveCompletedSample(IMediaSample* s
 	const bool discontinuity = sample->IsDiscontinuity() == S_OK;
 	std::optional<uint64_t> epoch;
 	std::optional<uint64_t> deferredFrameFence;
+    bool earlyAttempted = false, futureAttempted = false;
 	struct WaitTrace {
 		REFERENCE_TIME pts;
 		const char* reason = nullptr;
@@ -363,7 +422,7 @@ std::optional<HRESULT> CMpcVideoRenderer::ReceiveCompletedSample(IMediaSample* s
 		}
 	} waitTrace{valid ? pts : -1};
 	for (;;) {
-		if (ticket->Cancelled()) return S_OK;
+		if (ticket->Cancelled() || LookaheadCancelled(lookaheadEpoch)) return S_OK;
 		const char* block;
 		{
 			CAutoLock state(&m_InterfaceLock);
@@ -382,47 +441,93 @@ std::optional<HRESULT> CMpcVideoRenderer::ReceiveCompletedSample(IMediaSample* s
 						0, 0, 0, 0, 0, false, 0, S_OK, lockFinished - lockStarted);
 				}
 			}
-			if (!epoch) epoch = m_completedEpoch;
-			if (ticket->Cancelled() || m_bFlushing || m_State == State_Stopped || *epoch != m_completedEpoch) return S_OK;
+			const bool firstAttempt = !epoch;
+            if (!epoch) epoch = m_completedEpoch;
+            if (ticket->Cancelled() || LookaheadCancelled(lookaheadEpoch) || m_bFlushing ||
+                m_State == State_Stopped || *epoch != m_completedEpoch) return S_OK;
 			auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get());
 			if (!dx11) return {};
 			if (dx11->m_completedPresenter.Failed()) dx11->ClearCompletedFrames(true);
-			const bool pending = dx11->CompletedFramesPending() && !dx11->m_completedPresenter.Failed();
+            if (firstAttempt) dx11->ActivateFutureOriginal(sample, valid ? pts : INVALID_TIME, *epoch);
+            const bool pending = dx11->CompletedFramesPending() && !dx11->m_completedPresenter.Failed();
 			if (m_State != State_Running || !m_bStreaming) {
 				deferredFrameFence.reset();
+				dx11->FinishEarlyOriginal();
 				if (!pending) return {};
 				block = "completed_wait_state";
 			} else if (!valid || m_completedSegmentRate != 1.0 || !dx11->CanBufferCompletedSample()) {
+				dx11->FinishEarlyOriginal();
 				if (!pending) return {};
 				block = "completed_wait_drain";
 			} else if ((discontinuity && pending) || dx11->LegacyFramesPending()) {
+                dx11->FinishEarlyOriginal();
 				block = "completed_wait_drain";
 			} else if (!(block = dx11->CompletedAdmissionBlock(pts, deferredFrameFence))) {
 				const auto acquired = dx11->PrepareCompletedTarget();
 				if (acquired == S_OK) {
 					if (waitTrace.reason) waitTrace.admitted = GetPreciseTick();
 					m_schedulingCompletedSample = true;
-					const auto prepared = PrepareReceive(sample);
+                    HRESULT prepared;
+                    try {
+                        prepared = PrepareReceive(sample);
+                    } catch (...) {
+                        // A worker-side exception must not leave the base
+                        // renderer waiting forever for m_bInReceive to clear.
+                        m_schedulingCompletedSample = false;
+                        m_bInReceive = FALSE;
+                        dx11->FinishEarlyOriginal();
+                        dx11->m_completedTarget.reset();
+                        ClearPendingSample();
+                        CancelNotification();
+                        throw;
+                    }
 					m_schedulingCompletedSample = false;
 					if (FAILED(prepared)) {
+                        dx11->FinishEarlyOriginal();
 						dx11->m_completedTarget.reset();
 						return prepared == VFW_E_SAMPLE_REJECTED ? S_OK : prepared;
 					}
                     m_bInReceive = FALSE;
-                    if (ticket->Cancelled()) {
+                    if (ticket->Cancelled() || LookaheadCancelled(lookaheadEpoch)) {
+                        dx11->FinishEarlyOriginal();
                         dx11->m_completedTarget.reset();
                         ClearPendingSample();
                         CancelNotification();
                         return S_OK;
                     }
-                    const auto hr = dx11->RenderCompletedSample(sample);
+                    HRESULT hr;
+                    try {
+                        hr = dx11->RenderCompletedSample(sample);
+                    } catch (...) {
+                        dx11->FinishEarlyOriginal();
+                        ClearPendingSample();
+                        CancelNotification();
+                        throw;
+                    }
+                    dx11->FinishEarlyOriginal();
 					ClearPendingSample();
 					CancelNotification();
 					return hr;
 				}
-				if (!pending) return {};
+				if (!pending) { dx11->FinishEarlyOriginal(); return {}; }
 				block = acquired == S_FALSE ? "completed_wait_budget" : "completed_wait_prepare_failed";
 			}
+            // Existing max-lead backpressure only. The active original is
+            // owned by this delivery. Never defer it to wait for its successor.
+            if (!discontinuity && std::strcmp(block, "completed_wait_lookahead") == 0 && !ticket->Cancelled()) {
+                if (!earlyAttempted) {
+                    earlyAttempted = dx11->PrepareEarlyOriginal(sample, pts, *epoch);
+                } else dx11->ServiceEarlyOriginal(pts, *epoch);
+                // The next source has actually been delivered by the decoder.
+                // No additional wait and no separate display schedule.
+                if (lookaheadEpoch && earlyAttempted && dx11->m_earlyOriginal.ready &&
+                    dx11->m_earlyOriginal.captured && !ticket->Cancelled() && !LookaheadCancelled(lookaheadEpoch)) {
+                    if (!futureAttempted) {
+                        const auto next = m_depthLookahead->NextOriginal(lookaheadEpoch);
+                        if (next) futureAttempted = dx11->PrepareFutureOriginal(next, pts, *epoch);
+                    } else dx11->ServiceFutureOriginal(*epoch);
+                }
+            }
 		}
 		waitTrace.Wait(block);
         // An event wake is preferable to sleeping behind an obsolete
@@ -487,11 +592,19 @@ void CMpcVideoRenderer::DrainLookahead()
 	if (m_depthLookahead) m_depthLookahead->Drain();
 }
 
-void CMpcVideoRenderer::ReportLookaheadError(HRESULT hr)
+bool CMpcVideoRenderer::OriginalDeliveryIdle()
 {
-	CAutoLock lock(&m_InterfaceLock);
-	if (m_bFlushing || m_filterState == State_Stopped) return;
-	m_depthLookahead->Cancel();
+    return !m_depthLookahead || !m_depthLookahead->OriginalColor() || m_depthLookahead->Idle();
+}
+
+void CMpcVideoRenderer::ReportLookaheadError(HRESULT hr, uint64_t epoch)
+{
+    CAutoLock lock(&m_InterfaceLock);
+    if (LookaheadCancelled(epoch) || m_bFlushing || m_filterState == State_Stopped) return;
+    if (m_depthLookahead->OriginalColor()) {
+        if (m_playbackCancel.Capture()->Cancelled()) return;
+        CancelEditionDelivery(); // explicit fatal delivery failure, retire this timeline
+    } else m_depthLookahead->Cancel();
 	NotifyEvent(EC_ERRORABORT, hr, 0);
 }
 

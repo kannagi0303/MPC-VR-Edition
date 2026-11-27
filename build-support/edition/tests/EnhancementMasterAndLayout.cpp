@@ -44,6 +44,8 @@ void Exercise(){
   assert(r.SetEditionBool("enhancementEnabled",true)==S_OK);
   for(int j=0;j<4;++j)assert(eff[j]->load()==want[j]);
   assert(r.SetEditionInt(keys[0],101)==E_INVALIDARG&&r.SetEditionInt(keys[0],-1)==E_INVALIDARG);
+  // Retired experimental far-dimming key is not part of the four-control master.
+  assert(!r.SetEditionInt("farDimmingStrength",50).has_value());
   assert(r.SetEditionBool("enhancementEnabled",true)==S_FALSE);++cases;
  }
  std::cout<<"PASS "<<cases<<" extracted master/strength preservation and zero-crossing cases\n";

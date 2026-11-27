@@ -36,8 +36,8 @@ HRESULT CompileSvdLutOutputShader(const char* source, const D3D_SHADER_MACRO* de
 // model ownership. Like AT's existing compiler job, pin the module before
 // detaching so fast exit never joins an in-progress D3DCompile.
 struct PerceptualBytecode {
-    CComPtr<ID3DBlob> code;
-    std::atomic_bool ready{false};
+    CComPtr<ID3DBlob> code, farMask, farAlignment;
+    std::atomic_bool ready{false}, farReady{false};
 };
 const std::shared_ptr<PerceptualBytecode>& StandalonePerceptualBytecode()
 {
@@ -52,6 +52,12 @@ const std::shared_ptr<PerceptualBytecode>& StandalonePerceptualBytecode()
                 try { CompileSvdLutOutputShader(PerceptualColorShader, nullptr, &result->code); }
                 catch (...) {}
                 result->ready.store(true, std::memory_order_release);
+                const D3D_SHADER_MACRO fit[]={{"FAR_ALIGNMENT","1"},{nullptr,nullptr}};
+                try {
+                    CompileShader(FarDimmingShader, nullptr, "ps_5_0", &result->farMask);
+                    CompileShader(FarDimmingShader, fit, "ps_5_0", &result->farAlignment);
+                } catch (...) {}
+                result->farReady.store(true, std::memory_order_release);
             }).detach();
             return result;
         } catch (...) { return {}; }
@@ -194,8 +200,8 @@ namespace {
 constexpr auto ThumbSize = svdlut::InputSize;
 static_assert(ThumbSize == svdlut::input::Size);
 constexpr auto ThumbFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;
-constexpr unsigned SignatureSize = 8;
-using Signature = std::array<float, SignatureSize * SignatureSize * 3>;
+using svdlut::input::SignatureSize;
+using svdlut::input::Signature;
 
 std::unique_ptr<svdlut::Image> ReadSvdLutImage(const uint8_t* data, size_t stride)
 {
@@ -213,19 +219,9 @@ bool SupportedSdrFormat(DXGI_FORMAT format)
 
 Signature ReadSignature(const uint8_t* data, size_t stride)
 {
-    Signature signature{};
-    constexpr unsigned block = ThumbSize / SignatureSize;
-    constexpr unsigned step = 4;
-    constexpr float normalized = 1.0f / ((block / step) * (block / step));
-    for (unsigned y = 0; y < ThumbSize; y += step) {
-        for (unsigned x = 0; x < ThumbSize; x += step) {
-            const auto tile = (y / block) * SignatureSize + x / block;
-            for (unsigned c = 0; c < 3; ++c) {
-                signature[tile * 3 + c] += svdlut::input::Code(data, stride, x + step / 2, y + step / 2, c) * normalized;
-            }
-        }
-    }
-    return signature;
+    return svdlut::input::ReadSignatureWith([&](unsigned x, unsigned y, unsigned c) {
+        return svdlut::input::Code(data, stride, x, y, c);
+    });
 }
 
 bool ThumbnailCut(const Signature& previous, const Signature& current)
@@ -274,12 +270,14 @@ void CDX11VideoProcessor::ResetSvdLutHistory()
     // Seek, flush and geometry changes invalidate all temporal LUT state.
     ResetSvdLutTemporalQueue();
     ResetAdaptiveTone();
+    ResetFarDimmingField();
 }
 
 void CDX11VideoProcessor::ReleaseSvdLut(bool fast)
 {
     ResetSvdLutHistory();
     ResetAdaptiveTone(true);
+    ResetFarDimmingField(true);
     ReleaseSvdLutRawTest(fast);
     m_perceptual.constants.Release();
     m_perceptual.sampler.Release();
@@ -378,6 +376,7 @@ HRESULT CDX11VideoProcessor::DrawCompletedSvdLut(const CompletedFrame& frame, ID
 
 void CDX11VideoProcessor::DrawSvdLut(ID3D11Texture2D* target, const CRect& picture, REFERENCE_TIME timestamp,bool allowTemporalCapture)
 {
+    if(m_adaptiveTone.sourceToneBeforeUpscale) return;
     auto& b = m_svdLutRawTest;
     b.active = false;
     if (!PerceptualEnabled() || m_fastShutdown || m_pFilter->m_bFlushing) return;
@@ -433,6 +432,104 @@ HRESULT CDX11VideoProcessor::PreparePerceptualShader(int mode)
     return failed ? E_FAIL : S_OK;
 }
 
+// [VE01-FIX04] Separate low-resolution exposure field. Source, history,
+// and alignment are distinct textures; no full-size scratch or readback.
+void CDX11VideoProcessor::ResetFarDimmingField(bool release)
+{
+    auto& f=m_farDimmingField;
+    f.pts=INVALID_TIME;
+    if(release) {
+        for(auto& mask:f.masks) mask.Release();
+        f.alignment.Release(); f.maskShader.Release(); f.alignmentShader.Release();
+        f.constants.Release(); f.shaderFailed=false;
+    }
+}
+
+ID3D11ShaderResourceView* CDX11VideoProcessor::PrepareFarDimmingField(const Tex2D_t& source,
+    const CRect& picture, REFERENCE_TIME pts, const CDepth::Estimate& estimate)
+{
+    auto& f=m_farDimmingField;
+    if(!estimate.view || !source.pShaderResource || pts<0 ||
+        picture!=CRect(0,0,source.desc.Width,source.desc.Height)) {
+        ResetFarDimmingField(); return nullptr;
+    }
+    if(m_fastShutdown || m_pFilter->m_bFlushing ||
+        m_pFilter->m_playbackCancel.Capture()->Cancelled() || f.shaderFailed) return nullptr;
+    const auto size=m_depth.TensorSize();
+    if(size.cx<=0 || size.cy<=0) return nullptr;
+    if(!f.maskShader || !f.alignmentShader) {
+        const auto& job=StandalonePerceptualBytecode();
+        if(job && !job->farReady.load(std::memory_order_acquire)) return nullptr;
+        if(!job || !job->farMask || !job->farAlignment ||
+            FAILED(m_pDevice->CreatePixelShader(job->farMask->GetBufferPointer(),job->farMask->GetBufferSize(),nullptr,&f.maskShader)) ||
+            FAILED(m_pDevice->CreatePixelShader(job->farAlignment->GetBufferPointer(),job->farAlignment->GetBufferSize(),nullptr,&f.alignmentShader))) {
+            f.shaderFailed=true; DLog(L"Far Dimming field shader unavailable"); return nullptr;
+        }
+    }
+    if(!f.constants) {
+        D3D11_BUFFER_DESC cb{}; cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER; cb.ByteWidth=8*sizeof(float);
+        if(FAILED(m_pDevice->CreateBuffer(&cb,nullptr,&f.constants))) return nullptr;
+    }
+    const auto generation=m_depth.ColorGeneration();
+    const bool projected=CanProjectJvr();
+    // Projection controls can change the mapping even at the same paused PTS.
+    // Use the actual uploaded projection constants, not just the video size.
+    const bool compatible=f.pts>=0 && f.generation==generation &&
+        f.sourceWidth==source.desc.Width && f.sourceHeight==source.desc.Height &&
+        f.rotated==estimate.rotated && f.projected==projected &&
+        (!projected || f.projectionKey==m_jvrUploadedConstants) &&
+        f.masks[f.history].pShaderResource && f.masks[f.history].desc.Width==UINT(size.cx) &&
+        f.masks[f.history].desc.Height==UINT(size.cy) && m_depth.SameColorScene(f.pts,pts);
+    const bool exact=estimate.pts==pts;
+    if(compatible && exact && f.pts==pts) return f.masks[f.history].pShaderResource.p;
+    const bool history=compatible && pts>f.pts && pts-f.pts<=1'500'000;
+    if(!history) f.pts=INVALID_TIME;
+    const unsigned next=1u-f.history;
+    constexpr auto format=DXGI_FORMAT_R16G16B16A16_FLOAT;
+    if(FAILED(f.masks[next].CheckCreate(m_pDevice,format,UINT(size.cx),UINT(size.cy),Tex2D_DefaultShaderRTarget))) return nullptr;
+    if(history && exact && FAILED(f.alignment.CheckCreate(m_pDevice,format,1,1,Tex2D_DefaultShaderRTarget))) return nullptr;
+    const float keep=history ? std::exp(-float(pts-f.pts)/4'500'000.f) : 0.f;
+    const float cb[8]={float(size.cx),float(size.cy),estimate.rotated?1.f:0.f,history?1.f:0.f,
+        keep,exact?0.f:1.f,history && f.pts==estimate.pts?1.f:0.f,0.f};
+    ID3D11ShaderResourceView* empty[4]{};
+    ID3D11SamplerState* noSampler=nullptr;
+    auto* context=m_pDeviceContext.p;
+    context->OMSetRenderTargets(0,nullptr,nullptr);
+    context->PSSetShaderResources(0,4,empty);
+    context->UpdateSubresource(f.constants,0,nullptr,cb,0,0);
+    ID3D11ShaderResourceView* inputs[3]={estimate.view,history?f.masks[f.history].pShaderResource.p:nullptr,nullptr};
+    context->PSSetShaderResources(1,3,inputs);
+    context->PSSetSamplers(2,1,&m_perceptual.sampler.p);
+    HRESULT hr=S_OK;
+    if(history && exact) {
+        hr=TextureCopyRect(source,f.alignment.pTexture,picture,CRect(0,0,1,1),f.alignmentShader,f.constants,0,false);
+        context->OMSetRenderTargets(0,nullptr,nullptr);
+        if(SUCCEEDED(hr)) {
+            inputs[2]=f.alignment.pShaderResource.p;
+            context->PSSetShaderResources(1,3,inputs);
+        }
+    }
+    if(SUCCEEDED(hr)) {
+        // Rebind all auxiliary slots after the first blit, independently of
+        // the native helper's resource cleanup policy.
+        context->PSSetShaderResources(1,3,inputs);
+        context->PSSetSamplers(2,1,&m_perceptual.sampler.p);
+        hr=TextureCopyRect(source,f.masks[next].pTexture,picture,CRect(0,0,size.cx,size.cy),f.maskShader,f.constants,0,false);
+    }
+    context->OMSetRenderTargets(0,nullptr,nullptr);
+    context->PSSetShaderResources(0,4,empty);
+    context->PSSetSamplers(2,1,&noSampler);
+    if(FAILED(hr)) { ResetFarDimmingField(); return nullptr; }
+    // A fallback map must not become the temporal reference of a new PTS.
+    if(exact) {
+        f.history=next; f.pts=pts; f.generation=generation;
+        f.sourceWidth=source.desc.Width; f.sourceHeight=source.desc.Height;
+        f.rotated=estimate.rotated; f.projected=projected;
+        if(projected) f.projectionKey=m_jvrUploadedConstants;
+    }
+    return f.masks[next].pShaderResource.p;
+}
+
 HRESULT CDX11VideoProcessor::ApplyPerceptual(const Tex2D_t& source, ID3D11Texture2D* target,
     const CRect& area, const CRect& visible, CPoint offset, REFERENCE_TIME pts,
     int mode, ID3D11ShaderResourceView* lut, std::array<float, 3> tone, bool useTone,
@@ -445,37 +542,39 @@ HRESULT CDX11VideoProcessor::ApplyPerceptual(const Tex2D_t& source, ID3D11Textur
     if (!shader) return S_FALSE;
 
     ID3D11ShaderResourceView* depth = nullptr;
-    ID3D11ShaderResourceView* previousDepth = nullptr;
-    float confidence = 0.0f, rotated = 0.0f, previousRotated = 0.0f;
-    float historyWeight = 0.0f;
+    ID3D11ShaderResourceView* farMask = nullptr;
+    // FIX05: Color Enhancement controls the independent stabilized depth-exposure field.
+    // Effective strength already includes the master switch. Apply only to original producers.
+    constexpr float maxFarDimming = 0.075f;
+    const float farStrength = m_adaptiveTone.sourceComposition
+        ? maxFarDimming * (std::clamp(m_pFilter->m_videoEnhancement.load(), 0, 100) / 100.f) : 0.f;
+    float confidence = 0.0f, rotated = 0.0f;
     // The source depth is only safe at exact picture geometry. There is no
     // arbitrary SR/MFG/letterbox coordinate guess and NEVER extra inference.
-    if (allowDepth && pts != INVALID_TIME && (UsesDepthSr() || UsesDepthMfg()) &&
-        visible == area && offset == CPoint(0, 0) &&
-        m_depth.MatchesColorPicture(visible.Width(), visible.Height())) {
+    const auto modelSize=ProcessingSourceRect(CanProjectJvr()).Size();
+    const bool exact=m_depth.MatchesColorPicture(visible.Width(),visible.Height());
+    const bool producerScale=m_adaptiveTone.sourceComposition && !CanProjectJvr() &&
+        MfgDepthSourceEligible() && m_renderRect==m_videoRect && m_depth.MatchesColorSource(modelSize.cx,modelSize.cy);
+    if (allowDepth && pts >= 0 && (UsesDepthSr() || UsesDepthMfg()) &&
+        visible == area && offset == CPoint(0, 0) && (exact || producerScale)) {
+        if (m_adaptiveTone.sourceComposition && (farStrength > 0.f ||
+            m_pFilter->m_memoryColor.load() || m_pFilter->m_skinTone.load())) {
+            const auto ticket=m_pFilter->m_playbackCancel.Capture();
+            m_depth.AwaitOriginal(pts,m_sampleDuration,ticket->Event());
+            if(ticket->Cancelled()) return S_FALSE;
+        }
         const auto estimate = m_depth.ForFrame(pts);
-        const auto age = pts - estimate.pts;
-        if (estimate.view && estimate.pts != INVALID_TIME && age >= 0 && age < 1'900'000) {
-            // Fade stale depth softly, never snap colour at one timestamp.
-            confidence = 0.50f * (std::min)(1.0f,
-                float(1'900'000 - age) / 1'000'000.0f);
+        if (estimate.view) {
+            // ForFrame chooses exact original PTS first, then only the
+            // immediate previous original. No temporal mixing of masks.
+            confidence = 0.50f;
             depth = estimate.view;
             rotated = estimate.rotated ? 1.0f : 0.0f;
-            // Reuse a previous cached map from the SAME scene and capture size.
-            // No extra model invocation, GPU pass or CPU readback. The pixel
-            // shader can damp depth disagreement at a small sampling cost.
-            if (estimate.pts > 0) {
-                const auto previous = m_depth.ForFrame(estimate.pts - 1);
-                if (previous.view && previous.pts >= 0 &&
-                    estimate.pts - previous.pts <= 1'500'000 &&
-                    previous.rotated == estimate.rotated) {
-                    previousDepth = previous.view;
-                    previousRotated = previous.rotated ? 1.0f : 0.0f;
-                    historyWeight = 1.0f;
-                }
-            }
+            if(farStrength>0) farMask=PrepareFarDimmingField(source,visible,pts,estimate);
         }
     }
+    // Keep history mutation on the original composition path, not CPU bytecode preflight.
+    if(m_adaptiveTone.sourceComposition && (farStrength<=0.f || !farMask)) ResetFarDimmingField();
     const float adaptiveToneWeight=BindAdaptiveTone(pts);
     const float cb[24] = {
         float(visible.left), float(visible.top),
@@ -486,11 +585,12 @@ HRESULT CDX11VideoProcessor::ApplyPerceptual(const Tex2D_t& source, ID3D11Textur
         m_pFilter->m_skinTone.load()/100.f,
         useTone ? 1.0f : 0.0f,
         mode == 2 && useTone ? 1.0f : 0.0f,
-        historyWeight, previousRotated,
+        0.0f, 0.0f,
         // [0.2.3] Mode 2 uses the requested calibrated strength on the first valid
-        // LUT draw; no fade. D1 depth dim belongs to Color Enhancement.
-        0.01f * m_pFilter->m_videoEnhancement.load()/100.f, 1.0f,
-        BindSvdLutOutputDither(target, mode != 0 || adaptiveToneWeight>0), adaptiveToneWeight, 0, 0
+        // Only an original producer draw can darken by depth. Missing/stale
+        // maps are neutral; no independent depth matte after MFG.
+        farMask ? farStrength : 0.f, 1.0f,
+        BindSvdLutOutputDither(target, !m_adaptiveTone.sourceComposition && (mode != 0 || adaptiveToneWeight>0)), adaptiveToneWeight, 0, 0
     };
     CRect input(area);
     input.OffsetRect(offset);
@@ -499,7 +599,7 @@ HRESULT CDX11VideoProcessor::ApplyPerceptual(const Tex2D_t& source, ID3D11Textur
     ID3D11SamplerState* noSampler = nullptr;
     m_pDeviceContext->PSSetShaderResources(1, 1, mode ? &lut : &noView);
     m_pDeviceContext->PSSetShaderResources(2, 1, depth ? &depth : &noView);
-    m_pDeviceContext->PSSetShaderResources(3, 1, previousDepth ? &previousDepth : &noView);
+    m_pDeviceContext->PSSetShaderResources(3, 1, farMask ? &farMask : &noView);
     m_pDeviceContext->PSSetSamplers(1, 1, &e.sampler.p);
     m_pDeviceContext->PSSetSamplers(2, 1, depth ? &e.sampler.p : &noSampler);
     const auto hr = TextureCopyRect(source, target, input, area, shader, e.constants, 0, false);

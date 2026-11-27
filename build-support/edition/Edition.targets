@@ -50,6 +50,8 @@
     <ClInclude Include="DLSS\SvdLutModel.inc" />
     <ClInclude Include="DLSS\SvdLutShader.h" />
     <ClInclude Include="Edition\SvdLutInput.h" />
+    <ClInclude Include="Edition\SuccessfulValueCache.h" />
+    <ClInclude Include="Edition\FixedShaderBytecode.h" />
     <ClInclude Include="Edition\SvdLutB2AdaptiveLuma.h" />
     <ClInclude Include="Edition\VideoEnhancementStartup.h" />
     <ClInclude Include="Depth\DepthPack.h" />

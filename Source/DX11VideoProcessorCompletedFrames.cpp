@@ -472,7 +472,7 @@ bool CDX11VideoProcessor::PrepareCompletedBatch(REFERENCE_TIME stream, bool orig
         target.sourceColorFinal = batch.target.sourceColorFinal;
         sampled = true;
         if (FAILED(RenderMfgVideo(surface, phase.nativeInput, target.image.pTexture, phase.timestamp,
-                                  picture, batch.videoOnlyInput, previousFormat, projected)) ||
+                                  picture, batch.videoOnlyInput, previousFormat, projected, batch.postVsrGeneration)) ||
             !QueueCompletedFrame(std::move(target))) {
             ++m_completedStatsDrops.other;
             ++m_mfgLostGenerated;
@@ -488,10 +488,10 @@ bool CDX11VideoProcessor::PrepareCompletedBatch(REFERENCE_TIME stream, bool orig
     target.mfg = true;
     const mfg::FrameSurface surface{original.original->texture.Get(), original.original->view.Get()};
     auto rendered = RenderMfgVideo(surface, original.nativeInput, target.image.pTexture, original.timestamp,
-                                   picture, batch.videoOnlyInput, previousFormat, projected);
+                                   picture, batch.videoOnlyInput, previousFormat, projected, batch.postVsrGeneration);
     if (FAILED(rendered)) {
         rendered = RenderMfgVideo(surface, original.nativeInput, target.image.pTexture, original.timestamp,
-                                  picture, batch.videoOnlyInput, true, projected);
+                                  picture, batch.videoOnlyInput, true, projected, batch.postVsrGeneration);
     }
     if (FAILED(rendered) || !QueueCompletedFrame(std::move(target))) {
         ++m_mfgLostReal;

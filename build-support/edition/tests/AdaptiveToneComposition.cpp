@@ -21,6 +21,7 @@ float max(float a,float b){return std::max(a,b);}
 float3 max(float3 a,float3 b){return {max(a.r,b.r),max(a.g,b.g),max(a.b,b.b)};}
 float dot(float3 a,float3 b){return a.r*b.r+a.g*b.g+a.b*b.b;}
 float length(float3 a){return std::sqrt(dot(a,a));} float rsqrt(float a){return 1.f/std::sqrt(a);}
+float clamp(float a,float lo,float hi){return std::clamp(a,lo,hi);}
 float saturate(float a){return std::clamp(a,0.f,1.f);} float3 saturate(float3 a){return {saturate(a.r),saturate(a.g),saturate(a.b)};}
 float lerp(float a,float b,float w){return a+(b-a)*w;} float3 lerp(float3 a,float3 b,float3 w){return a+(b-a)*w;}
 float3 step(float a,float3 b){return {float(b.r>=a),float(b.g>=a),float(b.b>=a)};}
@@ -41,10 +42,11 @@ void Exercise(){
         float3 orig(u(r),u(r),u(r)),grade(u(r),u(r),u(r));float depth=.9f+.2f*u(r),far=u(r),v=u(r),w=u(r);
         auto reference=[&](float3 input,float weight,float farWeight){
             auto result=Enhance(orig,ApplyAdaptiveTone(input,weight),depth);
-            if(farWeight>.001f){float y=dot(result,YW);float darken=min(DepthTuning.z,.02)*farWeight*(1.f-Smooth(.80,.98,y));float3 srgbSlope=lerp(result,(result+.055)/2.4,step(.04045,result));result=saturate(result-darken*srgbSlope);}
+            const float protection=1.f-.65f*Smooth(.80f,.98f,dot(result,YW));
+            result *= float(std::pow(1.0-double(std::clamp(DepthTuning.z,0.f,.95f))*farWeight*protection,1.0/2.2));
             return result;
         };
-        DepthTuning=float4(0,0,.01f,1);OutputQuantization.y=w;
+        DepthTuning=float4(0,0,.50f*u(r),1);OutputQuantization.y=w;
         auto full=rgb(Compose(orig,grade,depth,far));
         assert(err(full,reference(grade,w,far))<1e-6f);
         DepthTuning.w=0;
@@ -73,6 +75,25 @@ void Exercise(){
             for(float k:{mem.r,mem.g,mem.b,skin.r,skin.g,skin.b}) assert(k>=0&&k<=1);
         }
     }
+    // The actual extracted shader composition must reduce linear light by
+    // the requested fraction, including saturated highlights, with the current soft highlight protection.
+    Enhancements=float4(0,0,0,0);OutputQuantization.y=0;
+    for(float strength:{0.f,.01f,.10f,.25f,.50f}) {
+        DepthTuning=float4(0,0,strength,1);
+        for(float d:{.44f,.50f,.515f,.53f,.545f,.56f}) {
+            const float f=Smooth(.50f,.56f,d);
+            const float3 src(.95f,.5f,1.f);
+            auto result=rgb(Compose(src,src,1,f));
+            const float target=1-strength*f*(1.f-.65f*Smooth(.80f,.98f,dot(src,YW)));
+            assert(std::abs(std::pow(result.r/src.r,2.2f)-target)<2e-6f);
+            assert(std::abs(std::pow(result.g/src.g,2.2f)-target)<2e-6f);
+            assert(std::abs(std::pow(result.b/src.b,2.2f)-target)<2e-6f);
+            if(d<=.50f || strength==0) assert(err(result,src)==0);
+        }
+    }
+    assert(std::abs(Smooth(.50f,.56f,.53f)-.5f)<2e-6f);
+    assert(Smooth(.50f,.56f,.56f)==1.f);
+    std::cout<<"PASS 30 linear-light depth/strength combinations, including 50% shader input and highlight protection\n";
     const float3 skinSrc(.65,.43,.35), plantSrc(.30,.60,.30);
     Enhancements=float4(0,1,1,1);
     assert(err(Enhance(skinSrc,skinSrc,1),skinSrc)>1e-5f);

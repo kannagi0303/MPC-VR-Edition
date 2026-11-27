@@ -7,6 +7,7 @@
 #include "Depth/Depth.h"
 #include "NgxRuntime.h"
 #include "Mfg/MotionShaders.h"
+#include "Edition/FixedShaderBytecode.h"
 #include "SrMotionRefine.h"
 #include "Helper.h"
 #include "DX11Helper.h"
@@ -177,9 +178,7 @@ struct CDlssSR::Session
         }
         ResetSceneDetection();
         CComPtr<ID3DBlob> code;
-        if (FAILED(D3DCompile(kSceneThumbnailShader, sizeof(kSceneThumbnailShader) - 1,
-            nullptr, nullptr, nullptr, "Main", "ps_5_0",
-            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, nullptr)) ||
+        if (FAILED((edition::CompileFixedShader<kSceneThumbnailShader,"Main","ps_5_0">(&code))) ||
             FAILED(device->CreatePixelShader(code->GetBufferPointer(),
                 code->GetBufferSize(), nullptr, &sceneShader))) return;
 
@@ -612,14 +611,10 @@ struct CDlssSR::Session
 		depthActive = false;
 
 		if (!vertex) {
-			const auto compile = [](const char* entry, const char* target, ID3DBlob** code) {
-				return D3DCompile(mfg::MotionShaders, sizeof(mfg::MotionShaders) - 1, nullptr, nullptr,
-				                  nullptr, entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, code, nullptr);
-			};
 			CComPtr<ID3DBlob> vs, lumaCode, vectorsCode;
-			if (FAILED(compile("VS", "vs_5_0", &vs)) ||
-			    FAILED(compile("Luma", "ps_5_0", &lumaCode)) ||
-			    FAILED(compile("Vectors", "ps_5_0", &vectorsCode)) ||
+			if (FAILED((edition::CompileFixedShader<mfg::MotionShaders,"VS","vs_5_0">(&vs))) ||
+			    FAILED((edition::CompileFixedShader<mfg::MotionShaders,"Luma","ps_5_0">(&lumaCode))) ||
+			    FAILED((edition::CompileFixedShader<mfg::MotionShaders,"Vectors","ps_5_0">(&vectorsCode))) ||
 			    FAILED(device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &vertex)) ||
 			    FAILED(device->CreatePixelShader(lumaCode->GetBufferPointer(), lumaCode->GetBufferSize(), nullptr, &luma)) ||
 			    FAILED(device->CreatePixelShader(vectorsCode->GetBufferPointer(), vectorsCode->GetBufferSize(), nullptr, &vectors))) {
@@ -634,23 +629,17 @@ struct CDlssSR::Session
 		}
 		// Compile the alternatives here so binding flow cannot compile shaders.
 		if (!validationShadersPrepared) {
-			const auto createShader = [&](const char* source, size_t length,
-				const char* entry, CComPtr<ID3D11PixelShader>& shader) {
+			const auto createShader = [&]<auto& Source, edition::FixedShaderString Entry>(CComPtr<ID3D11PixelShader>& shader) {
 				if (shader) return;
 				CComPtr<ID3DBlob> code;
-				if (SUCCEEDED(D3DCompile(source, length, nullptr, nullptr,
-					nullptr, entry, "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, nullptr))) {
+				if (SUCCEEDED((edition::CompileFixedShader<Source,Entry,"ps_5_0">(&code)))) {
 					device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &shader);
 				}
 			};
-			createShader(sr_motion::RefineShaders, sizeof(sr_motion::RefineShaders) - 1,
-				"VectorsValidatedSR", refinedVectors);
-			createShader(sr_motion::RefineShaders, sizeof(sr_motion::RefineShaders) - 1,
-				"VectorsValidatedCostSR", refinedCostVectors);
-			createShader(mfg::MotionShaders, sizeof(mfg::MotionShaders) - 1,
-				"VectorsValidated", validatedVectors);
-			createShader(mfg::MotionShaders, sizeof(mfg::MotionShaders) - 1,
-				"VectorsValidatedCost", costValidatedVectors);
+			createShader.operator()<sr_motion::RefineShaders,"VectorsValidatedSR">(refinedVectors);
+			createShader.operator()<sr_motion::RefineShaders,"VectorsValidatedCostSR">(refinedCostVectors);
+			createShader.operator()<mfg::MotionShaders,"VectorsValidated">(validatedVectors);
+			createShader.operator()<mfg::MotionShaders,"VectorsValidatedCost">(costValidatedVectors);
 			validationShadersPrepared = true;
 		}
 

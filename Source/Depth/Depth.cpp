@@ -6,9 +6,11 @@
 #include "DepthRawPolicy.h"
 #include "DLSS/NgxRuntime.h"
 #include "Mfg/MotionShaders.h"
+#include "Edition/FixedShaderBytecode.h"
 #include <d3dcompiler.h>
 #include <cstdio>
 #include <mutex>
+#include <chrono>
 
 using Microsoft::WRL::ComPtr;
 
@@ -79,12 +81,11 @@ float4 Nv12(float4 pos : SV_POSITION) : SV_TARGET {
 }
 )";
 
-bool CreatePixelShader(ID3D11Device1* device, const char* text, size_t size, ID3D11PixelShader** shader,
-    const char* entry = "Main")
+template<auto& Source, edition::FixedShaderString Entry>
+bool CreatePixelShader(ID3D11Device1* device, ID3D11PixelShader** shader)
 {
     ComPtr<ID3DBlob> code;
-    return SUCCEEDED(D3DCompile(text, size, nullptr, nullptr, nullptr, entry, "ps_5_0",
-        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, code.GetAddressOf(), nullptr)) &&
+    return SUCCEEDED((edition::CompileFixedShader<Source,Entry,"ps_5_0">(code.GetAddressOf()))) &&
         SUCCEEDED(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, shader));
 }
 
@@ -116,15 +117,12 @@ bool CDepth::Initialize(ID3D11Device1* device)
     ComPtr<ID3DBlob> vertex;
     if (FAILED(device->CreateDeviceContextState(0, &featureLevel, 1, D3D11_SDK_VERSION,
             __uuidof(ID3D11Device1), &chosen, m_state.GetAddressOf())) ||
-        FAILED(D3DCompile(mfg::MotionShaders, sizeof(mfg::MotionShaders) - 1,
-            nullptr, nullptr, nullptr, "VS", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3,
-            0, vertex.GetAddressOf(), nullptr)) ||
+        FAILED((edition::CompileFixedShader<mfg::MotionShaders,"VS","vs_5_0">(vertex.GetAddressOf()))) ||
         FAILED(device->CreateVertexShader(vertex->GetBufferPointer(), vertex->GetBufferSize(),
             nullptr, m_vertex.GetAddressOf())) ||
-        !CreatePixelShader(device, CaptureShader, sizeof(CaptureShader) - 1, m_captureShader.GetAddressOf()) ||
-        !CreatePixelShader(device, CaptureShader, sizeof(CaptureShader) - 1, m_captureNv12Shader.GetAddressOf(), "Nv12") ||
-        !CreatePixelShader(device, DepthDrawShader, sizeof(DepthDrawShader) - 1,
-            m_depthShader.GetAddressOf(), "RawExpand") ||
+        !CreatePixelShader<CaptureShader,"Main">(device, m_captureShader.GetAddressOf()) ||
+        !CreatePixelShader<CaptureShader,"Nv12">(device, m_captureNv12Shader.GetAddressOf()) ||
+        !CreatePixelShader<DepthDrawShader,"RawExpand">(device, m_depthShader.GetAddressOf()) ||
         !CreateInputs(device, m_sampler.GetAddressOf(), m_constants.GetAddressOf()))
         return false;
 
@@ -191,7 +189,12 @@ bool CDepth::PrefetchNv12(ID3D11Device1* device, ID3D11DeviceContext1* context,
 
 void CDepth::PlaybackFrame(int64_t pts, int64_t duration)
 {
-    m_playbackPts = pts;
+    if (pts != m_playbackPts) {
+        ClearOriginalSelection();
+        m_previousPlaybackPts = m_playbackPts >= 0 && m_playbackPts < pts ? m_playbackPts : -1;
+        m_playbackPts = pts;
+    }
+    if (duration > 0) m_originalDuration = duration;
     if (!m_lookahead) return;
     PollCompleted();
     if (!TraceDepth().Enabled()) return;
@@ -218,12 +221,24 @@ void CDepth::Capture(ID3D11Device1* device, ID3D11DeviceContext1* context,
         return;
     Prepare(device);
     if (!m_initialized) return;
-    // MFG may confirm a cut after SR already tried to capture that source PTS.
-    if (pts == m_lastSourcePts && (pts != m_sceneCuts.back() || pts == m_lastSubmittedPts)) return;
-    // One capture per source PTS across the SR and MFG call sites.
+    // Seeing a PTS does not mean its GPU job was accepted. A later existing
+    // raw-source call site may retry a missed submission, without a new wait
+    // or retry loop. After selection, keep the OLD admission rule: only the
+    // original first-capture path or a confirmed cut can submit a late map.
+    // It may help the next original, never replace this one's fixed choice.
+    if (pts == m_lastSourcePts && (pts == m_lastSubmittedPts ||
+        (pts == m_selectedSourcePts && pts != m_sceneCuts.back()))) return;
+    const auto resetCaptureHistory = [&] {
+        const bool selected = pts == m_selectedSourcePts;
+        ResetHistory();
+        // Geometry invalidation is stronger than a pin. Keep a neutral
+        // decision for this turn, not a map from the previous geometry.
+        if (selected) m_selectedSourcePts = pts;
+    };
+    // One successful capture per source PTS across the SR and MFG call sites.
     if (m_modelSize.cx != modelSize.cx || m_modelSize.cy != modelSize.cy ||
         pts < m_lastSourcePts || (m_lastSourcePts >= 0 && pts - m_lastSourcePts > 2'500'000)) {
-        ResetHistory();
+        resetCaptureHistory();
         m_modelSize = modelSize;
     }
     m_lastSourcePts = pts;
@@ -244,7 +259,7 @@ void CDepth::Capture(ID3D11Device1* device, ID3D11DeviceContext1* context,
     const SIZE captureSize{LONG(desc.Width), LONG(desc.Height)};
     if (m_captureSize.cx && (m_captureSize.cx != captureSize.cx || m_captureSize.cy != captureSize.cy ||
         !EqualRect(&picture, &m_capturePicture))) {
-        ResetHistory();
+        resetCaptureHistory();
         m_lastSourcePts = pts;
     }
     m_captureSize = captureSize;
@@ -254,6 +269,9 @@ void CDepth::Capture(ID3D11Device1* device, ID3D11DeviceContext1* context,
     // a different output without this serialized producer submitting it.
     unsigned slot = m_gpu.Capacity();
     for (unsigned i = 0; i < m_gpu.Capacity(); ++i) {
+        // Until the next original, preserve the selected map's CONTENT as
+        // well as its identity. No extra textures or worker-side pin locks.
+        if (m_selectedDepthPts >= 0 && m_resultPts[i] == m_selectedDepthPts) continue;
         if ((slot == m_gpu.Capacity() || m_resultPts[i] < m_resultPts[slot]) && !m_gpu.SlotBusy(i)) slot = i;
     }
     if (slot == m_gpu.Capacity() || (m_lookahead && m_resultPts[slot] > m_playbackPts)) return;
@@ -330,10 +348,76 @@ void CDepth::PollCompleted()
     m_mapRateLastPoll = now;
 }
 
+void CDepth::AwaitOriginal(int64_t pts, int64_t duration, HANDLE cancelEvent)
+{
+    if (pts < 0 || !m_initialized) return;
+    if (duration > 0) m_originalDuration = duration;
+    PollCompleted();
+    // An original's first decision (including neutral) is final for this
+    // producer turn. Never switch to a later completion or wait twice.
+    if (m_selectedSourcePts == pts || m_waitedOriginalPts == pts) return;
+    // No artificial delay if this original has not been submitted, the model
+    // is loading, or its exact result is already available.
+    const auto exactReady = [&] {
+        const auto e = EstimateAtOrBefore(pts);
+        return e.view && e.pts == pts && e.pts >= SceneStart(pts);
+    };
+    const bool submitted = m_lastSubmittedPts == pts ||
+        (m_lookahead && m_lastSubmittedPts >= pts);
+    if (submitted || exactReady()) m_waitedOriginalPts = pts;
+    const auto started = std::chrono::steady_clock::now();
+    const auto budget = std::chrono::microseconds((std::max<int64_t>)(0,
+        (std::min<int64_t>)(m_originalDuration / 10, 40'000)));
+    const auto deadline = started + budget;
+    while (submitted && !exactReady() && m_gpu.CanStart() && !m_gpu.Loading() &&
+           cancelEvent && std::chrono::steady_clock::now() < deadline) {
+        // No GPU/NGX lock is held here. GPU worker owns its own queue and
+        // Submit already flushed the D3D11 capture fence. Stop/seek wakes
+        // this wait through the existing playback cancellation event.
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0 || WaitForSingleObject(cancelEvent, 1) != WAIT_TIMEOUT) break;
+        PollCompleted();
+    }
+    PollCompleted();
+    if (cancelEvent && WaitForSingleObject(cancelEvent, 0) == WAIT_OBJECT_0) return;
+    const auto selected = SelectOriginal(pts);
+    const double waited = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    TraceDepth().Record(selected.view ? (selected.pts == pts ? "original_exact" : "original_previous") :
+        "original_missing", pts, selected.view ? selected.pts : -1, waited);
+}
+
+CDepth::Estimate CDepth::SelectOriginal(int64_t pts)
+{
+    const auto selected = ForFrame(pts);
+    // Only the actual decoded source turn is pinned. Generated and delayed
+    // timestamps retain the existing consumer rules, never this pin.
+    if (pts >= 0 && pts == m_playbackPts && m_selectedSourcePts != pts) {
+        m_selectedSourcePts = pts;
+        m_selectedDepthPts = selected.view ? selected.pts : -1;
+    }
+    return selected;
+}
+
 CDepth::Estimate CDepth::ForFrame(int64_t pts) const
 {
+    if (pts >= 0 && pts == m_selectedSourcePts) {
+        if (m_selectedDepthPts < 0) return {};
+        const auto selected = EstimateAtOrBefore(m_selectedDepthPts);
+        // A newly confirmed cut can veto a past map, but must not silently
+        // substitute a different map for an already composed original.
+        return selected.view && selected.pts == m_selectedDepthPts &&
+            selected.pts >= SceneStart(pts) ? selected : Estimate{};
+    }
     const auto estimate = EstimateAtOrBefore(pts);
-    return estimate.view && estimate.pts >= SceneStart(pts) && pts - estimate.pts <= MaxEstimateAge
+    if (!estimate.view || estimate.pts < SceneStart(pts) || pts - estimate.pts > MaxEstimateAge) return {};
+    if (estimate.pts == pts) return estimate;
+    // Only the immediately preceding decoded original is an eligible fallback
+    // for the current source PTS. Delayed consumers use one source interval.
+    if (pts == m_playbackPts && m_previousPlaybackPts >= 0)
+        return estimate.pts == m_previousPlaybackPts ? estimate : Estimate{};
+    return depthraw::Usable(estimate.pts, pts, float(m_originalDuration) / 10000.0f)
         ? estimate : Estimate{};
 }
 
@@ -392,6 +476,9 @@ void CDepth::ResetHistory()
 {
     ++m_generation;
     m_lastSourcePts = m_lastSubmittedPts = -1;
+    m_waitedOriginalPts = -1;
+    ClearOriginalSelection();
+    m_previousPlaybackPts = -1;
     m_resultPts.fill(-1);
     m_sceneCuts.fill(-1);
     m_captureSize = {};
@@ -439,9 +526,10 @@ bool CDepth::DrawEstimate(ID3D11DeviceContext1* context,
     // Harvest again at the point of consumption: capture may have polled
     // before the preceding asynchronous job finished. No wait or GPU query.
     PollCompleted();
-    // Same generation/scene/absolute-age gate as ForFrame, plus the original
-    // one-frame RAW eligibility. Do not warp, interpolate or extend the limit.
-    const auto estimate = EstimateAtOrBefore(pts);
+    // Current decoded original uses the same fixed choice as VE/Overlay.
+    // Keep the original RAW consumer restrictions, including the actual
+    // interval bound; delayed/generated phases retain their old lookup.
+    const auto estimate = pts == m_playbackPts ? SelectOriginal(pts) : EstimateAtOrBefore(pts);
     const auto record = [&](const wchar_t* status) {
         if (inverted) { // MFG, not the SR consumer
             m_counters.rawMfgCheckAge = estimate.view ? pts - estimate.pts : -1;
@@ -452,7 +540,10 @@ bool CDepth::DrawEstimate(ID3D11DeviceContext1* context,
     if (estimate.pts < SceneStart(pts)) { record(L"scene mismatch"); return false; }
     if (pts - estimate.pts > CDepth::MaxEstimateAge) { record(L"too old"); return false; }
     if (!m_depthShader) { record(L"shader unavailable"); return false; }
-    if (!depthraw::Usable(estimate.pts, pts, frameTimeMs)) { record(L"PTS mismatch"); return false; }
+    if (!depthraw::Usable(estimate.pts, pts, frameTimeMs) ||
+        (pts == m_playbackPts && estimate.pts != pts && !ForFrame(pts).view)) {
+        record(L"PTS mismatch"); return false;
+    }
 
     D3D11_TEXTURE2D_DESC desc{};
     output->GetDesc(&desc);

@@ -3,6 +3,7 @@
 #include "Session.h"
 #include "Runtime.h"
 #include "MotionShaders.h"
+#include "Edition/FixedShaderBytecode.h"
 #include "GpuBankTimeline.h"
 #include "BankSelection.h"
 #include "DLSS/DlssOpticalFlow.h"
@@ -12,6 +13,7 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <array>
+#include <initializer_list>
 #include <vector>
 #include <mutex>
 #include <stdexcept>
@@ -69,9 +71,13 @@ bool AsyncProducerEnabled() {
 void Check(HRESULT hr,const std::source_location& at=std::source_location::current()) {
     if(FAILED(hr)) throw std::runtime_error(std::format("MFG HRESULT 0x{:08X} at Session.cpp:{}",unsigned(hr),at.line()));
 }
-void Transition(ID3D12GraphicsCommandList* l,ID3D12Resource* r,D3D12_RESOURCE_STATES a,D3D12_RESOURCE_STATES b) {
+D3D12_RESOURCE_BARRIER TransitionBarrier(ID3D12Resource* r,D3D12_RESOURCE_STATES a,D3D12_RESOURCE_STATES b) {
     D3D12_RESOURCE_BARRIER v{};v.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;v.Transition.pResource=r;
-    v.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;v.Transition.StateBefore=a;v.Transition.StateAfter=b;l->ResourceBarrier(1,&v);
+    v.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;v.Transition.StateBefore=a;v.Transition.StateAfter=b;
+    return v;
+}
+void Transitions(ID3D12GraphicsCommandList* l,std::initializer_list<D3D12_RESOURCE_BARRIER> barriers) {
+    l->ResourceBarrier(static_cast<UINT>(barriers.size()),barriers.begin());
 }
 struct Shared {
     ComPtr<ID3D12Resource> d12;ComPtr<ID3D11Texture2D> d11;
@@ -109,6 +115,16 @@ struct Session::Impl {
     ComPtr<ID3D11Fence> inputFence11,presentFence11;
     ComPtr<ID3DDeviceContextState> state;
     ComPtr<ID3D11VertexShader> vs;ComPtr<ID3D11PixelShader> copy,luma,vectors;ComPtr<ID3D11Buffer> constants;
+    // This buffer is private to this Impl; no other pass writes it. Retain
+    // the last uploaded payload across context-state swaps and history resets.
+    std::array<int,12> uploadedCopyParams{};
+    bool copyParamsUploaded=false;
+    void UpdateCopyConstants(const std::array<int,12>& params) {
+        if(copyParamsUploaded && uploadedCopyParams==params) return;
+        context->UpdateSubresource(constants.Get(),0,nullptr,params.data(),0,0);
+        uploadedCopyParams=params;
+        copyParamsUploaded=true;
+    }
     // Real frames retain the full swapchain resolution, while NGX works at a
     // capped resolution.  One native copy per bank also acts as the source SRV.
     // Do not reuse a single sourceCopy for frames still queued to Present.
@@ -335,11 +351,17 @@ struct Session::Impl {
         const D3D_FEATURE_LEVEL fl[]={D3D_FEATURE_LEVEL_11_0};D3D_FEATURE_LEVEL chosen{};
         Check(d->CreateDeviceContextState(0,fl,1,D3D11_SDK_VERSION,__uuidof(ID3D11Device1),&chosen,&state));
         ComPtr<ID3DBlob> code,error;
-        auto compile=[&](const char* entry,const char* target){code.Reset();error.Reset();Check(D3DCompile(MotionShaders,sizeof(MotionShaders)-1,nullptr,nullptr,nullptr,entry,target,D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&error));};
-        compile("VS","vs_5_0");Check(d->CreateVertexShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&vs));
-        compile("Luma","ps_5_0");Check(d->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&luma));
-        compile("Copy","ps_5_0");Check(d->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&copy));
-        compile("MfgVectors","ps_5_0");Check(d->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&vectors));
+        Check(edition::CompileFixedShader<MotionShaders,"VS","vs_5_0">(&code,&error));
+        Check(d->CreateVertexShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&vs));
+        code.Reset(); error.Reset();
+        Check(edition::CompileFixedShader<MotionShaders,"Luma","ps_5_0">(&code,&error));
+        Check(d->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&luma));
+        code.Reset(); error.Reset();
+        Check(edition::CompileFixedShader<MotionShaders,"Copy","ps_5_0">(&code,&error));
+        Check(d->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&copy));
+        code.Reset(); error.Reset();
+        Check(edition::CompileFixedShader<MotionShaders,"MfgVectors","ps_5_0">(&code,&error));
+        Check(d->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&vectors));
         D3D11_BUFFER_DESC cb{};cb.ByteWidth=48;cb.Usage=D3D11_USAGE_DEFAULT;cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         Check(d->CreateBuffer(&cb,nullptr,&constants));
         wchar_t letterboxSetting[8]{};
@@ -461,9 +483,9 @@ struct Session::Impl {
         lastPicture = visible;
         // SV_Position-based copy must map the *entire* native source into the
         // lower-resolution NGX target, not crop its top-left corner.
-        const int copyParams[12]={int(w),int(h),int(sourceW),int(sourceH),int(flow.GridSize()),int(probeBars) | (maskBars ? 2 : 0),0,0,
+        const std::array<int,12> copyParams={int(w),int(h),int(sourceW),int(sourceH),int(flow.GridSize()),int(probeBars) | (maskBars ? 2 : 0),0,0,
             visible.left,visible.top,visible.right,visible.bottom};
-        context->UpdateSubresource(constants.Get(),0,nullptr,copyParams,0,0);
+        UpdateCopyConstants(copyParams);
         ID3D11Buffer* cb=constants.Get();context->PSSetConstantBuffers(0,1,&cb);
         ID3D11ShaderResourceView* srvs[2]={bank.original->view.Get(),nullptr};context->PSSetShaderResources(0,2,srvs);
         ID3D11RenderTargetView* target=bank.real.rtv.Get();context->OMSetRenderTargets(1,&target,nullptr);
@@ -512,25 +534,32 @@ struct Session::Impl {
         Check(bank.allocator->Reset());Check(bank.list->Reset(bank.allocator.Get(),nullptr));
         ID3D12GraphicsCommandList* work=bank.list.Get();
         std::array<ID3D12Resource*,MaxGenerated> out{},flag{};
-        for(auto r:{bank.real.d12.Get(),bank.depth.d12.Get(),bank.motion.d12.Get()})
-            Transition(work,r,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        // Preserve the individual barrier order; only batch adjacent calls.
+        Transitions(work,{
+            TransitionBarrier(bank.real.d12.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+            TransitionBarrier(bank.depth.d12.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+            TransitionBarrier(bank.motion.d12.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)});
         for(unsigned i=0;i<multiplier-1;++i) {
             out[i]=bank.generated[i].d12.Get();flag[i]=bank.disabled[i].Get();
-            Transition(work,out[i],D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            Transition(work,flag[i],D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_DEST);
+            Transitions(work,{
+                TransitionBarrier(out[i],D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+                TransitionBarrier(flag[i],D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_DEST)});
             work->CopyBufferRegion(flag[i],0,zero.Get(),0,4);
-            Transition(work,flag[i],D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            Transitions(work,{TransitionBarrier(flag[i],D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_UNORDERED_ACCESS)});
         }
         const auto evaluation=runtime.Evaluate(work,bank.real.d12.Get(),bank.depth.d12.Get(),
                                                 bank.motion.d12.Get(),out,flag,multiplier,reset||!hasFlow);
         for(unsigned i=0;i<multiplier-1;++i) {
-            Transition(work,out[i],D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COMMON);
-            Transition(work,flag[i],D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);
+            Transitions(work,{
+                TransitionBarrier(out[i],D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COMMON),
+                TransitionBarrier(flag[i],D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE)});
             work->CopyBufferRegion(bank.readback.Get(),i*4,flag[i],0,4);
-            Transition(work,flag[i],D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            Transitions(work,{TransitionBarrier(flag[i],D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS)});
         }
-        for(auto r:{bank.real.d12.Get(),bank.depth.d12.Get(),bank.motion.d12.Get()})
-            Transition(work,r,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
+        Transitions(work,{
+            TransitionBarrier(bank.real.d12.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON),
+            TransitionBarrier(bank.depth.d12.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON),
+            TransitionBarrier(bank.motion.d12.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON)});
         if(evaluation==Runtime::Evaluation::Failed) throw std::runtime_error("NGX evaluation failed");
         // A refused multiplier may have recorded earlier phases. Submit the
         // bank normally to retire that work, but queue only its source frame.

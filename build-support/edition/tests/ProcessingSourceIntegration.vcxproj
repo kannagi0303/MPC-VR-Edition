@@ -48,6 +48,10 @@
     <ClCompile Include="PerceptualLifecycle.cpp" />
     <ClCompile Include="EnhancementMasterAndLayout.cpp" />
     <ClCompile Include="SourceToneBeforeSR.cpp" />
+    <ClCompile Include="EarlySrSourceReuse.cpp" />
+    <ClCompile Include="MfgSubmissionReuse.cpp" />
+    <ClCompile Include="CompletedColorTransfer.cpp" />
+    <ClCompile Include="Phase5ResourceReuse.cpp" />
     <ClCompile Include="AdaptiveToneContinuity.cpp" />
     <ClCompile Include="AdaptiveToneComposition.cpp" />
     <ClCompile Include="DepthRawPipeline.cpp" />

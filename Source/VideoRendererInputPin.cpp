@@ -23,6 +23,7 @@
 #include "VideoRenderer.h"
 #include "VideoRendererInputPin.h"
 #include "CustomAllocator.h"
+#include "Depth/DecodedFrameLookahead.h"
 
 //
 // CVideoRendererInputPin
@@ -101,6 +102,7 @@ STDMETHODIMP CVideoRendererInputPin::ReceiveConnection(IPin* pConnector, const A
 	CAutoLock cObjectLock(m_pLock);
 
 	if (m_Connected) {
+        if (!m_pBaseRenderer->OriginalDeliveryIdle()) return VFW_E_WRONG_STATE;
 		CMediaType mt(*pmt);
 
 		if (FAILED(CheckMediaType(&mt))) {
@@ -165,12 +167,15 @@ STDMETHODIMP CVideoRendererInputPin::EndFlush()
 STDMETHODIMP CVideoRendererInputPin::EndOfStream()
 {
 	const auto ticket = m_pBaseRenderer->m_playbackCancel.Capture();
+    const auto epoch = m_pBaseRenderer->m_depthLookahead ? m_pBaseRenderer->m_depthLookahead->Epoch() : 0;
 	m_pBaseRenderer->DrainLookahead();
     // If Stop/BeginFlush arrived during Drain, this EOS belongs to the
     // cancelled timeline. Never notify completion of the next film.
-    if (ticket->Cancelled()) {
-        return S_OK;
-    }
+    // NewSegment retires the queue epoch even if the permanent playback
+    // ticket has not changed. Check both under the original lock order.
+    CAutoLock state(&m_pBaseRenderer->m_InterfaceLock);
+    CAutoLock render(&m_pBaseRenderer->m_RendererLock);
+    if (ticket->Cancelled() || m_pBaseRenderer->LookaheadCancelled(epoch)) return S_OK;
     const auto hr = CRendererInputPin::EndOfStream();
     return hr;
 }
@@ -210,6 +215,7 @@ STDMETHODIMP CVideoRendererInputPin::SetSurfaceType(DXVA2_SurfaceType dwType)
 // ID3D11DecoderConfiguration
 STDMETHODIMP CVideoRendererInputPin::ActivateD3D11Decoding(ID3D11Device *pDevice, ID3D11DeviceContext *pContext, HANDLE hMutex, UINT nFlags)
 {
+    if (!m_pBaseRenderer->OriginalDeliveryIdle()) return VFW_E_WRONG_STATE;
 	HRESULT hr = E_FAIL;
 	if (m_pBaseRenderer->m_VideoProcessor->Type() == VP_DX11) {
 		if (auto pDX11VP = dynamic_cast<CDX11VideoProcessor*>(m_pBaseRenderer->m_VideoProcessor.get())) {

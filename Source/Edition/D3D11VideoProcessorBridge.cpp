@@ -23,6 +23,7 @@
 #include "IVideoRenderer.h"
 #include "DX11Helper.h"
 #include "D3D11VP.h"
+#include <iterator>
 
 HRESULT CD3D11VP::CheckInputTexture(ID3D11Texture2D* texture) const
 {
@@ -81,6 +82,23 @@ void CD3D11VP::RestoreFrame(const HeldFrame& frame, ID3D11DeviceContext* pContex
 	pContext->CopyResource(GetNextInputTexture(vframeFormat), frame.pTexture);
 }
 
+// Use the native DXVA2 -> D3D11 mapping, with the independent VP's own ranges.
+// A missing filter has a zero-initialized range; never divide by its multiplier.
+int ValueDXVA2toD3D11(const DXVA2_Fixed32 fixed, const D3D11_VIDEO_PROCESSOR_FILTER_RANGE& range);
+void CD3D11VP::SetExternalProcAmpValues(const DXVA2_ProcAmpValues& values)
+{
+    const DXVA2_Fixed32 requested[] = {values.Brightness, values.Contrast, values.Hue, values.Saturation};
+    for (UINT i = 0; i < std::size(requested); ++i) {
+        auto& filter = m_VPFilters[i];
+        if (filter.support && filter.range.Multiplier > 0.0f) {
+            filter.value = ValueDXVA2toD3D11(requested[i], filter.range);
+        } else {
+            filter.value = filter.range.Default;
+        }
+    }
+    m_bUpdateFilters = true;
+}
+
 HRESULT CD3D11VP::ProcessExternal(ID3D11Texture2D* pInput, UINT arraySlice,
     ID3D11Texture2D* pRenderTarget, const RECT& srcRect, const RECT& dstRect)
 {
@@ -120,6 +138,18 @@ HRESULT CD3D11VP::ProcessExternal(ID3D11Texture2D* pInput, UINT arraySlice,
     if (FAILED(hr)) return hr;
     m_pVideoContext->VideoProcessorSetStreamFrameFormat(
         m_pVideoProcessor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+    // Match the native first-field filter commit. External RGB upscalers
+    // and neutral lookahead VPs never receive ProcAmp updates.
+    if (m_bUpdateFilters) {
+        for (UINT i = 0; i < std::size(m_VPFilters); ++i) {
+            const auto& filter = m_VPFilters[i];
+            if (filter.support && filter.range.Multiplier > 0.0f) {
+                m_pVideoContext->VideoProcessorSetStreamFilter(m_pVideoProcessor, 0,
+                    (D3D11_VIDEO_PROCESSOR_FILTER)i, filter.value != filter.range.Default, filter.value);
+            }
+        }
+        m_bUpdateFilters = false;
+    }
     D3D11_VIDEO_PROCESSOR_STREAM stream{};
     stream.Enable = TRUE;
     stream.InputFrameOrField = m_nInputFrameOrField++;

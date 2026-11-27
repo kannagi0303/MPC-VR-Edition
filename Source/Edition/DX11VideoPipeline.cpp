@@ -24,6 +24,39 @@
 #include "DX11VideoProcessor.h"
 #include "VideoRenderer.h"
 #include "Edition/VideoFrame.h"
+#include <utility>
+
+namespace {
+// The completed pool and the producer's color scratch both own private
+// D3D11 textures. When their complete descriptors match, transfer the
+// finished pixels by exchanging the wrappers (texture AND SRV), not by
+// copying those pixels into a second allocation. Never adopt a shared,
+// partial, already-published or foreign surface.
+bool TryAdoptCompletedColorOutput(Tex2D_t& target, Tex2D_t& scratch,
+    ID3D11Texture2D* corrected, ID3D11Texture2D* renderTarget,
+    const CRect& picture, bool videoOnly, uint64_t fence, uint64_t readFence)
+{
+    const auto& a = target.desc;
+    const auto& b = scratch.desc;
+    if (!videoOnly || fence || readFence || !target.pTexture || !scratch.pTexture ||
+        !target.pShaderResource || !scratch.pShaderResource ||
+        target.pTexture.p != renderTarget || corrected != scratch.pTexture.p ||
+        target.pTexture.p == scratch.pTexture.p ||
+        target.type != Tex2D_DefaultShaderRTarget || scratch.type != target.type ||
+        a.Format != DXGI_FORMAT_B8G8R8A8_UNORM || a.Format != b.Format ||
+        !a.Width || !a.Height || a.Width != b.Width || a.Height != b.Height ||
+        picture != CRect(0, 0, a.Width, a.Height) ||
+        a.MipLevels != 1 || b.MipLevels != 1 || a.ArraySize != 1 || b.ArraySize != 1 ||
+        a.SampleDesc.Count != 1 || b.SampleDesc.Count != 1 ||
+        a.SampleDesc.Quality != 0 || b.SampleDesc.Quality != 0 ||
+        a.Usage != D3D11_USAGE_DEFAULT || b.Usage != D3D11_USAGE_DEFAULT ||
+        a.BindFlags != (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET) ||
+        b.BindFlags != a.BindFlags || a.CPUAccessFlags || b.CPUAccessFlags ||
+        a.MiscFlags || b.MiscFlags) return false;
+    std::swap(target, scratch);
+    return true;
+}
+}
 
 // Prepare source projection, buffered-frame routing and the target without
 // changing renderer lock scopes or the native HDR/overlay/presentation order.
@@ -61,6 +94,8 @@ std::optional<HRESULT> CDX11VideoProcessor::PrepareEditionRender(edition::VideoF
 	}
 	if (field && !m_completingSample && !CompletedFramesPending()) m_completedLast.reset();
 	const bool detached = m_processingSize.cx > 0;
+    if (!field && m_mfgLegacyFallbackActive && m_pFilter->m_filterState==State_Running &&
+        !m_pFilter->m_bClockStalled && LegacyFramesPending()) return S_OK;
 	if (!field && detached && mfgEnabledForRate && m_mfgInputModeKnown &&
 	    !m_mfg.Failed() && !m_mfgPresentFailed && m_pFilter->m_filterState == State_Running) {
 		// The presenter owns the current picture and will draw with the new window geometry.
@@ -310,7 +345,12 @@ std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Tex
 	auto* pictureTexture = videoOnly ? m_processingTexture.pTexture.p : pBackBuffer.p;
 	if (useMfg && (!m_resizePending || videoOnlyInput)) {
 		if (QueueMfg(pictureTexture, frameStartTime, overlayInputHandled, false, false, videoOnlyInput, projected)) return S_OK;
-	} else if (sourceReady && mfgEnabledForRate && !m_resizePending && m_pFilter->m_filterState == State_Running) StopMfg(false);
+	} else if (sourceReady && mfgEnabledForRate && !m_resizePending && m_pFilter->m_filterState == State_Running) {
+        const bool canHandoff=field && frameStartTime>=0 && !m_completingSample &&
+            !m_pFilter->m_bClockStalled && !m_pPSHalfOUtoInterlace;
+        if (!canHandoff || (!m_mfgLegacyFallbackActive && !(m_mfg.Failed() && RetireLegacyMfgForFallback())))
+            StopMfg(false);
+    }
 	if (!m_completedTarget && (videoOnly || projected || !m_renderRect.IsRectEmpty())) {
         const auto atPicture=videoOnly ? processingRect : outputPicture;
         BeginAdaptiveToneLegacy(pictureTexture,atPicture,timestamp);
@@ -327,6 +367,15 @@ std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Tex
 	if (videoOnly) {
 		hr = ResizeShaderPass(m_processingTexture, pBackBuffer, processingRect, outputPicture, 0);
 	}
+    // Do this only after the direct fallback's final colour/resize work,
+    // before native subtitles/OSD/Present. The completed path below owns
+    // its target independently and never enters the legacy bridge.
+    if (!m_completingSample && field && frameStartTime>=0 &&
+        m_pFilter->m_filterState==State_Running && !m_pFilter->m_bClockStalled && !m_pPSHalfOUtoInterlace &&
+        m_mfgLegacyFallbackActive) {
+        if (FAILED(hr)) return hr;
+        if (const auto queued=QueueLegacyMfgFallback(pBackBuffer,frameStartTime,projected)) return *queued;
+    }
 	if (m_completingSample && m_completedTarget) {
 		if (FAILED(hr)) return hr;
         // MFG bypass/disabled/failure: finalize the same original before it
@@ -336,8 +385,19 @@ std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Tex
         } else if (SourceToneEligible()) {
             auto& target=*m_completedTarget;
             auto* corrected=PrepareSourceTone(target.image,target.picture,timestamp);
-            if(corrected && corrected!=target.image.pTexture.p)
-                m_pDeviceContext->CopyResource(target.image.pTexture,corrected);
+            if (corrected && corrected != target.image.pTexture.p) {
+                // PrepareSourceTone has unbound the completed draw. All
+                // scratch reads/writes are ordered on the same immediate
+                // context; NGX uses its own copied/shared bank inputs.
+                // Only the unpublished target exchanges ownership here.
+                // Render returns after queuing, so pBackBuffer's local
+                // reference to the old target is not used for another draw.
+                if (!TryAdoptCompletedColorOutput(target.image, m_adaptiveTone.sourceOutput,
+                        corrected, pBackBuffer.p, target.picture, target.videoOnly,
+                        target.fence, target.backBufferReadFence)) {
+                    m_pDeviceContext->CopyResource(target.image.pTexture, corrected);
+                }
+            }
             target.sourceColorFinal=true;
         }
 		if (!m_completedBatches.empty()) {

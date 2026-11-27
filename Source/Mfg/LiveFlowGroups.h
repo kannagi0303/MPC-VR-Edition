@@ -64,6 +64,19 @@ public:
         dynamicCadence_.Reset();
         clock_.Reset();
     }
+    unsigned RetireLegacyRoute() {
+        QueueDrops drops;
+        for (auto& group : groups_) {
+            while (group.next < group.pictures.size() &&
+                   group.pictures[group.next].index != MaxGenerated) DropPhase(group, drops);
+            if (group.next < group.pictures.size()) group.pictures.back().legacyRoute.retired = true;
+        }
+        RemoveEmptyFront();
+        typicalSpan_ = 0.0;
+        dynamicCadence_.Reset();
+        // Retained original deadlines still belong to this QPC clock.
+        return drops.generated;
+    }
     unsigned PendingOriginals() const {
         unsigned total = 0;
         for (const auto& g : groups_)
@@ -91,7 +104,8 @@ public:
                    double frequency, int64_t videoDelay, double refreshHz,
                    bool nativeInput, unsigned bankCount, bool autoCadence = false,
                    bool adaptiveSourceTiming = false, bool repeatBridge = false,
-                   const PresentationTiming& timing = {}, DeadlineMode deadlineMode = DeadlineMode::Qpc) {
+                   const PresentationTiming& timing = {}, DeadlineMode deadlineMode = DeadlineMode::Qpc,
+                   LegacyPictureRoute route = {}) {
         QueueDrops drops;
         if (!batch.serial || !batch.original) return drops;
         bankCount = std::clamp(bankCount, 2u, 4u);
@@ -151,7 +165,7 @@ public:
             }
             group.pictures.push_back({deadline, stamp, batch.serial, index, nativeInput,
                                       index == MaxGenerated ? batch.original : nullptr,
-                                      index == MaxGenerated ? -1 : batch.previous, presentAt + videoDelay});
+                                      index == MaxGenerated ? -1 : batch.previous, presentAt + videoDelay, route});
             if (index != MaxGenerated) ++generatedPending_;
         };
         // Pick a better NGX phase when the display slots are full. A missing
@@ -214,14 +228,14 @@ public:
         OriginalFrameProtection mode, QueueDrops& drops, const GeneratedReady& ready) {
         if (mode == OriginalFrameProtection::Force || groups_.size() < 2) return std::nullopt;
         const auto& source = groups_.front().pictures.back();
-        if (source.deadline > now) return std::nullopt;
+        if (source.deadline > now || source.legacyRoute.retired) return std::nullopt;
         const int64_t eligible = now + leadTicks;
         const bool prefer = mode == OriginalFrameProtection::Prefer;
         size_t bestGroup = 0, bestPicture = 0;
         const size_t end = prefer ? 2 : groups_.size();
         for (size_t g = 1; g < end; ++g) {
             const auto& group = groups_[g];
-            if (group.pictures[group.next].deadline > eligible) break;
+            if (group.pictures.back().legacyRoute.retired || group.pictures[group.next].deadline > eligible) break;
             const bool endpointDue = group.pictures.back().deadline <= eligible;
             const int64_t maxLate = group.phaseTicks * 3 / 4;
             for (size_t i = group.next; i < group.pictures.size(); ++i) {

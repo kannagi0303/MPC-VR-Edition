@@ -62,6 +62,13 @@ CDX11VideoProcessor::EditionConfiguration CDX11VideoProcessor::ConfigureEdition(
 	const bool overlayChanged = (wasUsingDepth && m_showDepthOverlay) !=
 		(useDepth && config.bShowDepthOverlay);
 	const unsigned processingMode = config.iMfgProcessingMode <= 1 ? config.iMfgProcessingMode : 0;
+    if ((srChanged || m_dlssSRDlaa != config.bDlssSRDlaa ||
+        m_mfgProcessingMode != processingMode) &&
+        (m_earlyOriginal.srSource || m_futureOriginal.srSource)) {
+        DiscardEarlyOriginal(m_futureOriginal);
+        m_futureOriginal = {};
+        FinishEarlyOriginal();
+    }
 	const bool jvrModeChanged = jvrFlatView != m_jvrFlatView;
 	if (processingMode != m_mfgProcessingMode ||
 		(m_mfgMultiplier && (srChanged || overlayChanged || jvrModeChanged) && m_pFilter->GetActive())) {
@@ -133,9 +140,20 @@ void CDX11VideoProcessor::ResetEditionVideoProcessor()
 	m_editionOriginalDropsBase = m_mfgLostReal.load(std::memory_order_relaxed);
 	m_depth.ResetHistory();
 	m_dlssSRAfterMfg = false;
+    if (m_earlyOriginal.srSource || m_futureOriginal.srSource) {
+        DiscardEarlyOriginal(m_futureOriginal);
+        m_futureOriginal = {};
+        FinishEarlyOriginal();
+    }
 	m_dlssSR.Reset();
 	m_dlssSRSource.Release();
 	m_depthOverlayCapture.Release();
+    // These independent VPs were configured against the previous media/device
+    // domain, even if the new source has the same format and dimensions.
+    m_adaptiveTone.sourceCscVP.ReleaseVideoDevice();
+    m_adaptiveTone.sourceVsrVP.ReleaseVideoDevice();
+    m_adaptiveTone.sourceVsrKey = {};
+    m_adaptiveTone.sourceVsrReady = false;
     // A media-format change also invalidates the dedicated post-MFG VP.
     if(m_mfgPostVsrReady || m_mfgPostVsrBroken) StopMfg();
 }
@@ -248,5 +266,24 @@ void CDX11VideoProcessor::BeginEditionSample(IMediaSample* pSample)
 		m_dlssSR.ResetHistory();
 		m_depth.ResetHistory();
 		m_D3D11VP.ResetFrameOrder();
+        // An explicit decoder splice is not a normal missing LUT. Reuse the
+        // existing invalidation path only if this timeline has source history.
+        if (m_svdLutRawTest.sourceTimeline.current >= 0 && m_svdLutRawTest.attempted)
+            ResetSvdLutTemporalQueue();
+        m_svdLutRawTest.sourceTimeline = {};
+        // A decoder-declared splice is authoritative for the shot anchor,
+        // even if its RGB thumbnails look similar and PTS stay monotonic.
+        ResetAdaptiveTone();
 	}
+    REFERENCE_TIME pts = INVALID_TIME, end = INVALID_TIME;
+    const bool valid = pSample->GetTime(&pts, &end) == S_OK && pts >= 0 && end > pts;
+    if (m_earlyOriginal.ready) {
+        auto& e = m_earlyOriginal;
+        if (valid && e.sample == pSample && e.pts == pts && e.epoch == m_pFilter->m_completedEpoch &&
+            m_completingSample && m_completedTarget && m_completedTarget->videoOnly &&
+            !m_pFilter->m_playbackCancel.Capture()->Cancelled()) {
+            e.approved = true;
+        } else FinishEarlyOriginal();
+    }
+    m_svdLutRawTest.sourceTimeline.Observe(valid ? pts : INVALID_TIME);
 }

@@ -13,6 +13,20 @@
 	CComPtr<ID3D11PixelShader> m_svdLutThumbnailShader;
 	CComPtr<ID3D11Buffer> m_svdLutThumbnailConstants;
 
+    // Original input identity (not a LUT arrival time or estimated FPS).
+    // No ownership or scheduling changes. Duplicate PTS is not a new frame.
+    struct SvdLutSourceTimeline {
+        REFERENCE_TIME current = INVALID_TIME, previous = INVALID_TIME;
+        void Observe(REFERENCE_TIME pts) noexcept {
+            if (pts < 0) { current = previous = INVALID_TIME; return; }
+            if (pts == current) return;
+            previous = current >= 0 && current < pts ? current : INVALID_TIME;
+            current = pts;
+        }
+        REFERENCE_TIME PreviousFor(REFERENCE_TIME pts) const noexcept {
+            return current == pts ? previous : INVALID_TIME;
+        }
+    };
 	// Video Enhancement temporal analysis state (former B).
 	struct SvdLutRawFrame {
 		REFERENCE_TIME pts = INVALID_TIME;
@@ -28,6 +42,9 @@
 		svdlut::temporal::Features colorFeatures{};
 		bool signatureReady = false;
 		bool temporalFinalized = false;
+        // FIX12: conservative PTS span of raw inputs contributing to temporalView.
+        std::array<REFERENCE_TIME, 2> temporalInputPts{INVALID_TIME, INVALID_TIME};
+        svdlut::temporal::Contributions temporalContributions{};
 	};
 	// Video Enhancement uses these asynchronous readback slots. Map(DO_NOT_WAIT)
 	// never stalls the presenter. Resources are owned by the renderer thread.
@@ -43,6 +60,7 @@
 	};
 	struct {
 		svdlut::ModelWorker model;
+        SvdLutSourceTimeline sourceTimeline;
 		std::array<SvdLutRawFrame, 16> frames;
 		std::array<SvdLutTemporalCapture, 3> captures;
 		size_t frameSlot = 0, captureSlot = 0;
@@ -55,8 +73,15 @@
         std::shared_ptr<const svdlut::Parameters> heldParameters;
         std::array<float, 8 * 8 * 3> heldSignature{}, inFlightSignature{};
         REFERENCE_TIME heldPts = INVALID_TIME;
+        uint64_t heldFence = 0;
+        std::array<REFERENCE_TIME, 2> heldInputPts{INVALID_TIME, INVALID_TIME};
+        svdlut::temporal::Contributions heldContributions{};
         bool heldSignatureReady = false;
         uint64_t appliedDraws = 0, missedResult = 0;
+        // Producer-side attempts, not unique frames or DXGI Presents.
+        uint64_t sourceLutChecks = 0, sourceLutExactReady = 0;
+        uint64_t sourceLutFutureReady = 0, sourceLutDraws = 0, sourceLutFutureDraws = 0;
+        double sourceLutFutureShareSum = 0.0;
         // B2.1 is a fixed, strictly post-B1 adaptive luma correction.
         // Only B2 uses these fields; temporal LUT regression remains untouched.
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> b2CachedView;
@@ -123,13 +148,55 @@
         REFERENCE_TIME requestPts=INVALID_TIME, capturePts=INVALID_TIME, uploadedPts=INVALID_TIME;
         ULONGLONG primeTick=0;
         bool pending=false, capturePrimed=false, suspended=false, captureAfterSuspend=false;
+        // Early observations share the existing single readback. Until the
+        // original RGB is actually consumed they cannot update the shot.
+        bool captureEarly=false, captureSpeculative=false;
+        uint64_t captureEpoch=0;
+        REFERENCE_TIME previousRequestPts=INVALID_TIME;
+        uint64_t earlyCaptures=0, earlyObservations=0, earlyExact=0;
         bool shaderFailed=false, allowDraw=false, applied=false;
         bool sourceComposition=false; // FA-03A: scoped to the producer draw
         Tex2D_t sourceOutput;
+        // Native RGB original, plus the existing-order VSR bridge. Reused and
+        // retired with optional colour resources; no presenter/bank ownership.
+        Tex2D_t sourceRaw, sourceVsrOutput;
+        CD3D11VP sourceCscVP, sourceVsrVP;
+        std::array<UINT, 7> sourceVsrKey{}; // includes the full source colour metadata
+        bool sourceVsrReady=false;
         // FA-03B: render-local upstream decision; not a persistent effect flag.
         bool sourceToneBeforeUpscale=false;
         std::optional<bool> srSourceToneRoute;
     } m_adaptiveTone;
+
+    // FIX16: raw RGB for the *currently arriving* original, prepared before
+    // Completed admission only in supported native SDR CSC / original-first SR routes.
+    // No decoder sample ownership: identity is borrowed within Receive.
+    struct EarlyOriginalImage {
+        Tex2D_t rgb;
+        CRect rect;
+        // The converter can be reinitialized while a different slot still
+        // owns its output. The image must carry its own colour-domain key.
+        std::array<UINT, 5> sourceKey{};
+        const IMediaSample* sample = nullptr;
+        const ID3D11Texture2D* decoderTexture = nullptr;
+        UINT decoderSlice = 0;
+        REFERENCE_TIME pts = INVALID_TIME;
+        uint64_t epoch = 0;
+        // The image travels between current/future slots, including its scratch owner.
+        bool srSource = false;
+        bool ready = false, approved = false, consumed = false, captured = false, fromFuture = false;
+    };
+    struct EarlyOriginalState : EarlyOriginalImage {
+        CD3D11VP vp;
+        CComPtr<ID3D11Query> completion;
+        std::array<UINT, 5> key{}; // converter configuration, not image identity
+        bool queryIssued = false, broken = false;
+        uint64_t prepared = 0, reused = 0, abandoned = 0, captures = 0;
+        uint64_t futurePrepared = 0, futureReused = 0;
+    } m_earlyOriginal;
+    // At most one actual future original. Its sample is owned by the input
+    // queue; this slot only owns its converted RGB and borrowed identity.
+    EarlyOriginalImage m_futureOriginal;
 
     // P1/P2 perceptual pipeline state, previously lost when P4 carried an
     // older projection-state include. Preserve the P4 grayProbe above.
@@ -141,6 +208,19 @@
         bool failedStandalone = false, failedB = false;
         uint64_t draws = 0, depthUsed = 0, depthFallback = 0;
     } m_perceptual;
+
+    // Dim-only temporal field; never aliases RAW depth or the AI input.
+    struct {
+        Tex2D_t masks[2], alignment;
+        CComPtr<ID3D11PixelShader> maskShader, alignmentShader;
+        CComPtr<ID3D11Buffer> constants;
+        REFERENCE_TIME pts = INVALID_TIME;
+        uint64_t generation = 0;
+        UINT sourceWidth = 0, sourceHeight = 0;
+        bool rotated = false, projected = false, shaderFailed = false;
+        std::array<float,16> projectionKey{};
+        unsigned history = 0;
+    } m_farDimmingField;
 
 	bool m_jvrShaderFailed = false;
 	Tex2D_t m_jvrSource;

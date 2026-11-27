@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
+#include "Edition/FixedShaderBytecode.h"
+#include "MotionShaders.h"
 
 namespace mfg {
 
@@ -31,10 +33,10 @@ class Letterbox {
     unsigned slot_ = 0;
     bool initialized_ = false;
 
-    static HRESULT Compile(ID3D11Device* device, const char* entry, ID3D11PixelShader** shader) {
+    template<edition::FixedShaderString Entry>
+    static HRESULT Compile(ID3D11Device* device, ID3D11PixelShader** shader) {
         Microsoft::WRL::ComPtr<ID3DBlob> code;
-        HRESULT hr = D3DCompile(MotionShaders, sizeof(MotionShaders) - 1, nullptr, nullptr, nullptr,
-            entry, "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, nullptr);
+        HRESULT hr = edition::CompileFixedShader<MotionShaders, Entry, "ps_5_0">(&code);
         return FAILED(hr) ? hr : device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, shader);
     }
 
@@ -43,8 +45,8 @@ public:
         HRESULT hr = rows_.Create(device, height, DXGI_FORMAT_R16G16_FLOAT);
         for (auto& history : history_)
             if (SUCCEEDED(hr)) hr = history.Create(device, 1, DXGI_FORMAT_R32G32B32A32_SINT);
-        if (SUCCEEDED(hr)) hr = Compile(device, "PictureRows", &rowsShader_);
-        if (SUCCEEDED(hr)) hr = Compile(device, "ActivePicture", &pictureShader_);
+        if (SUCCEEDED(hr)) hr = Compile<"PictureRows">(device, &rowsShader_);
+        if (SUCCEEDED(hr)) hr = Compile<"ActivePicture">(device, &pictureShader_);
         return hr;
     }
 

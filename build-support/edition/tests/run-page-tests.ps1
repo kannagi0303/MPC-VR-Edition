@@ -112,6 +112,11 @@ function Method([string]$Source, [string]$Name) {
 function Fixture([string]$Name, [string]$Source) {
     [IO.File]::WriteAllText((Join-Path $generatedDirectory "$Name.generated.inc"),$Source,[Text.UTF8Encoding]::new($false))
 }
+Fixture CompletedColorTransfer (Method (Read-Production 'Source/Edition/DX11VideoPipeline.cpp') 'bool TryAdoptCompletedColorOutput(')
+$mfgSession = Read-Production 'Source/Mfg/Session.cpp'
+Fixture MfgTransitionHelpers (Fragment $mfgSession 'D3D12_RESOURCE_BARRIER TransitionBarrier(' 'struct Shared {')
+Fixture MfgTransitionCommands (Fragment $mfgSession '        std::array<ID3D12Resource*,MaxGenerated> out{},flag{};' '        if(evaluation==Runtime::Evaluation::Failed)')
+Fixture MfgCopyConstants (Fragment $mfgSession '    std::array<int,12> uploadedCopyParams{};' '    // Real frames retain the full swapchain resolution')
 $frames = Read-Production 'Source/DX11VideoProcessorCompletedFrames.cpp'
 $next = Method $frames 'bool CDX11VideoProcessor::NextCompletedFrame('
 $present = Method $frames 'bool CDX11VideoProcessor::PresentCompletedFrame('
@@ -130,11 +135,12 @@ $depthHeader = Read-Production 'Source/Depth/Depth.h'
 $depth = Read-Production 'Source/Depth/Depth.cpp'
 Fixture DepthCounterMethods ((Fragment $depthHeader '    struct Counters {' '    static constexpr float OutputDepthSpan') +
     (Fragment $depthHeader '    void RecordSrEvaluation(' '    bool CoolingDown('))
-Fixture DepthPublicationRate (Fragment $depth '    // Wall-clock rate of valid maps' "`n}`n`nCDepth::Estimate CDepth::ForFrame")
+Fixture DepthPublicationRate (Fragment $depth '    // Wall-clock rate of valid maps' "`n}`n`nvoid CDepth::AwaitOriginal")
+Fixture DepthOriginalSelection ((Method $depth 'CDepth::Estimate CDepth::SelectOriginal(') + (Method $depth 'CDepth::Estimate CDepth::ForFrame('))
 Fixture DepthConsumerGate (Fragment (Method $depth 'bool CDepth::DrawEstimate(') '    PollCompleted();' '    D3D11_TEXTURE2D_DESC desc{};')
 $raw = Read-Production 'Source/Depth/DepthGpuShaders.h'
 $draw = Read-Production 'Source/Depth/DepthDrawShader.h'
-Fixture DepthRawScalars ((Method $raw 'bool FiniteDepth(') + ((Fragment $raw 'float2 RawEmpty()' "[numthreads(256, 1, 1)]`nvoid RawRangeTiles").Replace('0.0','0.0f')))
+Fixture DepthRawScalars (((Method $raw 'bool FiniteDepth(') + (Method $raw 'float StabilizedDepth(') + (Fragment $raw 'float2 RawEmpty()' "[numthreads(256, 1, 1)]`nvoid RawRangeTiles")) -replace '(?<![\w.])(0\.56|0\.12|0\.0)(?![\w.])','${1}f')
 $normalize = [regex]::Match((Method $raw 'void RawNormalize('), 'Depth\[pixel\] = ([^;]+);')
 $expand = [regex]::Match((Method $draw 'float RawExpand('), 'return (0\.5 \+ \(depth - 0\.5\)[^;]+);')
 if (!$normalize.Success -or !$expand.Success) { throw 'Missing RAW shader expressions' }
@@ -146,6 +152,13 @@ Fixture SourceToneMethods ((Method $tone 'float CDX11VideoProcessor::AdaptiveTon
     (Method $tone 'bool CDX11VideoProcessor::SourceToneEligible(') +
     (Method $tone 'ID3D11Texture2D* CDX11VideoProcessor::PrepareSourceTone('))
 Fixture DepthSourceToneSr (Method (Read-Production 'Source/Edition/DX11SuperResolution.cpp') 'Tex2D_t* CDX11VideoProcessor::EvaluateDlssSR(')
+$earlySource = Read-Production 'Source/Edition/DX11DepthPrefetch.cpp'
+Fixture EarlySrSourceReuse ((Method $earlySource 'bool CDX11VideoProcessor::EarlyOriginalRoute(') +
+    (Method $earlySource 'bool CDX11VideoProcessor::EarlyOriginalDomainMatches(') +
+    (Method $earlySource 'void CDX11VideoProcessor::ClearEarlyOriginal(') +
+    (Method $earlySource 'void CDX11VideoProcessor::FinishEarlyOriginal(') +
+    (Method $earlySource 'const Tex2D_t* CDX11VideoProcessor::ReuseEarlyOriginal(') +
+    (Method (Read-Production 'Source/Edition/DX11SuperResolution.cpp') 'Tex2D_t* CDX11VideoProcessor::TryDlssSR('))
 $color = Read-Production 'Source/DX11VideoProcessorSvdLut.cpp'
 Fixture OptionalColorMethods ((Method $color 'void CDX11VideoProcessor::PrepareOptionalColorBytecode(') +
     (Method $color 'void CDX11VideoProcessor::PrimeOptionalColorFrames('))
@@ -159,7 +172,7 @@ $tail = $grade.Substring($grade.IndexOf('    float3 toned =',[StringComparison]:
 Fixture AdaptiveToneComposition ((Method $perceptualShader 'float Smooth(') +
     (Method $perceptualShader 'float3 Enhance(') + (Method $toneShader 'float3 ApplyAdaptiveTone(') +
     "`nfloat4 Compose(float3 original,float3 grade,float depthWeight,float farWeight) { struct {float a=1;} src;`n" +
-    $activation + $tail)
+    $activation + $tail.Replace('[branch]',''))
 $control = Read-Production 'Source/Edition/RendererControls.cpp'
 $endHandler = "`nreturn {};`n}`n"
 Fixture EnhancementControlMethods ((Method $control 'void CMpcVideoRenderer::ApplyEnhancementStrengths()') +

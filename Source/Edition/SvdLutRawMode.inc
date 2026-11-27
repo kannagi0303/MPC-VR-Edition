@@ -37,9 +37,16 @@ void CDX11VideoProcessor::ReleaseSvdLutRawTest(bool fast)
     b.b2MemoryShaderAttempted = b.b2MemoryShaderFailed = false;
     b.b2MemoryDraws = 0;
     b.heldPts = INVALID_TIME;
+    b.heldFence = 0;
+    b.sourceTimeline = {};
+    b.heldInputPts = {INVALID_TIME, INVALID_TIME};
+    b.heldContributions = {};
     b.heldSignatureReady = false;
     b.activationPts = INVALID_TIME;
     b.appliedDraws = b.missedResult = 0;
+    b.sourceLutChecks = b.sourceLutExactReady = 0;
+    b.sourceLutFutureReady = b.sourceLutDraws = b.sourceLutFutureDraws = 0;
+    b.sourceLutFutureShareSum = 0.0;
     b.presentedGraded = b.presentedUngraded = 0;
     b.skippedCapture = b.reusedGrade = b.ungraded = 0;
     b.requests = b.completed = b.modelTicks = b.stageTicks = 0;
@@ -128,6 +135,9 @@ HRESULT CDX11VideoProcessor::EnsureSvdLutRawPicture(DXGI_FORMAT format, UINT wid
 // an original frame unless the data is already ready.
 void CDX11VideoProcessor::ResetSvdLutTemporalQueue()
 {
+    ClearEarlyOriginal();
+    DiscardEarlyAdaptiveTone(m_futureOriginal.pts,m_futureOriginal.epoch);
+    m_futureOriginal = {}; // whole analysis timeline is invalidated below
     auto& b = m_svdLutRawTest;
     b.model.Invalidate();
     for (auto& capture : b.captures) {
@@ -157,6 +167,10 @@ void CDX11VideoProcessor::ResetSvdLutTemporalQueue()
     b.b2DrawSlot = 0;
     b.b2Presented = {};
     b.heldPts = INVALID_TIME;
+    b.heldFence = 0;
+    b.sourceTimeline = {};
+    b.heldInputPts = {INVALID_TIME, INVALID_TIME};
+    b.heldContributions = {};
     b.heldSignatureReady = false;
     b.activationPts = INVALID_TIME;
     b.lastWindow = 0;
@@ -186,6 +200,9 @@ void CDX11VideoProcessor::PollSvdLutTemporalQueue()
                     b.heldView = result.view;
                     b.heldParameters = result.parameters;
                     b.heldPts = b.inFlightPts;
+                    b.heldFence = b.inFlightFence;
+                    b.heldInputPts = {b.inFlightPts, b.inFlightPts};
+                    b.heldContributions = {};
                     b.heldSignature = b.inFlightSignature;
                     b.heldSignatureReady = true;
                 }
@@ -225,12 +242,21 @@ void CDX11VideoProcessor::PollSvdLutTemporalQueue()
             return f.pts == capture.pts && f.fence == capture.fence;
         });
         if (frame != b.frames.end()) {
-            frame->signature = ReadSignature(static_cast<const uint8_t*>(map.pData), map.RowPitch);
+            const auto* pixels = static_cast<const uint8_t*>(map.pData);
+            capture.input = ReadSvdLutImage(pixels, map.RowPitch);
+            if (capture.input) {
+                const auto read = [&](unsigned x, unsigned y, unsigned c) {
+                    return svdlut::input::PlanarCode(*capture.input, x, y, c);
+                };
+                frame->signature = svdlut::input::ReadSignatureWith(read);
+                frame->b2Samples = svdlut::b2::refined::ReadSamplesWith(read);
+            } else {
+                // Keep the existing evidence even if the model input allocation fails.
+                frame->signature = ReadSignature(pixels, map.RowPitch);
+                frame->b2Samples = svdlut::b2::refined::ReadSamples(pixels, map.RowPitch);
+            }
             frame->signatureReady = true;
-            frame->b2Samples = svdlut::b2::refined::ReadSamples(
-                static_cast<const uint8_t*>(map.pData), map.RowPitch);
             frame->b2SamplesReady = true;
-            capture.input = ReadSvdLutImage(static_cast<const uint8_t*>(map.pData), map.RowPitch);
         }
         m_pDeviceContext->Unmap(capture.staging.pTexture, 0);
         if (frame == b.frames.end() || !capture.input) {
@@ -383,6 +409,38 @@ const auto* TemporalReferenceFrame(const Frames& frames, REFERENCE_TIME pts, uin
     return static_cast<const Frame*>(nullptr);
 }
 
+// Original producer captures are keyed by the real corrected source PTS
+// and its capture namespace. A nearby cached presentation is not evidence
+// of the preceding original. Reuse the existing temporal window only as
+// the mathematical support bound, not a fixed source-FPS guess.
+template <typename Frames, typename Depth>
+const auto* SourceOriginalReference(const Frames& frames, REFERENCE_TIME pts,
+    REFERENCE_TIME previous, uint64_t fence, const Depth& depth)
+{
+    using Frame = typename Frames::value_type;
+    if (pts < 0) return static_cast<const Frame*>(nullptr);
+    const Frame* prior = nullptr;
+    const bool priorValid = previous >= 0 && previous < pts &&
+        pts - previous <= svdlut::temporal::MaximumDistancePts &&
+        depth.SameColorScene(previous, pts);
+    for (const auto& frame : frames) {
+        if (frame.fence != fence || !frame.signatureReady) continue;
+        if (frame.pts == pts) return &frame;
+        if (priorValid && frame.pts == previous) prior = &frame;
+    }
+    return prior;
+}
+
+template <typename Frames>
+const auto* ExactOriginalReference(const Frames& frames, REFERENCE_TIME pts, uint64_t fence)
+{
+    using Frame = typename Frames::value_type;
+    if (pts < 0) return static_cast<const Frame*>(nullptr);
+    for (const auto& frame : frames)
+        if (frame.pts == pts && frame.fence == fence && frame.signatureReady) return &frame;
+    return static_cast<const Frame*>(nullptr);
+}
+
 template <typename Frames>
 bool TemporalSceneCompatible(const Frames& frames, REFERENCE_TIME fromPts, const float* fromSignature,
     REFERENCE_TIME toPts, const float* toSignature)
@@ -396,9 +454,23 @@ bool TemporalSceneCompatible(const Frames& frames, REFERENCE_TIME fromPts, const
     return svdlut::temporal::SameOriginalScene(std::span(probes.data(), count),
         {fromSignature, fromPts}, {toSignature, toPts});
 }
+// A temporal transform can contain a raw LUT from another frame, including
+// one inherited through several finalized fallback views. Validate the input
+// span against newly published cut evidence, not just the cache entry's PTS.
+// The legacy presentation path retains its original RGB-only policy.
+template <typename Depth>
+bool TemporalDepthSpanAllows(const Depth& depth, REFERENCE_TIME originalPts,
+    const std::array<REFERENCE_TIME, 2>& span)
+{
+    if (originalPts == INVALID_TIME) return true;
+    return span[0] >= 0 && span[1] >= span[0] &&
+        depth.SameColorScene(span[0], originalPts) &&
+        depth.SameColorScene(span[1], originalPts);
+}
 } // namespace
 
-ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutTemporalReadyView(REFERENCE_TIME pts, uint64_t fence)
+ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutTemporalReadyView(REFERENCE_TIME pts, uint64_t fence,
+    REFERENCE_TIME originalPts)
 {
     auto& b = m_svdLutRawTest;
     SvdLutRawFrame* current = nullptr;
@@ -407,25 +479,42 @@ ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutTemporalReadyView(REFERENCE
 
     // The current original's readback may still be pending. NEVER substitute
     // the previous shot's color grading before inspecting its thumbnail.
-    const auto* reference = TemporalReferenceFrame(b.frames, pts, fence);
+    const auto* reference = originalPts == INVALID_TIME ?
+        TemporalReferenceFrame(b.frames, pts, fence) :
+        ExactOriginalReference(b.frames, pts, fence);
+    // The producer may have redirected pts to a recent inspected original.
+    // That reference is not permission to reuse a LUT from before a known
+    // depth scene cut at the actual original PTS. Unknown scene evidence
+    // remains permissive, as in FIX07; never poll or wait here.
+    // Legacy presentation (originalPts == INVALID_TIME) is unchanged.
+    const auto sourceSceneAllows = [&](REFERENCE_TIME candidatePts) {
+        return originalPts == INVALID_TIME ||
+            (candidatePts <= originalPts && m_depth.SameColorScene(candidatePts, originalPts));
+    };
     const auto compatible = [&](REFERENCE_TIME otherPts, const float* otherSignature) {
-        return reference && reference->signatureReady && otherSignature &&
+        return sourceSceneAllows(otherPts) && reference && reference->signatureReady && otherSignature &&
+            sourceSceneAllows(reference->pts) &&
             TemporalSceneCompatible(b.frames, otherPts, otherSignature,
                 reference->pts, reference->signature.data());
     };
     const auto remember = [&](SvdLutRawFrame& frame) -> ID3D11ShaderResourceView* {
-        auto* view = SvdLutRawViewForFrame(frame);
+        auto* view = SvdLutRawViewForFrame(frame, originalPts);
         if (view && frame.signatureReady && (b.heldPts == INVALID_TIME || frame.pts >= b.heldPts)) {
             b.heldView = view;
             b.heldParameters = frame.temporalView && view == frame.temporalView.Get() ?
                 frame.temporalParameters : frame.parameters;
             b.heldPts = frame.pts;
+            b.heldFence = frame.fence;
+            b.heldInputPts = frame.temporalView && view == frame.temporalView.Get() ?
+                frame.temporalInputPts : std::array<REFERENCE_TIME, 2>{frame.pts, frame.pts};
+            b.heldContributions = frame.temporalView && view == frame.temporalView.Get() ?
+                frame.temporalContributions : svdlut::temporal::Contributions{};
             b.heldSignature = frame.signature;
             b.heldSignatureReady = true;
         }
         return view;
     };
-    if (current && current->view) return remember(*current);
+    if (current && current->view && sourceSceneAllows(current->pts)) return remember(*current);
 
     // No original-frame evidence: display the unmodified source briefly,
     // rather than leaking the previous shot's LUT across a cut.
@@ -433,7 +522,8 @@ ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutTemporalReadyView(REFERENCE
 
     SvdLutRawFrame* previous = nullptr;
     for (auto& frame : b.frames) {
-        if (!frame.view || !frame.signatureReady || frame.pts == INVALID_TIME || frame.pts > pts ||
+        if ((originalPts != INVALID_TIME && frame.fence != fence) ||
+            !frame.view || !frame.signatureReady || frame.pts == INVALID_TIME || frame.pts > pts ||
             pts - frame.pts > svdlut::temporal::MaximumDistancePts ||
             !compatible(frame.pts, frame.signature.data())) continue;
         if (!previous || frame.pts > previous->pts) previous = &frame;
@@ -443,8 +533,11 @@ ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutTemporalReadyView(REFERENCE
         return remember(*previous);
     }
     if (b.heldView && b.heldSignatureReady && b.heldPts != INVALID_TIME &&
+        (originalPts == INVALID_TIME || b.heldFence == fence) &&
         pts >= b.heldPts && pts - b.heldPts <= svdlut::temporal::MaximumDistancePts &&
-        compatible(b.heldPts, b.heldSignature.data())) {
+        compatible(b.heldPts, b.heldSignature.data()) &&
+        TemporalDepthSpanAllows(m_depth, originalPts, b.heldInputPts) &&
+        (originalPts == INVALID_TIME || b.heldInputPts[1] <= originalPts)) {
         ++b.reusedGrade;
         return b.heldView.Get();
     }
@@ -453,21 +546,34 @@ ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutTemporalReadyView(REFERENCE
 }
 
 // [VE-02 | 2026-11-24 16:39:20 +08:00] Original-frame LUT selection / temporal statistics.
-ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutRawViewForFrame(SvdLutRawFrame& current)
+ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutRawViewForFrame(SvdLutRawFrame& current, REFERENCE_TIME originalPts)
 {
     auto& b = m_svdLutRawTest;
     if (!current.view || !current.parameters)
         return current.view.Get();
-    if (current.temporalFinalized) return current.temporalView ? current.temporalView.Get() : current.view.Get();
+    // A cut can complete asynchronously after this view was finalized.
+    // Fall back to the entry's own raw LUT without allocating or reblending.
+    // Keep the cached resource intact for legacy draws / existing references.
+    if (current.temporalFinalized) {
+        // A fallback centered on an older source may not claim a genuine
+        // future span beyond the actual current original.
+        if (current.temporalView && TemporalDepthSpanAllows(m_depth, originalPts, current.temporalInputPts) &&
+            (originalPts == INVALID_TIME || current.pts == originalPts || current.temporalInputPts[1] <= originalPts))
+            return current.temporalView.Get();
+        return current.view.Get();
+    }
     // Only freeze a *resolved* transform. A one-sample RAW fallback must not
     // permanently discard later ready neighborhood transforms on redraw.
 
     std::array<SvdLutRawFrame*, 16> candidates{};
     size_t count = 0;
     for (auto& frame : b.frames) {
+        if ((originalPts != INVALID_TIME || current.fence == 0) && frame.fence != current.fence) continue;
         if (!frame.view || !frame.parameters || frame.pts == INVALID_TIME) continue;
         if (frame.pts < current.pts - svdlut::temporal::MaximumDistancePts ||
             frame.pts > current.pts + svdlut::temporal::MaximumDistancePts) continue;
+        if (originalPts != INVALID_TIME && (!m_depth.SameColorScene(frame.pts, originalPts) ||
+            (frame.pts > originalPts && current.pts != originalPts))) continue;
         if (!frame.signatureReady || !current.signatureReady ||
             !TemporalSceneCompatible(b.frames, frame.pts, frame.signature.data(),
                 current.pts, current.signature.data())) continue;
@@ -514,9 +620,11 @@ ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutRawViewForFrame(SvdLutRawFr
         // over an unfiltered current outlier. Do NOT cross a known shot cut.
         SvdLutRawFrame* previous = nullptr;
         for (auto& frame : b.frames) {
+            if ((originalPts != INVALID_TIME || current.fence == 0) && frame.fence != current.fence) continue;
             if (&frame == &current || !frame.view || !frame.signatureReady ||
                 !current.signatureReady || frame.pts >= current.pts ||
                 current.pts - frame.pts > svdlut::temporal::MaximumDistancePts) continue;
+            if (originalPts != INVALID_TIME && !m_depth.SameColorScene(frame.pts, originalPts)) continue;
             const svdlut::temporal::Sample a{nullptr, frame.signature.data(), frame.pts, nullptr};
             const svdlut::temporal::Sample c{nullptr, current.signature.data(), current.pts, nullptr};
             if (!TemporalSceneCompatible(b.frames, frame.pts, frame.signature.data(),
@@ -525,9 +633,15 @@ ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutRawViewForFrame(SvdLutRawFr
             if (!previous || frame.pts > previous->pts) previous = &frame;
         }
         if (previous) {
-            current.temporalView = previous->temporalView ? previous->temporalView : previous->view;
-            current.temporalParameters = previous->temporalView ?
-                previous->temporalParameters : previous->parameters;
+            const bool inherit = previous->temporalView &&
+                TemporalDepthSpanAllows(m_depth, originalPts, previous->temporalInputPts) &&
+                (originalPts == INVALID_TIME || previous->temporalInputPts[1] <= originalPts);
+            current.temporalView = inherit ? previous->temporalView : previous->view;
+            current.temporalParameters = inherit ? previous->temporalParameters : previous->parameters;
+            current.temporalInputPts = inherit ? previous->temporalInputPts :
+                std::array<REFERENCE_TIME, 2>{previous->pts, previous->pts};
+            current.temporalContributions = inherit ? previous->temporalContributions :
+                svdlut::temporal::Contributions{};
             current.temporalFinalized = true;
             return current.temporalView.Get();
         }
@@ -537,6 +651,10 @@ ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutRawViewForFrame(SvdLutRawFr
     current.temporalView = svdlut::CreateParametersView(m_pDevice, *blended);
     if (current.temporalView) {
         current.temporalParameters = std::move(blended); // B2 metadata, no effect on B1 math
+        // Conservative span includes every candidate offered to Blend, even
+        // if its robust selection later rejected some. No fabricated inputs.
+        current.temporalInputPts = {ordered[0].pts, ordered[samples - 1].pts};
+        current.temporalContributions = result.contributions;
         current.temporalFinalized = true;
         ++b.temporalFrames;
     }
@@ -661,7 +779,9 @@ std::array<float, 3> CDX11VideoProcessor::SvdLutB2ToneForView(REFERENCE_TIME pts
         b.b2Presented.pts == pts && b.b2Presented.view.Get() == selected &&
         b.b2Presented.tone[0] <= svdlut::b2::luma::MaximumParticipation)
         return b.b2Presented.tone;
-    const auto* reference = TemporalReferenceFrame(b.frames, pts, fence);
+    const auto* reference = m_adaptiveTone.sourceComposition ?
+        ExactOriginalReference(b.frames, pts, fence) :
+        TemporalReferenceFrame(b.frames, pts, fence);
     if (!reference || !reference->signatureReady) return identity;
     if (b.b2CachedView.Get() == selected && b.b2CachedSourcePts == reference->pts &&
         (b.b2CachedRefinedReady || !reference->b2SamplesReady))
@@ -776,26 +896,101 @@ void CDX11VideoProcessor::RememberPresentedSvdLutB2(REFERENCE_TIME pts, uint64_t
     }
 }
 
+// The capture entry is shared by the producer and the existing legacy draw.
+// Preserve the original pause-replay exclusion and the one nonblocking poll.
+bool CDX11VideoProcessor::BeginSvdLutAnalysis(const Tex2D_t& source, const CRect& sample,
+    REFERENCE_TIME pts, uint64_t fence, bool allowTemporalCapture)
+{
+    const auto& b = m_svdLutRawTest;
+    if (m_pFilter->m_filterState == State_Paused &&
+        b.b2Presented.pts == pts && b.b2Presented.view) return true;
+    PollSvdLutTemporalQueue();
+    if (allowTemporalCapture) QueueSvdLutTemporalFrame(source, sample, pts, fence);
+    return false;
+}
+
+// Diagnostic: compare against the ACTUAL source PTS, never the older
+// temporal reference used as a fallback. Read existing cache only.
+void CDX11VideoProcessor::RecordSourceLutReadiness(REFERENCE_TIME pts, uint64_t fence)
+{
+    auto& b = m_svdLutRawTest;
+    ++b.sourceLutChecks;
+    const SvdLutRawFrame* current = nullptr;
+    for (const auto& frame : b.frames) {
+        if (frame.pts == pts && frame.fence == fence && frame.signatureReady) {
+            current = &frame;
+            break;
+        }
+    }
+    if (!current) return;
+    if (current->view && current->parameters) ++b.sourceLutExactReady;
+    for (const auto& frame : b.frames) {
+        if (frame.fence != fence || frame.pts <= pts ||
+            frame.pts - pts > svdlut::temporal::MaximumDistancePts ||
+            !frame.signatureReady || !frame.view || !frame.parameters) continue;
+        if (m_depth.SameColorScene(frame.pts, pts) &&
+            TemporalSceneCompatible(b.frames, pts, current->signature.data(),
+                frame.pts, frame.signature.data())) {
+            ++b.sourceLutFutureReady;
+            break;
+        }
+    }
+}
+
+// Diagnostic only: exact synthesis coefficients of the selected view, not
+// its conservative dependency span. A shared/inherited view retains its
+// original contributing PTS; classify against the actual draw's original.
+double CDX11VideoProcessor::SourceLutFutureShare(REFERENCE_TIME pts, ID3D11ShaderResourceView* lut) const
+{
+    if (!lut || pts < 0) return 0.0;
+    const auto& b = m_svdLutRawTest;
+    if (b.heldView.Get() == lut) return b.heldContributions.ShareAfter(pts);
+    for (const auto& frame : b.frames) {
+        if (frame.temporalView.Get() == lut) return frame.temporalContributions.ShareAfter(pts);
+    }
+    return 0.0; // unblended raw or no retained temporal view
+}
+
 // [VE-07 | 2026-11-24 16:39:20 +08:00] Full calibrated temporal grade, then fused perceptual composition.
 HRESULT CDX11VideoProcessor::ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Texture2D* target,
     const CRect& area, const CRect& visible, CPoint offset, REFERENCE_TIME pts, uint64_t fence,
-    bool allowTemporalCapture, bool allowDepth)
+    bool allowTemporalCapture, bool allowDepth, std::optional<bool> analysisPausedReplay)
 {
     auto& b = m_svdLutRawTest;
     CRect sampled(visible);
     sampled.OffsetRect(offset);
     ID3D11ShaderResourceView* lut = nullptr;
+    REFERENCE_TIME analysisPts=pts;
+    uint64_t analysisFence=fence;
     // A redraw after Pause is NOT a new original frame. Preserve the actual
     // presented LUT and gain, even when CompletedLast's fence has changed.
     // Do not enqueue a second model job for a paused redraw.
-    const bool pausedB2Replay = m_pFilter->m_filterState == State_Paused &&
-        b.b2Presented.pts == pts && bool(b.b2Presented.view);
+    // The source producer has already offered its original RGB capture and
+    // performed the existing AT observation. Legacy callers keep the original
+    // capture/poll here. No retry is added on a failed producer capture.
+    const bool pausedB2Replay = analysisPausedReplay.has_value() ? *analysisPausedReplay :
+        BeginSvdLutAnalysis(source, sampled, pts, fence, allowTemporalCapture);
+    const bool recordSource = m_bShowStats && m_showEditionDetails &&
+        m_adaptiveTone.sourceComposition && !pausedB2Replay &&
+        m_pFilter->m_filterState == State_Running && pts >= 0;
     if (pausedB2Replay) {
         lut = b.b2Presented.view.Get();
     } else {
-        PollSvdLutTemporalQueue();
-        if (allowTemporalCapture) QueueSvdLutTemporalFrame(source, sampled, pts, fence);
-        lut = SvdLutTemporalReadyView(pts, fence);
+        if(m_adaptiveTone.sourceComposition) {
+            // Use the inspected current original, or the actual preceding
+            // original if its thumbnail is ready. No millisecond guess, no
+            // depth-worker timing dependency and no future-image substitution.
+            PollSvdLutTemporalQueue();
+            if (recordSource) RecordSourceLutReadiness(pts, fence);
+            const auto* reference = SourceOriginalReference(b.frames, pts,
+                b.sourceTimeline.PreviousFor(pts), fence, m_depth);
+            if (reference) {
+                analysisPts = reference->pts;
+                analysisFence = reference->fence;
+            } else analysisPts = INVALID_TIME;
+        }
+        if(analysisPts>=0) lut = SvdLutTemporalReadyView(analysisPts, analysisFence,
+            m_adaptiveTone.sourceComposition ? pts : INVALID_TIME);
     }
     if (!lut) {
         if (m_bShowStats && m_showEditionDetails) b.grayProbe = {};
@@ -840,7 +1035,7 @@ HRESULT CDX11VideoProcessor::ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Te
             probe.valid = true;
         }
     }
-    const auto b2Tone = SvdLutB2ToneForView(pts, fence, lut);
+    const auto b2Tone = SvdLutB2ToneForView(analysisPts, analysisFence, lut);
     // [VE-04] Prefer the fully calibrated fallback if the fused P1 shader fails.
     // Never silently revert to an uncalibrated RAW grade.
     ID3D11PixelShader* drawShader = b.b2LuminanceShader.p;
@@ -858,7 +1053,7 @@ HRESULT CDX11VideoProcessor::ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Te
         // Safe partial fallback if the fused shader could not be compiled.
         // Partial fallback retains the requested grade strength.
         if (!drawShader) return S_FALSE;
-        cb[12] = BindSvdLutOutputDither(target);
+        cb[12] = BindSvdLutOutputDither(target,!m_adaptiveTone.sourceComposition);
         m_pDeviceContext->UpdateSubresource(b.constants, 0, nullptr, cb, 0, 0);
         m_pDeviceContext->PSSetShaderResources(1, 1, &lut);
         m_pDeviceContext->PSSetSamplers(1, 1, &b.sampler.p);
@@ -874,6 +1069,12 @@ HRESULT CDX11VideoProcessor::ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Te
     b.active = hr == S_OK;
     if (b.active) {
         ++b.appliedDraws;
+        if (recordSource) {
+            const double share = SourceLutFutureShare(pts, lut);
+            ++b.sourceLutDraws;
+            if (share > 0.0) ++b.sourceLutFutureDraws;
+            b.sourceLutFutureShareSum += share;
+        }
         // Legacy path has no completed-frame present record. Start from the
         // successful draw's media time, without adding a present/wait hook.
         if (!fence && b.activationPts == INVALID_TIME && m_pFilter->m_filterState == State_Running)

@@ -42,11 +42,31 @@ struct Sample {
     const float* color = nullptr;   // FeatureCount cached color-transform probes
 };
 
+// The positive coefficients actually traversed by the synthesis loop. Keep
+// this distinct from the conservative candidate/dependency span: even a
+// zero-weight candidate may affect robust selection and regression.
+struct Contributions {
+    struct Term { int64_t pts = 0; float coefficient = 0.0f; };
+    std::array<Term, MaxWindow> terms{};
+    size_t count = 0;
+
+    double ShareAfter(int64_t pts) const noexcept {
+        double total = 0.0, future = 0.0;
+        for (size_t i = 0; i < count; ++i) {
+            const auto& term = terms[i];
+            total += term.coefficient;
+            if (term.pts > pts) future += term.coefficient;
+        }
+        return total > 0.0 ? future / total : 0.0;
+    }
+};
+
 struct Summary {
     unsigned used = 0;
     unsigned rejected = 0;
     unsigned future = 0;
     bool blended = false;
+    Contributions contributions{};
 };
 
 inline float ClampUnit(float value) { return (std::clamp)(value, 0.0f, 1.0f); }
@@ -466,6 +486,7 @@ inline Summary Blend(std::span<const Sample> ordered, size_t center, std::span<f
         if (weights[i] < 1e-5f || alpha[i] <= 0.0f) continue;
         const float* values = ordered[indices[i]].values;
         const float coefficient = alpha[i];
+        result.contributions.terms[result.contributions.count++] = {ordered[indices[i]].pts, coefficient};
         for (size_t k = 0; k < output.size(); ++k)
             output[k] += coefficient * values[k];
     }
