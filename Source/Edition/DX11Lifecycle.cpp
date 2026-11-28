@@ -76,15 +76,13 @@ CDX11VideoProcessor::EditionConfiguration CDX11VideoProcessor::ConfigureEdition(
 	} else if (overlayChanged) {
 		m_dlssSR.ResetHistory();
 	}
-	if (config.bShowFeatureBadges &&
-		(!m_showFeatureStatus.load(std::memory_order_relaxed) ||
-		 m_mfgMultiplier.load(std::memory_order_relaxed) != mfgMultiplier ||
-		 m_iVPSuperRes != superRes || srChanged)) {
-		ResetFeatureStatus();
-	}
+	// Only a change of the independent OSD setting restarts its session.
+	// Result changes are observed by DrawFeatureStatus; geometry/history changes do not rearm it.
+	if (m_showEditionOsd.load(std::memory_order_relaxed) != !config.bHideEditionOsd) ResetFeatureStatus();
 	m_jvrFlatView = jvrFlatView;
 	ConfigureJvrProjection(config);
 	if (jvrModeChanged) {
+		m_featureProjectionReady = false;
 		m_depth.StopLookahead();
 		m_depth.ResetHistory();
 		if (!jvrFlatView) {

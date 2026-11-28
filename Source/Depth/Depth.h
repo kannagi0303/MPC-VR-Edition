@@ -21,6 +21,9 @@ public:
         unsigned ahead = 0;
         unsigned capacity = 0;
     };
+    // RendererLock-only diagnostic views of existing CPU metadata. No GPU query.
+    const auto& CachedResultPts() const noexcept { return m_resultPts; }
+    const auto& SceneCutPts() const noexcept { return m_sceneCuts; }
     struct Counters {
         uint64_t captures = 0;
         uint64_t jobs = 0;

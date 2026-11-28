@@ -268,7 +268,7 @@ void CMpcVideoRenderer::NormalizeEditionSettings()
 
 void CMpcVideoRenderer::OnEditionSettingsConfigured()
 {
-	if ((!m_Sets.bShowFeatureBadges || m_Sets.bShowStats) &&
+	if ((m_Sets.bHideEditionOsd || m_Sets.bShowStats) &&
 		m_bStartupOverlayPending.exchange(false, std::memory_order_acq_rel)) {
 		if (m_hWndWindow) PostMessageW(m_hWndWindow, WM_VR_STARTUP_OVERLAY, FALSE, 0);
 	}

@@ -66,7 +66,7 @@
 		size_t frameSlot = 0, captureSlot = 0;
 		bool inFlight = false;
 		REFERENCE_TIME inFlightPts = INVALID_TIME;
-		uint64_t inFlightFence = 0, inFlightStart = 0;
+		uint64_t inFlightFence = 0;
         // Keep the latest completed LUT independent of the 16-frame ring.
         // Otherwise a slow result can be lost when its source frame is evicted.
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> heldView;
@@ -77,10 +77,9 @@
         std::array<REFERENCE_TIME, 2> heldInputPts{INVALID_TIME, INVALID_TIME};
         svdlut::temporal::Contributions heldContributions{};
         bool heldSignatureReady = false;
-        uint64_t appliedDraws = 0, missedResult = 0;
         // Producer-side attempts, not unique frames or DXGI Presents.
         uint64_t sourceLutChecks = 0, sourceLutExactReady = 0;
-        uint64_t sourceLutFutureReady = 0, sourceLutDraws = 0, sourceLutFutureDraws = 0;
+        uint64_t sourceLutDraws = 0, sourceLutFutureDraws = 0;
         double sourceLutFutureShareSum = 0.0;
         // B2.1 is a fixed, strictly post-B1 adaptive luma correction.
         // Only B2 uses these fields; temporal LUT regression remains untouched.
@@ -94,22 +93,10 @@
         std::array<float, 8 * 8 * 3> b2ShotSignature{};
         REFERENCE_TIME b2ShotPts = INVALID_TIME;
         bool b2ShotValid = false;
-        float b2LastSourceShiftEv = 0.0f, b2LastResidualEv = 0.0f;
-        unsigned b2LastSamples = 0;
-        // SVDLUT audit: one synthetic neutral-gray input sampled through the
-        // *selected* packed LUT (CPU only, no texture readback or GPU work).
-        // Diagnostic values do NOT include B2.1/P1/P2 or the display pipeline.
-        struct GrayProbe {
-            std::array<float, 3> model{}, strengthMixed{};
-            REFERENCE_TIME pts = INVALID_TIME;
-            unsigned source = 0; // 0 raw, 1 temporal view, 2 held/replayed
-            bool valid = false;
-        } grayProbe;
-        uint64_t b2Analyses = 0, b2AdjustedDraws = 0;
-        uint64_t b2AnalysisTicks = 0, b2BudgetSkips = 0, b2ShotResets = 0;
+        uint64_t b2Analyses = 0;
+        uint64_t b2AnalysisTicks = 0, b2BudgetSkips = 0;
         bool b2ShaderAttempted = false, b2ShaderFailed = false;
         bool b2MemoryShaderAttempted = false, b2MemoryShaderFailed = false;
-        uint64_t b2MemoryDraws = 0; // selected shader draws, not classified pixels
         // Keep the actual successfully presented B2 transform when pausing.
         // The original-frame signature ring may roll over by the time the
         // paused video is redrawn, and its fence is changed after Present.
@@ -122,12 +109,8 @@
         std::array<B2DrawState, 4> b2DrawRecords{};
         size_t b2DrawSlot = 0;
         B2DrawState b2Presented{};
-        // Count *successful Completed Presents*, not speculative/prepared draws.
-        uint64_t presentedGraded = 0, presentedUngraded = 0;
-		uint64_t skippedCapture = 0, reusedGrade = 0, ungraded = 0;
-		uint64_t requests = 0, completed = 0, modelTicks = 0, stageTicks = 0;
-		uint64_t temporalFrames = 0, temporalUsed = 0, temporalRejected = 0, temporalFuture = 0, prefetched = 0, earlyPrimed = 0;
-		unsigned lastWindow = 0;
+		uint64_t skippedCapture = 0;
+		uint64_t completed = 0; // also used by optional-capture admission
 		bool attempted = false, failed = false, active = false;
         REFERENCE_TIME activationPts = INVALID_TIME; // VE-08: first successfully presented grade
 		Tex2D_t thumbnail, picture;
@@ -153,7 +136,6 @@
         bool captureEarly=false, captureSpeculative=false;
         uint64_t captureEpoch=0;
         REFERENCE_TIME previousRequestPts=INVALID_TIME;
-        uint64_t earlyCaptures=0, earlyObservations=0, earlyExact=0;
         bool shaderFailed=false, allowDraw=false, applied=false;
         bool sourceComposition=false; // FA-03A: scoped to the producer draw
         Tex2D_t sourceOutput;
@@ -184,22 +166,20 @@
         uint64_t epoch = 0;
         // The image travels between current/future slots, including its scratch owner.
         bool srSource = false;
-        bool ready = false, approved = false, consumed = false, captured = false, fromFuture = false;
+        bool ready = false, approved = false, consumed = false, captured = false;
     };
     struct EarlyOriginalState : EarlyOriginalImage {
         CD3D11VP vp;
         CComPtr<ID3D11Query> completion;
         std::array<UINT, 5> key{}; // converter configuration, not image identity
         bool queryIssued = false, broken = false;
-        uint64_t prepared = 0, reused = 0, abandoned = 0, captures = 0;
-        uint64_t futurePrepared = 0, futureReused = 0;
     } m_earlyOriginal;
     // At most one actual future original. Its sample is owned by the input
     // queue; this slot only owns its converted RGB and borrowed identity.
     EarlyOriginalImage m_futureOriginal;
 
     // P1/P2 perceptual pipeline state, previously lost when P4 carried an
-    // older projection-state include. Preserve the P4 grayProbe above.
+    // older projection-state include.
     struct {
         CComPtr<ID3D11Buffer> constants;
         CComPtr<ID3D11SamplerState> sampler;

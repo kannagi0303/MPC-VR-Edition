@@ -68,7 +68,10 @@ int main() try {
         "Legacy VSR/MFG migration");
     Require(loaded.bWaitForExtendedStartup && !loaded.bUseZipDepthSr && !loaded.bUseZipDepthMfg &&
         loaded.GetSvdLutStrength() == 67 && !loaded.bMfgLowMotion, "Edition settings and scope");
-    Require(!loaded.bShowFeatureBadges && loaded.bShowEditionDetails, "Legacy OSD key and independent details preference");
+    Require(!loaded.bShowFeatureBadges && loaded.bShowEditionDetails && loaded.bHideEditionOsd, "Legacy OSD preference migration");
+    input.values[L"ShowEditionOSD"] = 1;
+    SettingsPersistence::ReadSettings(input, loaded);
+    Require(!loaded.bShowFeatureBadges && !loaded.bHideEditionOsd, "Independent OSD preference");
     Require(std::wstring(loaded.szDlssSRDllPath) == L"test-only.dll", "Edition string settings");
     Require(loaded.iSdrPeakWindowMs == peakWindow && loaded.iSdrPeakFloorNits == peakFloor &&
         loaded.bSdrPeakSceneCuts == peakCuts, "Preset read must exclude registry-only tuning");
@@ -79,6 +82,7 @@ int main() try {
     MemoryRegistry saved;
     SettingsPersistence::WriteSettings(saved, loaded);
     Require(edition::VerifySavedSettings(saved, loaded) == S_OK, "Save verification");
+    Require(saved.values.at(L"ShowEditionOSD") == 1, "Independent OSD persistence");
     Require(saved.values.at(L"UseD3D11") == 0 && saved.values.at(L"MfgMultiplier") == 7 &&
         saved.values.at(L"SvdLutStrength") == 67, "Native and Edition write composition");
     Require(!saved.values.count(L"SdrPeakWindowMs") && !saved.values.count(L"SdrPeakFloorNits") &&

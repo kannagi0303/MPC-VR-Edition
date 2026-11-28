@@ -580,16 +580,19 @@ void Run(HMODULE module, bool profiles) {
         Require(IsWindowEnabled(page.Control(IDC_EDITION_STATS_DETAILS)), "Edition details initially disabled");
         page.Click(IDC_EDITION_STATS_DETAILS, true);
         page.Click(IDC_MFG_FEATURE_BADGES, false);
+        Require(IsWindowEnabled(page.Control(IDC_SHOW_EDITION_OSD)), "OSD must remain independent");
+        page.Click(IDC_SHOW_EDITION_OSD, false);
         Require(!IsWindowEnabled(page.Control(IDC_EDITION_STATS_DETAILS)) &&
             SendMessageW(page.Control(IDC_EDITION_STATS_DETAILS), BM_GETCHECK, 0, 0) == BST_CHECKED,
             "Edition information did not preserve the disabled details preference");
         Check(page.object->Apply(), "Apply Edition information off");
-        Require(!page.renderer.settings.bShowFeatureBadges && page.renderer.settings.bShowEditionDetails,
+        Require(!page.renderer.settings.bShowFeatureBadges && page.renderer.settings.bShowEditionDetails && page.renderer.settings.bHideEditionOsd,
             "Edition OSD preferences did not apply independently of native statistics");
         page.Click(IDC_MFG_FEATURE_BADGES, true);
+        page.Click(IDC_SHOW_EDITION_OSD, true);
         Require(IsWindowEnabled(page.Control(IDC_EDITION_STATS_DETAILS)), "Edition details did not recover");
         page.Cancel();
-        Require(!page.renderer.settings.bShowFeatureBadges && page.renderer.settings.bShowEditionDetails,
+        Require(!page.renderer.settings.bShowFeatureBadges && page.renderer.settings.bShowEditionDetails && page.renderer.settings.bHideEditionOsd,
             "Cancel lost the applied Edition information preferences");
     }
     if (!profiles) {

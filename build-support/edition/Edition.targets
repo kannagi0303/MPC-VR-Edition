@@ -79,6 +79,7 @@
     <ClCompile Include="Edition\DX11Lifecycle.cpp" />
     <ClCompile Include="Edition\DX11Presentation.cpp" />
     <ClCompile Include="Edition\DX11FeatureStatus.cpp" />
+    <ClInclude Include="Edition\FeatureOsd.h" />
     <ClCompile Include="Edition\VideoRendererScheduling.cpp" />
     <ClCompile Include="Edition\VideoRendererLifecycle.cpp" />
     <ClInclude Include="Edition\VideoFrame.h" />
@@ -108,6 +109,7 @@
     <ClCompile Include="Edition\VideoProcessorStatistics.cpp" />
     <ClInclude Include="Edition\DX11Dependencies.h" />
     <ClInclude Include="Edition\StatisticsFormat.h" />
+    <ClInclude Include="Edition\VisualStatistics.h" />
     <ClInclude Include="Edition\CompletedBufferAudit.h" />
     <ClCompile Include="Edition\RendererWindow.cpp" />
   </ItemGroup>

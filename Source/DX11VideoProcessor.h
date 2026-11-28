@@ -93,7 +93,6 @@ private:
 	Tex2D_t m_TexResize;        // for intermediate result of two-pass resize
 	CTex2DRing m_TexsPostScale;
 	Tex2D_t m_TexDither;
-    CD3D11Rectangle m_FeatureStatusBackground;
 
 	// for GetAlignmentSize()
 	struct Alignment_t {

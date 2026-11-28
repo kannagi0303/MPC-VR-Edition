@@ -4,6 +4,7 @@
 	// preparing before the first picture is ready for the DirectShow clock.
 	std::atomic<bool> m_bStartupOverlayPending{ false };
 	std::atomic<unsigned> m_featureStatusPlaybackRun{ 0 };
+	std::atomic<unsigned> m_featureOsdRun{ 0 };
 	// How often a picture's turn was cancelled after it had been scheduled, leaving
 	// the streaming thread with nothing that could ever wake it. Nothing should ever
 	// raise this; the statistics carry it because that is the only place it can be

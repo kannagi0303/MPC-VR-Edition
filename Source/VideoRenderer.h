@@ -143,7 +143,6 @@ private:
 	// until the first *video* Present, not merely the first decoded frame.
 	HWND m_hStartupOverlay = nullptr;
 	std::atomic<const wchar_t*> m_startupFeatureText{ L"" };
-	static const wchar_t* FeatureStatusText(bool dlssSR, bool vsr, bool mfg);
 	void BeginStartupOverlay();
 	void ResizeStartupOverlay(HWND hwnd);
 	void OnVideoPresented();

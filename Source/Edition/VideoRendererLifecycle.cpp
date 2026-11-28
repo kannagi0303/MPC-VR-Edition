@@ -91,7 +91,7 @@ void CMpcVideoRenderer::BeginEditionFlush()
 void CMpcVideoRenderer::BeginEditionRun()
 {
 	const bool starting = m_filterState == State_Stopped;
-	if (starting) ResumeEditionDelivery(true);
+	if (starting) { ResumeEditionDelivery(true); m_featureOsdRun.fetch_add(1, std::memory_order_relaxed); }
 	m_featureStatusPlaybackRun.fetch_add(1, std::memory_order_relaxed);
 	m_filterState = State_Running;
 	if (starting) {
@@ -113,7 +113,7 @@ void CMpcVideoRenderer::CompleteEditionRun(HRESULT hr)
 FILTER_STATE CMpcVideoRenderer::BeginEditionPause()
 {
 	const auto previous = m_filterState;
-	if (previous == State_Stopped) ResumeEditionDelivery(true);
+	if (previous == State_Stopped) { ResumeEditionDelivery(true); m_featureOsdRun.fetch_add(1, std::memory_order_relaxed); }
 	m_filterState = State_Paused;
 	if (previous == State_Stopped) {
 		CAutoLock cRendererLock(&m_RendererLock);
@@ -130,7 +130,7 @@ void CMpcVideoRenderer::CompleteEditionPause(HRESULT hr, FILTER_STATE previous)
 		if (auto* dx11 = dynamic_cast<CDX11VideoProcessor*>(m_VideoProcessor.get()))
 			dx11->InvalidateCompletedBackBuffer();
 		if (m_filterState == State_Paused && m_bValidBuffer &&
-			m_VideoProcessor->Type() == VP_DX11 && m_Sets.bShowFeatureBadges) {
+			m_VideoProcessor->Type() == VP_DX11 && (!m_Sets.bHideEditionOsd || m_Sets.bShowFeatureBadges || m_Sets.bShowStats)) {
 			Redraw();
 		}
 	}
@@ -170,25 +170,17 @@ void CMpcVideoRenderer::OnVideoPresented()
 	}
 }
 
-const wchar_t* CMpcVideoRenderer::FeatureStatusText(bool dlssSR, bool vsr, bool mfg)
-{
-	if (dlssSR) return mfg ? L"DLSS SR | MFG" : L"DLSS SR";
-	if (vsr) return mfg ? L"VSR | MFG" : L"VSR";
-	return mfg ? L"MFG" : L"";
-}
-
 void CMpcVideoRenderer::BeginStartupOverlay()
 {
-	if (!m_Sets.bWaitForExtendedStartup || !m_Sets.bShowFeatureBadges || m_Sets.bShowStats ||
+	if (!m_Sets.bWaitForExtendedStartup || m_Sets.bHideEditionOsd || m_Sets.bShowStats ||
 		m_VideoProcessor->Type() != VP_DX11) return;
 	const bool dlssSR = m_Sets.bDlssSR;
 	const bool vsr = m_Sets.iVPSuperRes > SUPERRES_Disable &&
 		m_Sets.iVPSuperRes != SUPERRES_DLSS_SR;
 	const auto* dx11 = static_cast<const CDX11VideoProcessor*>(m_VideoProcessor.get());
 	const bool mfg = m_Sets.iMfgMultiplier >= 2 && !dx11->MfgSourceMeetsDisplayRate();
-	const auto* text = FeatureStatusText(dlssSR, vsr, mfg);
-	if (!*text) return;
-	m_startupFeatureText.store(text, std::memory_order_relaxed);
+	if (!dlssSR && !vsr && !mfg) return;
+	m_startupFeatureText.store(L"Initializing...", std::memory_order_relaxed);
 	m_bStartupOverlayPending.store(true, std::memory_order_release);
 	if (m_hWndWindow) PostMessageW(m_hWndWindow, WM_VR_STARTUP_OVERLAY, TRUE, 0);
 }

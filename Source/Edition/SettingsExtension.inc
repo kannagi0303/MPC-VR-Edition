@@ -100,9 +100,9 @@
 	// Kept at the end of Settings_t to preserve previous members and presets.
 	// Hybrid MFG processing order, independent of the final D3D11 Present.
 	unsigned iMfgProcessingMode = 0; // 0 Quality: VSR -> MFG; 1 Performance: MFG -> VSR
-	bool bShowFeatureBadges = true; // Edition OSD master, using the existing settings slot and key.
+	bool bShowFeatureBadges = true; // Edition Statistics, using the existing settings slot and key.
 	BYTE svdLutStrength = 0; // Reuses the retired processing-resolution slot.
-	bool reservedDlssSRValidateMotion = {}; // Legacy Settings_t slot.
+	bool bHideEditionOsd = false; // Reuses retired one-byte slot; independent of Statistics.
 	bool bShowEditionDetails = false; // Uses the alignment byte before iDlssSRSourceLimit.
     int iDlssSRSourceLimit = DLSSSR_SOURCE_Disable; // Appended: preserve the existing settings layout.
 	// Reserved legacy A/B slot, kept for Settings_t layout/preset compatibility.
@@ -142,6 +142,7 @@
 		iMfgProcessingMode = 0;
 		bWaitForExtendedStartup = false;
 		bShowFeatureBadges = true;
+		bHideEditionOsd = false;
 		bShowEditionDetails = false;
         iDlssSRSourceLimit = DLSSSR_SOURCE_Disable;
 		bDlssSRTemporalHistory = true;

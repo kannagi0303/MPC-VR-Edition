@@ -111,7 +111,6 @@ std::optional<HRESULT> CDX11VideoProcessor::PrepareEditionRender(edition::VideoF
 	tick1 = GetPreciseTick();
 	const auto projectionHr = wantsProjection ? PrepareJvrFrame(sourceRect, second) : S_FALSE;
 	const bool projected = wantsProjection && SUCCEEDED(projectionHr);
-	const auto projectionTicks = wantsProjection ? GetPreciseTick() - tick1 : 0;
 	DLogIf(FAILED(projectionHr), L"JVR source preparation failed ({}); showing decoded source", HR2Str(projectionHr));
 	const bool sourceReady = !wantsProjection || projected;
 	const CRect frameSource = projected ? sourceRect : m_srcRect;
@@ -138,7 +137,7 @@ std::optional<HRESULT> CDX11VideoProcessor::PrepareEditionRender(edition::VideoF
 		.mfgEnabledForRate = mfgEnabledForRate, .detached = detached,
 		.completedVideoOnly = completedVideoOnly, .second = second,
 		.wantsProjection = wantsProjection, .projected = projected,
-		.projectionTicks = projectionTicks, .sourceReady = sourceReady,
+		.sourceReady = sourceReady,
 		.frameSource = frameSource, .outputPicture = outputPicture, .processingRect = processingRect
 	};
 	return {};
@@ -153,7 +152,7 @@ std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Tex
     m_adaptiveTone.sourceToneBeforeUpscale=false; // FA-03B: each original has its own decision
     PrepareOptionalColorBytecode(); // FA-02: CPU-only, independent of GPU warmup admission
 	const auto& [field, frameStartTime, mfgEnabledForRate, detached, completedVideoOnly,
-		second, wantsProjection, projected, projectionTicks, sourceReady,
+		second, wantsProjection, projected, sourceReady,
 		frameSource, outputPicture, processingRect] = frame;
 	const bool playFirst = !m_pFilter->m_Sets.bWaitForExtendedStartup;
 	const bool wantSr = sourceReady && CanDlssSRUpscale(frameSource, processingRect, projected);
@@ -235,7 +234,6 @@ std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Tex
         if (nativeWarmupSelected &&
             !nativeWarmupPending && (prerollMfg || (useMfg && !m_mfg.Failed()))) {
             const CRect nativeRect(0, 0, frameSource.Width(), frameSource.Height());
-            const auto nativeStart=int64_t(GetPreciseTick());
             HRESULT nativeHr=E_FAIL;
             if (projected) {
                 nativeHr = S_OK;
@@ -254,10 +252,6 @@ std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Tex
                     ? D3D11VPPass(m_mfgNativeInput.pTexture,m_srcRect,nativeRect,m_FieldDrawn==2)
                     : Process(m_mfgNativeInput.pTexture,m_srcRect,nativeRect,m_FieldDrawn==2);
             }
-            const auto nativeEnd=int64_t(GetPreciseTick());
-            if (nativeEnd > nativeStart)
-                m_mfgVideoTicks.fetch_add(uint64_t(nativeEnd-nativeStart) + projectionTicks, std::memory_order_relaxed);
-            m_mfgVideoCount.fetch_add(1,std::memory_order_relaxed);
             if (SUCCEEDED(nativeHr)) {
                 if (prerollMfg) {
                     // Create the NGX feature/flow/banks while the DirectShow
@@ -301,7 +295,6 @@ std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Tex
 		return result;
 	};
 	if (completedVideoOnly || projected || !m_renderRect.IsRectEmpty()) {
-		const auto videoStart=int64_t(GetPreciseTick());
 		if (completedVideoOnly) {
 			hr = processPicture(pBackBuffer, outputPicture, &m_processingPostScale);
 			if (FAILED(hr)) return hr;
@@ -317,12 +310,6 @@ std::optional<HRESULT> CDX11VideoProcessor::RenderEditionVideo(CComPtr<ID3D11Tex
 		if (!completedVideoOnly && !videoOnly) {
 			hr = processPicture(pBackBuffer, outputPicture, nullptr);
 			if (FAILED(hr)) return hr;
-		}
-		if (mfgEnabledForRate) {
-			const auto videoEnd=int64_t(GetPreciseTick());
-			if (videoEnd > videoStart)
-				m_mfgVideoTicks.fetch_add(uint64_t(videoEnd-videoStart) + projectionTicks, std::memory_order_relaxed);
-			m_mfgVideoCount.fetch_add(1,std::memory_order_relaxed);
 		}
 	}
 

@@ -243,6 +243,7 @@ void CVRMainPPage::SetEditionControls()
     }
 	CheckDlgButton(IDC_SHOW_DEPTH_OVERLAY, m_SetsPP.bShowDepthOverlay ? BST_CHECKED : BST_UNCHECKED);
 	CheckDlgButton(IDC_MFG_FEATURE_BADGES, m_SetsPP.bShowFeatureBadges ? BST_CHECKED : BST_UNCHECKED);
+	CheckDlgButton(IDC_SHOW_EDITION_OSD, m_SetsPP.bHideEditionOsd ? BST_UNCHECKED : BST_CHECKED);
 	CheckDlgButton(IDC_EDITION_STATS_DETAILS, m_SetsPP.bShowEditionDetails ? BST_CHECKED : BST_UNCHECKED);
 	ComboBox_SelectByItemData(m_extendedPane, IDC_MFG_PROCESSING_MODE, m_SetsPP.iMfgProcessingMode);
 	ComboBox_SelectByItemData(m_extendedPane, IDC_EXTENDED_STARTUP, m_SetsPP.bWaitForExtendedStartup);
@@ -272,6 +273,7 @@ void CVRMainPPage::EnableEditionControls()
 	GetDlgItem(IDC_MFG_PROCESSING_MODE).EnableWindow(bMfgEnabled);
 	const BOOL canUseDlssSR = m_SetsPP.bUseD3D11 && IsWindows10OrGreater();
 	GetDlgItem(IDC_MFG_FEATURE_BADGES).EnableWindow(m_SetsPP.bUseD3D11);
+	GetDlgItem(IDC_SHOW_EDITION_OSD).EnableWindow(m_SetsPP.bUseD3D11);
 	GetDlgItem(IDC_EDITION_STATS_DETAILS).EnableWindow(m_SetsPP.bUseD3D11 && m_SetsPP.bShowFeatureBadges);
 	const bool srEnabled = canUseDlssSR && m_SetsPP.bDlssSR;
 	GetDlgItem(IDC_DEPTH_MODE).EnableWindow(canUseDlssSR);
@@ -428,8 +430,8 @@ void CVRMainPPage::AddEditionHints()
 		L"Draw MFG motion arrows on the final picture.\n"
 		L"Arrows point from the current source frame to the previous source frame.");
 	AddHint(IDC_MFG_FEATURE_BADGES,
-		L"Add Edition information to the on-screen statistics.\n"
-		L"When statistics are hidden, briefly show active DLSS SR, VSR and MFG as a corner badge.");
+		L"Use the compact Edition playback statistics.");
+	AddHint(IDC_SHOW_EDITION_OSD, L"Briefly show playback improvements after they become available.");
 	AddHint(IDC_EDITION_STATS_DETAILS, L"Show Edition playback diagnostics when Show statistics is enabled.");
 	AddHint(IDC_MFG_MULTIPLIER,
 		L"Enable automatic DLSS Multi Frame Generation (Auto).\n"
@@ -474,6 +476,7 @@ HRESULT CVRMainPPage::ReadEditionControls()
         if(m_colorCaptured[i] && m_enhancementEnabled && !CommitNumericEdit(ColorLabels[i])) return E_FAIL;
     }
 	m_SetsPP.bShowFeatureBadges = IsDlgButtonChecked(IDC_MFG_FEATURE_BADGES) == BST_CHECKED;
+	m_SetsPP.bHideEditionOsd = IsDlgButtonChecked(IDC_SHOW_EDITION_OSD) != BST_CHECKED;
 	m_SetsPP.bShowEditionDetails = IsDlgButtonChecked(IDC_EDITION_STATS_DETAILS) == BST_CHECKED;
     const LRESULT srLimit = ComboBox_GetCurItemData(m_extendedPane, IDC_DLSS_SR_SOURCE_LIMIT);
     if (srLimit < DLSSSR_SOURCE_Disable || srLimit > DLSSSR_SOURCE_1440p) return E_INVALIDARG;
@@ -560,6 +563,11 @@ bool CVRMainPPage::OnEditionMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
                 EnableEditionControls();
                 return true;
             }
+			if (nID == IDC_SHOW_EDITION_OSD) {
+				m_SetsPP.bHideEditionOsd = IsDlgButtonChecked(nID) != BST_CHECKED;
+				SetDirty();
+				return TRUE;
+			}
 			if (nID == IDC_EDITION_STATS_DETAILS) {
 				m_SetsPP.bShowEditionDetails = IsDlgButtonChecked(nID) == BST_CHECKED;
 				SetDirty();

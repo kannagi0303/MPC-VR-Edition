@@ -14,7 +14,7 @@ void CDX11VideoProcessor::ReleaseSvdLutRawTest(bool fast)
     }
     b.inFlight = false;
     b.inFlightPts = INVALID_TIME;
-    b.inFlightFence = b.inFlightStart = 0;
+    b.inFlightFence = 0;
     b.frameSlot = b.captureSlot = 0;
     b.heldView.Reset();
     b.heldParameters.reset();
@@ -25,17 +25,13 @@ void CDX11VideoProcessor::ReleaseSvdLutRawTest(bool fast)
     b.b2ShotPts = INVALID_TIME;
     b.b2ShotValid = false;
     b.b2ShotSignature = {};
-    b.b2LastSourceShiftEv = b.b2LastResidualEv = 0.0f;
-    b.b2LastSamples = 0;
-    b.grayProbe = {};
     b.b2DrawRecords = {};
     b.b2DrawSlot = 0;
     b.b2Presented = {};
-    b.b2Analyses = b.b2AdjustedDraws = 0;
-    b.b2AnalysisTicks = b.b2BudgetSkips = b.b2ShotResets = 0;
+    b.b2Analyses = 0;
+    b.b2AnalysisTicks = b.b2BudgetSkips = 0;
     b.b2ShaderAttempted = b.b2ShaderFailed = false;
     b.b2MemoryShaderAttempted = b.b2MemoryShaderFailed = false;
-    b.b2MemoryDraws = 0;
     b.heldPts = INVALID_TIME;
     b.heldFence = 0;
     b.sourceTimeline = {};
@@ -43,15 +39,11 @@ void CDX11VideoProcessor::ReleaseSvdLutRawTest(bool fast)
     b.heldContributions = {};
     b.heldSignatureReady = false;
     b.activationPts = INVALID_TIME;
-    b.appliedDraws = b.missedResult = 0;
     b.sourceLutChecks = b.sourceLutExactReady = 0;
-    b.sourceLutFutureReady = b.sourceLutDraws = b.sourceLutFutureDraws = 0;
+    b.sourceLutDraws = b.sourceLutFutureDraws = 0;
     b.sourceLutFutureShareSum = 0.0;
-    b.presentedGraded = b.presentedUngraded = 0;
-    b.skippedCapture = b.reusedGrade = b.ungraded = 0;
-    b.requests = b.completed = b.modelTicks = b.stageTicks = 0;
-    b.temporalFrames = b.temporalUsed = b.temporalRejected = b.temporalFuture = b.prefetched = b.earlyPrimed = 0;
-    b.lastWindow = 0;
+    b.skippedCapture = 0;
+    b.completed = 0;
     b.attempted = b.failed = b.active = false;
     b.thumbnail.Release();
     b.picture.Release();
@@ -148,7 +140,7 @@ void CDX11VideoProcessor::ResetSvdLutTemporalQueue()
     }
     b.inFlight = false;
     b.inFlightPts = INVALID_TIME;
-    b.inFlightFence = b.inFlightStart = 0;
+    b.inFlightFence = 0;
     b.captureSlot = b.frameSlot = 0;
     b.frames = {};
     b.heldView.Reset();
@@ -160,9 +152,6 @@ void CDX11VideoProcessor::ResetSvdLutTemporalQueue()
     b.b2ShotPts = INVALID_TIME;
     b.b2ShotValid = false;
     b.b2ShotSignature = {};
-    b.b2LastSourceShiftEv = b.b2LastResidualEv = 0.0f;
-    b.b2LastSamples = 0;
-    b.grayProbe = {};
     b.b2DrawRecords = {};
     b.b2DrawSlot = 0;
     b.b2Presented = {};
@@ -173,7 +162,6 @@ void CDX11VideoProcessor::ResetSvdLutTemporalQueue()
     b.heldContributions = {};
     b.heldSignatureReady = false;
     b.activationPts = INVALID_TIME;
-    b.lastWindow = 0;
 }
 
 void CDX11VideoProcessor::PollSvdLutTemporalQueue()
@@ -186,7 +174,6 @@ void CDX11VideoProcessor::PollSvdLutTemporalQueue()
     if (b.inFlight) {
         auto result = b.model.TryTakeFrameResult();
         if (result.view && result.parameters) {
-            const auto finished = GetPreciseTick();
             auto entry = std::find_if(b.frames.begin(), b.frames.end(), [&](const auto& frame) {
                 return frame.pts == b.inFlightPts && frame.fence == b.inFlightFence;
             });
@@ -210,11 +197,8 @@ void CDX11VideoProcessor::PollSvdLutTemporalQueue()
                     entry->view = std::move(result.view);
                     entry->parameters = std::move(result.parameters);
                     entry->colorFeatures = features;
-                } else {
-                    ++b.missedResult;
                 }
                 ++b.completed;
-                b.modelTicks += finished - b.inFlightStart;
             }
             b.inFlight = false;
         }
@@ -303,8 +287,6 @@ void CDX11VideoProcessor::PollSvdLutTemporalQueue()
     b.inFlightPts = pts;
     b.inFlightFence = fence;
     b.inFlightSignature = signature;
-    b.inFlightStart = GetPreciseTick();
-    ++b.requests;
 }
 
 CDX11VideoProcessor::SvdLutRawFrame* CDX11VideoProcessor::QueueSvdLutTemporalFrame(
@@ -518,7 +500,7 @@ ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutTemporalReadyView(REFERENCE
 
     // No original-frame evidence: display the unmodified source briefly,
     // rather than leaking the previous shot's LUT across a cut.
-    if (!reference) { ++b.ungraded; return nullptr; }
+    if (!reference) return nullptr;
 
     SvdLutRawFrame* previous = nullptr;
     for (auto& frame : b.frames) {
@@ -529,7 +511,6 @@ ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutTemporalReadyView(REFERENCE
         if (!previous || frame.pts > previous->pts) previous = &frame;
     }
     if (previous) {
-        ++b.reusedGrade;
         return remember(*previous);
     }
     if (b.heldView && b.heldSignatureReady && b.heldPts != INVALID_TIME &&
@@ -538,10 +519,8 @@ ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutTemporalReadyView(REFERENCE
         compatible(b.heldPts, b.heldSignature.data()) &&
         TemporalDepthSpanAllows(m_depth, originalPts, b.heldInputPts) &&
         (originalPts == INVALID_TIME || b.heldInputPts[1] <= originalPts)) {
-        ++b.reusedGrade;
         return b.heldView.Get();
     }
-    ++b.ungraded;
     return nullptr;
 }
 
@@ -610,10 +589,6 @@ ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutRawViewForFrame(SvdLutRawFr
         auto output = std::span<float>(&blended->lut[0][0], Values);
         result = svdlut::temporal::Blend(std::span(ordered.data(), samples), center - first, output);
     }
-    b.lastWindow = result.used;
-    b.temporalUsed += result.used;
-    b.temporalRejected += result.rejected;
-    b.temporalFuture += result.future;
     if (!result.blended) {
         // With only 1-2 LUTs, the RAW estimator can spike even in a nearly
         // identical picture. Prefer the last trustworthy completed transform
@@ -656,7 +631,6 @@ ID3D11ShaderResourceView* CDX11VideoProcessor::SvdLutRawViewForFrame(SvdLutRawFr
         current.temporalInputPts = {ordered[0].pts, ordered[samples - 1].pts};
         current.temporalContributions = result.contributions;
         current.temporalFinalized = true;
-        ++b.temporalFrames;
     }
     return current.temporalView ? current.temporalView.Get() : current.view.Get();
 }
@@ -710,8 +684,6 @@ void CDX11VideoProcessor::PrimeSvdLutTemporalFrames()
                 frame.image.desc.Width, frame.image.desc.Height)) ||
             sample.Width() < 2 || sample.Height() < 2) continue;
         if (QueueSvdLutTemporalFrame(frame.image, sample, frame.pts, frame.fence)) {
-            ++b.prefetched;
-            ++b.earlyPrimed;
             ++pending;
         }
     }
@@ -759,7 +731,7 @@ void CDX11VideoProcessor::PrefetchSvdLutRawFuture(const CompletedFrame& current,
         if (!sample.IntersectRect(future.picture, CRect(0, 0,
                 future.image.desc.Width, future.image.desc.Height)) ||
             sample.Width() < 2 || sample.Height() < 2) continue;
-        if (QueueSvdLutTemporalFrame(future.image, sample, future.pts, future.fence)) ++b.prefetched;
+        QueueSvdLutTemporalFrame(future.image, sample, future.pts, future.fence);
         break;
     }
 }
@@ -847,9 +819,6 @@ std::array<float, 3> CDX11VideoProcessor::SvdLutB2ToneForView(REFERENCE_TIME pts
                 std::span<const float>(&chosen->lut[0][0], Count));
             b.b2AnalysisTicks += GetPreciseTick() - started;
             ++b.b2Analyses;
-            b.b2LastSamples = result.samples;
-            b.b2LastSourceShiftEv = result.sourceShiftEv;
-            b.b2LastResidualEv = result.residualEv;
             tone = result.tone;
             measured = result.samples >= 8;
             if (measured && sameShot) {
@@ -864,7 +833,6 @@ std::array<float, 3> CDX11VideoProcessor::SvdLutB2ToneForView(REFERENCE_TIME pts
     // Only a valid, new ORIGINAL observation advances the shot anchor;
     // synthetic MFG frames and repeated/pre-draw invocations do not.
     if (measured && (!b.b2ShotValid || reference->pts > b.b2ShotPts)) {
-        if (b.b2ShotValid && !sameShot) ++b.b2ShotResets;
         b.b2ShotPts = reference->pts;
         b.b2ShotSignature = reference->signature;
         b.b2ShotValid = true;
@@ -924,17 +892,7 @@ void CDX11VideoProcessor::RecordSourceLutReadiness(REFERENCE_TIME pts, uint64_t 
     }
     if (!current) return;
     if (current->view && current->parameters) ++b.sourceLutExactReady;
-    for (const auto& frame : b.frames) {
-        if (frame.fence != fence || frame.pts <= pts ||
-            frame.pts - pts > svdlut::temporal::MaximumDistancePts ||
-            !frame.signatureReady || !frame.view || !frame.parameters) continue;
-        if (m_depth.SameColorScene(frame.pts, pts) &&
-            TemporalSceneCompatible(b.frames, pts, current->signature.data(),
-                frame.pts, frame.signature.data())) {
-            ++b.sourceLutFutureReady;
-            break;
-        }
-    }
+
 }
 
 // Diagnostic only: exact synthesis coefficients of the selected view, not
@@ -970,7 +928,7 @@ HRESULT CDX11VideoProcessor::ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Te
     // capture/poll here. No retry is added on a failed producer capture.
     const bool pausedB2Replay = analysisPausedReplay.has_value() ? *analysisPausedReplay :
         BeginSvdLutAnalysis(source, sampled, pts, fence, allowTemporalCapture);
-    const bool recordSource = m_bShowStats && m_showEditionDetails &&
+    const bool recordSource = m_bShowStats && m_showFeatureStatus.load(std::memory_order_relaxed) &&
         m_adaptiveTone.sourceComposition && !pausedB2Replay &&
         m_pFilter->m_filterState == State_Running && pts >= 0;
     if (pausedB2Replay) {
@@ -993,47 +951,7 @@ HRESULT CDX11VideoProcessor::ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Te
             m_adaptiveTone.sourceComposition ? pts : INVALID_TIME);
     }
     if (!lut) {
-        if (m_bShowStats && m_showEditionDetails) b.grayProbe = {};
         return S_FALSE;
-    }
-    // Diagnostic-only selected-LUT gray probe. This is NOT a replacement
-    // for a real pixel readback: it probes neutral sRGB(236,236,236) against
-    // the CPU copy of the exact LUT bound to the pixel shader at this draw.
-    // Opt-in through already existing Show statistics + Edition details.
-    if (m_bShowStats && m_showEditionDetails) {
-        b.grayProbe = {};
-        std::shared_ptr<const svdlut::Parameters> parameters;
-        unsigned sourceKind = 0;
-        for (const auto& frame : b.frames) {
-            if (frame.temporalView.Get() == lut && frame.temporalParameters) {
-                parameters = frame.temporalParameters;
-                sourceKind = 1;
-                break;
-            }
-            if (frame.view.Get() == lut && frame.parameters) {
-                parameters = frame.parameters;
-                break;
-            }
-        }
-        if (!parameters && b.heldView.Get() == lut && b.heldParameters) {
-            parameters = b.heldParameters;
-            sourceKind = 2;
-        }
-        if (parameters) {
-            constexpr float Gray = 236.0f / 255.0f;
-            const std::array<float, 3> input{Gray, Gray, Gray};
-            constexpr size_t Count = sizeof(svdlut::Parameters::lut) / sizeof(float);
-            const auto packed = std::span<const float>(&parameters->lut[0][0], Count);
-            const auto graded = svdlut::b2::ApplyB1(packed, input);
-            const float t = 1.0f;
-            auto& probe = b.grayProbe;
-            probe.model = graded;
-            for (size_t channel = 0; channel < 3; ++channel)
-                probe.strengthMixed[channel] = input[channel] + (graded[channel] - input[channel]) * t;
-            probe.pts = pts;
-            probe.source = sourceKind;
-            probe.valid = true;
-        }
     }
     const auto b2Tone = SvdLutB2ToneForView(analysisPts, analysisFence, lut);
     // [VE-04] Prefer the fully calibrated fallback if the fused P1 shader fails.
@@ -1068,7 +986,6 @@ HRESULT CDX11VideoProcessor::ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Te
     b.failed = FAILED(hr);
     b.active = hr == S_OK;
     if (b.active) {
-        ++b.appliedDraws;
         if (recordSource) {
             const double share = SourceLutFutureShare(pts, lut);
             ++b.sourceLutDraws;
@@ -1086,10 +1003,6 @@ HRESULT CDX11VideoProcessor::ApplySvdLutRawFrame(const Tex2D_t& source, ID3D11Te
         record.fence = fence;
         record.view = lut;
         record.tone = b2Tone;
-        svdlut::b2::Tone test{};
-        test.gains = b2Tone;
-        if (svdlut::b2::Adjusted(test)) ++b.b2AdjustedDraws;
-        if (drawShader && drawShader == b.b2MemoryShader.p) ++b.b2MemoryDraws;
     }
     return hr;
 }

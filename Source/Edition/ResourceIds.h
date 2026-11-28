@@ -16,6 +16,7 @@
 #define IDC_MFG_FEATURE_BADGES        5012
 #define IDC_DLSS_SR_SOURCE_LIMIT      5013
 #define IDC_EDITION_STATS_DETAILS     5014
+#define IDC_SHOW_EDITION_OSD          5068
 #define IDC_MFG_LOW_MOTION                5020
 #define IDC_SHOW_MFG_MOTION               5026
 #define IDC_EXTENDED_STARTUP              5027

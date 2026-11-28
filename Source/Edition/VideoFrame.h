@@ -15,7 +15,6 @@ struct VideoFrame {
     bool second;
     bool wantsProjection;
     bool projected;
-    uint64_t projectionTicks;
     bool sourceReady;
     CRect frameSource;
     CRect outputPicture;

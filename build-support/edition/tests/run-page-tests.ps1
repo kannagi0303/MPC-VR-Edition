@@ -130,6 +130,12 @@ Fixture FairPresent (Method $present '    if (hr == S_OK && CompletedFairProduce
 Fixture ResizeAdmissionMethods ((Method $frames 'bool CDX11VideoProcessor::CompletedGeometryChanging(') +
     (Method $frames 'const char* CDX11VideoProcessor::CompletedOverlapBlock('))
 Fixture ResizeCommit (Fragment $next 'constexpr ULONGLONG resizeSettleMs = 140;' '// Early B-only')
+$visualStats = Read-Production 'Source/Edition/DX11Statistics.cpp'
+Fixture VisualStatisticsDraw ((Method $visualStats 'void CDX11VideoProcessor::RefreshEditionTimelineResources(') +
+    (Method $visualStats 'void CDX11VideoProcessor::DrawEditionTimeline('))
+$featureOsd = Read-Production 'Source/Edition/DX11FeatureStatus.cpp'
+Fixture FeatureOsdDraw ((Method $featureOsd 'void CDX11VideoProcessor::ResetFeatureStatus(') +
+    (Method $featureOsd 'LONG CDX11VideoProcessor::DrawFeatureStatus('))
 Fixture DxgiClassification (Fragment (Read-Production 'Source/Edition/DX11Statistics.cpp') 'const auto previousCount = m_mfgDxgiLastPresentCount;' 'm_mfgRateTick=rateTick;')
 $depthHeader = Read-Production 'Source/Depth/Depth.h'
 $depth = Read-Production 'Source/Depth/Depth.cpp'

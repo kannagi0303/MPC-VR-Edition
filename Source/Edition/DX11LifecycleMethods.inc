@@ -6,6 +6,8 @@
 	std::optional<HRESULT> PrepareEditionRender(edition::VideoFrame& frame,
 		CComPtr<ID3D11Texture2D>& pBackBuffer, uint64_t& tick1, HRESULT& hr);
 	std::optional<size_t> AppendEditionStatistics(std::wstring& str, double sourceFps);
+    void RefreshEditionTimelineResources(edition::visual::Timeline& t, int64_t head, uint64_t fence);
+    void DrawEditionTimeline(const SIZE& rtSize);
 	void InsertEditionStatsSeparator(std::wstring& str, size_t separator);
 	void InitializeEdition(Settings_t& config);
 	void BeginEditionShutdown();

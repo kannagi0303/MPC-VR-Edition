@@ -251,7 +251,6 @@ void CDX11VideoProcessor::SwitchMfgUpscaleSlot(unsigned requestedMode) {
     StopMfg(true);
     m_dlssSR.ResetHistory();
     m_mfgProcessingMode = requestedMode;
-    ResetFeatureStatus();
 }
 
 void CDX11VideoProcessor::ResetMfgFrameAnalysis() {
@@ -826,7 +825,8 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
         }
     }
     mfg::Batch batch;
-    const auto generateStart=int64_t(GetPreciseTick());
+    const bool traceGenerate = m_completingSample && m_completedTarget && mfg::SourceCadenceTrace().Enabled();
+    const auto generateStart = traceGenerate ? int64_t(GetPreciseTick()) : 0;
     bool generated;
     if (effective < 2) {
         generated = m_mfg.CaptureOriginal(image, timestamp, batch, depth ? &*depth : nullptr);
@@ -853,9 +853,7 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
         }
     }
     m_mfgOriginalPrime = checkFrames && effective < 2 && !m_mfgRepeatHold ? batch.original : nullptr;
-    const auto generateEnd=int64_t(GetPreciseTick());
-    if (generateEnd>generateStart) m_mfgGenerateTicks.fetch_add(uint64_t(generateEnd-generateStart),std::memory_order_relaxed);
-    m_mfgGenerateCount.fetch_add(1,std::memory_order_relaxed);
+    const auto generateEnd = traceGenerate ? int64_t(GetPreciseTick()) : 0;
     if(!generated) {
         if (!RetireLegacyMfgForFallback()) StopMfg(false);
         DLog(L"MFG unavailable: {}",m_mfg.Status());return false;
@@ -880,7 +878,7 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
         fprintf(stderr,"MFG_READY stamp=%lld stream=%lld lead_us=%lld generated=%u ahead=%d path=%s\n",timestamp,REFERENCE_TIME(stream),(timestamp-REFERENCE_TIME(stream))/10,batch.generated,GetRenderAhead(),nativeInput ? "source-first" : "legacy");
     const auto qpc=int64_t(GetPreciseTick());
     if (m_completingSample && m_completedTarget) {
-        if (mfg::SourceCadenceTrace().Enabled()) {
+        if (traceGenerate) {
             mfg::SourceCadenceTrace().Record("completed_mfg_submit", generateEnd, timestamp, stream,
                 batch.serial, mfg::MaxGenerated, effective, batch.generated, 0, false,
                 m_mfgLostGenerated, S_OK, generateEnd - generateStart);
@@ -954,10 +952,7 @@ bool CDX11VideoProcessor::QueueMfg(ID3D11Texture2D* image, REFERENCE_TIME timest
     }catch(...) {StopMfg();return false;}
 }
 bool CDX11VideoProcessor::PresentMfg() {
-    if(!m_pFilter->m_RendererLock.TryLock()) {
-        m_mfgLockRetries.fetch_add(1,std::memory_order_relaxed);
-        return false;
-    }
+    if(!m_pFilter->m_RendererLock.TryLock()) return false;
     struct Unlock{CCritSec& lock;~Unlock(){lock.Unlock();}} unlock{m_pFilter->m_RendererLock};
     if(!m_pDXGISwapChain1||m_pFilter->m_filterState!=State_Running) {
         m_mfgPreparedFrame.reset();
@@ -1112,7 +1107,6 @@ bool CDX11VideoProcessor::PresentMfg() {
         if(frame->index==mfg::MaxGenerated) m_mfgPresentedLateReal.fetch_add(1,std::memory_order_relaxed);
         else m_mfgPresentedLateGenerated.fetch_add(1,std::memory_order_relaxed);
     }
-    const auto composeStart=int64_t(GetPreciseTick());
     HRESULT presentHr=E_FAIL;
     if(alreadyPrepared) {
         const auto picture = PictureForPlayback(frame->legacyRoute.projected);
@@ -1140,9 +1134,6 @@ bool CDX11VideoProcessor::PresentMfg() {
         presentHr=CompositeMfg(surface,*frame);
         if(frame->index!=mfg::MaxGenerated) m_mfg.MarkConsumed(frame->serial);
     }
-    const auto composeEnd=int64_t(GetPreciseTick());
-    if(composeEnd>composeStart)m_mfgComposeTicks.fetch_add(uint64_t(composeEnd-composeStart),std::memory_order_relaxed);
-    m_mfgComposeCount.fetch_add(1,std::memory_order_relaxed);
     if(FAILED(presentHr)) {
         if(frame->index==mfg::MaxGenerated) ++m_mfgLostReal;
         std::lock_guard guard(m_mfgQueueLock);m_mfgQueue.Clear();m_mfgLiveFlowGroups.Clear();

@@ -52,6 +52,10 @@
     <ClCompile Include="MfgSubmissionReuse.cpp" />
     <ClCompile Include="CompletedColorTransfer.cpp" />
     <ClCompile Include="Phase5ResourceReuse.cpp" />
+    <ClCompile Include="VisualStatistics.cpp" />
+    <ClCompile Include="FeatureOsd.cpp" />
+    <ClCompile Include="FeatureOsdDraw.cpp" />
+    <ClCompile Include="VisualStatisticsDraw.cpp" />
     <ClCompile Include="AdaptiveToneContinuity.cpp" />
     <ClCompile Include="AdaptiveToneComposition.cpp" />
     <ClCompile Include="DepthRawPipeline.cpp" />

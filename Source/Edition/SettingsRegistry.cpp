@@ -114,6 +114,9 @@ void ReadSettings(CRegKey& key, Settings_t& sets)
 	if (ERROR_SUCCESS == key.QueryDWORDValue(L"ShowFeatureBadges", dw)) {
 		sets.bShowFeatureBadges = dw != 0;
 	}
+	// Upgrade old combined preference only when the new independent key is absent.
+	sets.bHideEditionOsd = key.QueryDWORDValue(L"ShowEditionOSD", dw) == ERROR_SUCCESS
+		? dw == 0 : !sets.bShowFeatureBadges;
 	sets.bShowEditionDetails = key.QueryDWORDValue(L"ShowEditionDetails", dw) == ERROR_SUCCESS && dw != 0;
 #ifdef _WIN64
 	// The DLSS 5 NR snippet is x64 only.
@@ -268,6 +271,7 @@ void WriteSettings(CRegKey& key, const Settings_t& sets)
 	key.SetDWORDValue(L"JvrEye", sets.iJvrEye);
 	key.SetDWORDValue(L"ShowFeatureBadges", sets.bShowFeatureBadges);
 	key.SetDWORDValue(L"ShowEditionDetails", sets.bShowEditionDetails);
+	key.SetDWORDValue(L"ShowEditionOSD", !sets.bHideEditionOsd);
 #ifdef _WIN64
 	key.SetDWORDValue(OPT_DlssNR,              sets.bDlssNR);
 	key.SetDWORDValue(OPT_DlssNRStyle,         sets.iDlssNRStyle);

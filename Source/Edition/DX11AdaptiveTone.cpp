@@ -35,7 +35,6 @@ void CDX11VideoProcessor::ResetAdaptiveTone(bool release) {
     a.capturePts=INVALID_TIME; a.capturePrimed=false; a.primeTick=0;
     a.captureEarly=a.captureSpeculative=false; a.captureEpoch=0;
     a.previousRequestPts=INVALID_TIME;
-    a.earlyCaptures=a.earlyObservations=a.earlyExact=0;
     a.suspended=a.captureAfterSuspend=false;
     if(release) {
         ClearEarlyOriginal(true);
@@ -115,12 +114,7 @@ void CDX11VideoProcessor::PollAdaptiveTone(REFERENCE_TIME pts,REFERENCE_TIME pri
         if(a.capturePts!=INVALID_TIME && map.RowPitch>=SampleWidth*4*sizeof(float)) {
             const auto sample=ReadObservation(static_cast<const float*>(map.pData),map.RowPitch/sizeof(float));
             if(AdaptiveToneSupported()) {
-                const bool fresh = a.capturePts > a.shot.last;
                 a.shot.Observe(sample,a.capturePts,a.captureAfterSuspend,a.capturePrimed?pts:INVALID_TIME);
-                if(a.captureEarly && fresh) {
-                    ++a.earlyObservations;
-                    if(a.sourceComposition && a.capturePts==pts) ++a.earlyExact;
-                }
             }
         }
         m_pDeviceContext->Unmap(a.staging.pTexture,0);
@@ -171,7 +165,6 @@ void CDX11VideoProcessor::PrepareEarlyAdaptiveTone(const Tex2D_t& source, const 
         a.captureEarly=a.captureSpeculative=true;
         a.captureEpoch=epoch;
         a.previousRequestPts=previous;
-        ++a.earlyCaptures;
     } else {
         // A failed speculative attempt must not suppress normal sampling.
         a.requestPts=previous;

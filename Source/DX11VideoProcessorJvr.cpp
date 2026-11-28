@@ -83,6 +83,7 @@ HRESULT CDX11VideoProcessor::PrepareJvrFrame(const CRect& picture, bool second)
 		picture.Width(), picture.Height(), Tex2D_DefaultShaderRTarget);
 	if (FAILED(hr)) return hr;
 	const auto result = ProjectJvr(*source, m_jvrFrame.pTexture, sourceRect, picture);
+	if (SUCCEEDED(result)) m_featureProjectionReady = true;
 	m_pDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
 	return result;
 }

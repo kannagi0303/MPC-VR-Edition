@@ -813,11 +813,22 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
     }
     const auto started = GetPreciseTick();
     uint64_t readFence = 0;
-    auto hr = PresentCompletedVideo(frame, true, &readFence);
-    if (hr == DXGI_ERROR_INVALID_CALL && m_pFilter->m_bIsD3DFullscreen && SUCCEEDED(InitSwapChain(false))) {
-        frame.presentRetried = true;
-        hr = PresentCompletedVideo(frame, true);
-    }
+    auto hr = [&] {
+        const edition::visual::PresentClock clock{REFERENCE_TIME(stream), completed};
+        struct RestoreVisualClock {
+            const edition::visual::PresentClock*& slot;
+            const edition::visual::PresentClock* previous;
+            ~RestoreVisualClock() { slot = previous; }
+        } restore{m_visualPresentClock, m_visualPresentClock};
+        if (m_bShowStats && m_showFeatureStatus.load(std::memory_order_relaxed))
+            m_visualPresentClock = &clock;
+        auto result = PresentCompletedVideo(frame, true, &readFence);
+        if (result == DXGI_ERROR_INVALID_CALL && m_pFilter->m_bIsD3DFullscreen && SUCCEEDED(InitSwapChain(false))) {
+            frame.presentRetried = true;
+            result = PresentCompletedVideo(frame, true);
+        }
+        return result;
+    }();
     const auto finished = GetPreciseTick();
     m_RenderStats.presentticks = finished - started;
     const bool busy = hr == DXGI_ERROR_WAS_STILL_DRAWING;
@@ -847,13 +858,6 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
         m_completedFrames.push_front(std::move(frame));
         return false;
     }
-    if (hr == S_OK && !frame.sourceColorFinal && m_pFilter->m_videoEnhancement.load()) {
-        // b.active is the grade state of the image actually used by the
-        // successful Present (including a previously prepared backbuffer).
-        // These counts exclude speculative pre-draws and failed DXGI retries.
-        if (m_svdLutRawTest.active) ++m_svdLutRawTest.presentedGraded;
-        else ++m_svdLutRawTest.presentedUngraded;
-    }
     if (hr == S_OK && !frame.sourceColorFinal) RememberPresentedSvdLutB2(frame.pts, frame.fence);
     if (hr == S_OK && frame.phase == mfg::MaxGenerated) {
         m_pFilter->ReportCompletedMediaTime(frame.pts, frame.end);
@@ -863,11 +867,6 @@ bool CDX11VideoProcessor::PresentCompletedFrame()
         const auto run = m_pFilter->m_featureStatusPlaybackRun.load(std::memory_order_relaxed);
         // Count all compatible completed presents, including ungenerated originals.
         if (m_completedPresentWaitable) m_completedPreDraw.Observe(run, readFence != 0);
-        if (m_bShowStats && m_mfgMultiplier) {
-            m_completedCadence.Observe(run, finished, frame.pts, frame.due);
-        } else if (m_completedCadence.lastTick) {
-            m_completedCadence = {};
-        }
         if (frame.mfg) {
             if (frame.phase == mfg::MaxGenerated) ++m_mfgRealPresents;
             else ++m_mfgGeneratedPresents;
@@ -1070,7 +1069,7 @@ HRESULT CDX11VideoProcessor::PresentCompletedVideo(const CompletedFrame& frame, 
     } else if (prepared) {
         // A cached backbuffer was already graded (or left ungraded) earlier.
         // Do not let a later speculative draw overwrite the successful
-        // Present's graded/ungraded counter with an unrelated b.active value.
+        // Present's grade state with an unrelated b.active value.
         if (m_pFilter->m_videoEnhancement.load()) m_svdLutRawTest.active = preparedGraded;
         if (preparedReadFence) *preparedReadFence = frame.backBufferReadFence;
     } else {
@@ -1130,7 +1129,6 @@ void CDX11VideoProcessor::ClearCompletedFrames(bool release)
     m_completedPreDraw = {};
     m_completedBufferStats.clear();
     m_completedStatsDrops = {};
-    m_completedCadence = {};
     m_completedPresenter.Wake();
     if (release) {
         m_completedResizeTexture.Release();

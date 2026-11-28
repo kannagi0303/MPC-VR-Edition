@@ -21,9 +21,9 @@ template<class T> struct Ptr{T* p=nullptr;explicit operator bool()const{return p
 struct Tex2D_t { Ptr<Texture> pTexture; Ptr<View> pShaderResource; struct{UINT Width=1280,Height=720; int Format=DXGI_FORMAT_B8G8R8A8_UNORM;}desc;
  void Release(){pTexture.Release();pShaderResource.Release();} int CheckCreate(int,int,int,int,int){return pTexture?0:-1;} };
 struct EarlyOriginalImage { Tex2D_t rgb; CRect rect;std::array<UINT,5> sourceKey{}; const Sample* sample=nullptr;const Texture* decoderTexture=nullptr;
- UINT decoderSlice=0;REFERENCE_TIME pts=INVALID_TIME;uint64_t epoch=0;bool srSource=false,ready=false,approved=false,consumed=false,captured=false,fromFuture=false; };
+ UINT decoderSlice=0;REFERENCE_TIME pts=INVALID_TIME;uint64_t epoch=0;bool srSource=false,ready=false,approved=false,consumed=false,captured=false; };
 struct VP {bool ready=true;struct Held{Ptr<Sample>pSample;Ptr<Texture>pTexture;UINT ArraySlice=0;}held;bool IsReady()const{return ready;} Held HoldFrame(){return held;}void ReleaseVideoDevice(){ready=false;}};
-struct EarlyOriginalState:EarlyOriginalImage {VP vp;Ptr<int>completion;std::array<UINT,5>key{};bool queryIssued=false,broken=false;uint64_t prepared=0,reused=0,abandoned=0,captures=0,futurePrepared=0,futureReused=0;};
+struct EarlyOriginalState:EarlyOriginalImage {VP vp;Ptr<int>completion;std::array<UINT,5>key{};bool queryIssued=false,broken=false;};
 struct CDX11VideoProcessor {
  enum class UpscaleSlot{BeforeMfg,AfterMfg}; bool before=true,sr=true,project=false,eligible=true,overlay=false,srcAllowed=true,inputOK=true,evalOK=true,vpOK=true;
  int m_pDevice=1,m_pDeviceContext=1,m_srcDXGIFormat=DXGI_FORMAT_NV12,m_D3D11OutputFmt=DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -59,7 +59,7 @@ struct CDX11VideoProcessor {
 Texture tex[5]; View views[5]; Sample samples[2];
 Tex2D_t Surface(unsigned i){Tex2D_t x;x.pTexture.p=&tex[i];x.pShaderResource.p=&views[i];return x;}
 void SetEarly(CDX11VideoProcessor& p,bool sr,bool future=false){auto& e=p.m_earlyOriginal;e.rgb=Surface(0);e.rect=p.m_srcRect;e.sourceKey={UINT(p.m_srcDXGIFormat),UINT(p.m_srcWidth),UINT(p.m_srcHeight),p.m_srcExFmt.value,UINT(p.m_D3D11OutputFmt)};
- e.sample=&samples[0];e.decoderTexture=&tex[3];e.decoderSlice=2;e.pts=100;e.epoch=p.filter.m_completedEpoch;e.ready=e.approved=e.captured=true;e.fromFuture=future;e.srSource=sr;
+ e.sample=&samples[0];e.decoderTexture=&tex[3];e.decoderSlice=2;e.pts=100;e.epoch=p.filter.m_completedEpoch;e.ready=e.approved=e.captured=true;(void)future;e.srSource=sr;
  p.m_D3D11VP.held={{&samples[0]},{&tex[3]},2};}
 void Exercise(){
  const CRect native{0,0,1280,720},large{0,0,3840,2160};unsigned routes=0,reuses=0,clears=0,attempts=0;
@@ -74,8 +74,8 @@ void Exercise(){
   if(mask&1024)++p.filter.m_completedEpoch;if(mask&2048)p.m_D3D11VP.held.ArraySlice=3;if(mask&4096)p.m_earlyOriginal.rgb.pShaderResource.Release();
   bool expected=(sr==consumer&&sr==p.sr&&(!p.sr||p.before)&&(mask&0x1fe0)==0);
   auto* result=p.ReuseEarlyOriginal(native,dest,pts,second,consumer);assert(bool(result)==expected);
-  assert(p.m_earlyOriginal.reused==unsigned(expected));assert(p.m_earlyOriginal.futureReused==unsigned(expected&&bool(mask&4)));
-  if(result){assert(result->pTexture.p==&tex[0]);assert(p.ReuseEarlyOriginal(native,dest,pts,second,consumer)==result);assert(p.m_earlyOriginal.reused==1);}
+  assert(p.m_earlyOriginal.consumed==expected);
+  if(result){assert(result->pTexture.p==&tex[0]);assert(p.ReuseEarlyOriginal(native,dest,pts,second,consumer)==result);assert(p.m_earlyOriginal.consumed);}
   ++reuses;
  }
  for(unsigned mask=0;mask<16;++mask){CDX11VideoProcessor p;bool sr=mask&1,release=mask&2,occupied=mask&4;SetEarly(p,sr);auto& owner=sr?p.m_dlssSRSource:p.m_adaptiveTone.sourceRaw;auto& other=sr?p.m_adaptiveTone.sourceRaw:p.m_dlssSRSource;

@@ -224,7 +224,7 @@ void CDX11VideoProcessor::ClearEarlyOriginal(bool release)
     e.sourceKey = {};
     e.pts = INVALID_TIME;
     e.epoch = 0;
-    e.ready = e.approved = e.consumed = e.captured = e.fromFuture = false;
+    e.ready = e.approved = e.consumed = e.captured = false;
     // Return the allocation to the exact scratch owner that lent it, not
     // whichever route is configured now. D3D11 retains submitted references.
     if (!release && e.rgb.pTexture) {
@@ -240,8 +240,6 @@ void CDX11VideoProcessor::ClearEarlyOriginal(bool release)
         e.vp.ReleaseVideoDevice();
         e.key = {};
         e.broken = false;
-        e.prepared = e.reused = e.abandoned = e.captures = 0;
-        e.futurePrepared = e.futureReused = 0;
         m_futureOriginal = {};
     }
 }
@@ -254,7 +252,6 @@ void CDX11VideoProcessor::DiscardEarlyOriginal(EarlyOriginalImage& e)
     // reference. Remove just this source and any cached transform that
     // could include it. Preserve unrelated history and source identity.
     if (!e.consumed) {
-        ++m_earlyOriginal.abandoned;
         if (e.captured) {
             auto& b = m_svdLutRawTest;
             const auto pts = e.pts;
@@ -271,7 +268,7 @@ void CDX11VideoProcessor::DiscardEarlyOriginal(EarlyOriginalImage& e)
                 b.model.Invalidate();
                 b.inFlight = false;
                 b.inFlightPts = INVALID_TIME;
-                b.inFlightFence = b.inFlightStart = 0;
+                b.inFlightFence = 0;
             }
             bool invalidatedB2 = b.b2CachedSourcePts == pts;
             for (auto& f : b.frames) {
@@ -435,7 +432,6 @@ bool CDX11VideoProcessor::PrepareEarlyOriginal(IMediaSample* sample, REFERENCE_T
     PollSvdLutTemporalQueue();
     e.captured = QueueSvdLutTemporalFrame(e.rgb, native, pts, 0) != nullptr;
     if (e.captured) {
-        ++e.captures;
         m_pDeviceContext->End(e.completion);
         e.queryIssued = true;
     }
@@ -449,9 +445,6 @@ bool CDX11VideoProcessor::PrepareEarlyOriginal(IMediaSample* sample, REFERENCE_T
     e.sourceKey = key;
     e.ready = true;
     e.approved = e.consumed = false;
-    e.fromFuture = future;
-    ++e.prepared;
-    if (future) ++e.futurePrepared;
     // PrepareFutureOriginal temporarily swaps the current image into the
     // future slot; preserve its existing AT sampling opportunity first.
     PrepareEarlyAdaptiveTone(e.rgb,native,pts,epoch,future ? m_futureOriginal.pts : INVALID_TIME);
@@ -550,8 +543,6 @@ const Tex2D_t* CDX11VideoProcessor::ReuseEarlyOriginal(const CRect& source, cons
         return nullptr;
     }
     if (!e.consumed) {
-        ++e.reused;
-        if (e.fromFuture) ++e.futureReused;
         e.consumed = true;
     }
     return &e.rgb;

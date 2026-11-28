@@ -390,6 +390,7 @@ CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Setti
 	InitializeEdition(config);
 	m_bShowStats           = config.bShowStats;
 	m_showFeatureStatus.store(config.bShowFeatureBadges, std::memory_order_relaxed);
+	m_showEditionOsd.store(!config.bHideEditionOsd, std::memory_order_relaxed);
 	m_iResizeStats         = config.iResizeStats;
 	m_iTexFormat           = config.iTexFormat;
 	m_VPFormats            = config.VPFmts;
@@ -725,9 +726,16 @@ void CDX11VideoProcessor::ReleaseDevice()
 	m_D3D11VP.ReleaseVideoDevice();
 
 	m_StatsBackground.InvalidateDeviceObjects();
+    m_visualGeometry.InvalidateDeviceObjects();
+    m_visualGeometryValid = false;
+    m_visualGeometryDirty = true;
+    m_visualTimeline = {};
+    m_cachedStatisticsTick = 0;
 	m_Font3D.InvalidateDeviceObjects();
+    m_featureOsdFont.InvalidateDeviceObjects();
+    m_featureOsdBackground.InvalidateDeviceObjects();
+    m_featureOsdResourceStatus = S_FALSE;
 	m_Rect3D.InvalidateDeviceObjects();
-	m_FeatureStatusBackground.InvalidateDeviceObjects();
 
 	m_Underlay.InvalidateDeviceObjects();
 	m_Lines.InvalidateDeviceObjects();
@@ -1512,6 +1520,7 @@ void CDX11VideoProcessor::UpdateScalingStrings()
 
 void CDX11VideoProcessor::CalcStatsParams()
 {
+    m_visualGeometryDirty = true;
 	if (m_pDeviceContext && !m_windowRect.IsRectEmpty()) {
 		SIZE rtSize = m_windowRect.Size();
 		m_StatsRect.top = m_StatsTextPoint.y - 5 + m_statsFeatureOffset;
@@ -1715,7 +1724,6 @@ HRESULT CDX11VideoProcessor::SetDevice(ID3D11Device *pDevice, ID3D11DeviceContex
 	if (SUCCEEDED(hr3)) {
 		hr3 = m_StatsBackground.InitDeviceObjects(m_pDevice, m_pDeviceContext);
 		hr3 = m_Rect3D.InitDeviceObjects(m_pDevice, m_pDeviceContext);
-		hr3 = m_FeatureStatusBackground.InitDeviceObjects(m_pDevice, m_pDeviceContext);
 		hr3 = m_Underlay.InitDeviceObjects(m_pDevice, m_pDeviceContext);
 		hr3 = m_Lines.InitDeviceObjects(m_pDevice, m_pDeviceContext);
 		hr3 = m_SyncLine.InitDeviceObjects(m_pDevice, m_pDeviceContext);
@@ -4292,6 +4300,7 @@ void CDX11VideoProcessor::Configure(const Settings_t& requested)
 	// settings that do not require preparation
 	m_bShowStats           = config.bShowStats;
 	m_showFeatureStatus.store(config.bShowFeatureBadges, std::memory_order_relaxed);
+	m_showEditionOsd.store(!config.bHideEditionOsd, std::memory_order_relaxed);
 	m_bDeintDouble         = config.bDeintDouble;
 	m_bInterpolateAt50pct  = config.bInterpolateAt50pct;
 	m_bVBlankBeforePresent = config.bVBlankBeforePresent;
@@ -4897,16 +4906,34 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 	const auto statsRun = m_pFilter->m_featureStatusPlaybackRun.load(std::memory_order_relaxed);
 	const bool editionInformation = m_showFeatureStatus.load(std::memory_order_relaxed);
 	const bool refreshEditionStatistics = !m_cachedStatisticsTick || statsNow - m_cachedStatisticsTick >= 250 ||
-		m_cachedStatisticsRun != statsRun;
+		m_cachedStatisticsRun != statsRun || (editionInformation && m_cachedStatisticsEpoch != m_pFilter->m_completedEpoch);
 	if (!editionInformation || refreshEditionStatistics) {
 	std::wstring str;
 	str.reserve(700);
+    const double sourceFps=m_pFilter->m_FrameStats.GetAverageFps();
+    if (editionInformation) {
+        // The visual view replaces the verbose native block; disabling Edition
+        // information still restores the original native Statistics unchanged.
+        str = std::format(L"MPC-VR-Edition {} | D3D11", _CRT_WIDE(VERSION_STR));
+        const auto sr = m_dlssSR.GetStats(); // valid output only, no new probe
+        const bool srScale = m_iVPSuperRes == SUPERRES_DLSS_SR && !m_dlssSRInputStatus && !CanProjectJvr();
+        const auto fps = sourceFps > 0.0 && std::isfinite(sourceFps) ?
+            std::format(L"{:.2f} fps", sourceFps) : std::wstring(L"fps n/a");
+        const auto refresh = m_dRefreshPeriodMs > 0.0 && std::isfinite(m_dRefreshPeriodMs) ?
+            std::format(L"{} Hz", edition::CompactNumber(1000.0 / m_dRefreshPeriodMs)) : std::wstring(L"Hz n/a");
+        str += L"\n" + edition::visual::VideoFormatRow(m_srcRect.Width(), m_srcRect.Height(),
+            srScale ? sr.inputWidth : 0, srScale ? sr.inputHeight : 0,
+            sr.outputWidth, sr.outputHeight, fps, SourceIsHDR(), refresh);
+        if (m_pFilter->m_DrawStats.m_dropped || m_RenderStats.dropped2 || m_RenderStats.failed || m_showEditionDetails)
+            str += std::format(L"\nNative skip {}/{} | Failed {}", m_pFilter->m_DrawStats.m_dropped,
+                m_RenderStats.dropped2, m_RenderStats.failed);
+        if (!m_strStatsHDR.empty()) str.append(m_strStatsHDR);
+    } else {
 	str.assign(m_strStatsHeader);
 	str.append(m_strStatsDispInfo);
 	str += std::format(L"\nGraph. Adapter: {}", m_strAdapterDescription);
 
 	wchar_t frametype = (m_SampleFormat != D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE) ? 'i' : 'p';
-	const double sourceFps=m_pFilter->m_FrameStats.GetAverageFps();
 	str += std::format(
 		L"\nFrame rate    : {:7.3f}{},{:7.3f}",
 		sourceFps,
@@ -5007,12 +5034,14 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 		m_RenderStats.t5 * 1000 / GetPreciseTicksPerSecond(),
 		m_RenderStats.t6 * 1000 / GetPreciseTicksPerSecond());
 #endif
+    } // original native Statistics
 
 	if (refreshEditionStatistics) {
 		const auto editionSeparator = AppendEditionStatistics(str, sourceFps);
 		const bool layoutChanged = editionInformation && UpdateStatsLayout(str);
 		if (layoutChanged || !m_cachedStatisticsTick) UpdateStatsByWindow();
 		if (editionSeparator) InsertEditionStatsSeparator(str, *editionSeparator);
+        m_cachedStatisticsEpoch = m_pFilter->m_completedEpoch;
 		m_cachedStatisticsTick = statsNow;
 		m_cachedStatisticsRun = statsRun;
 	}
@@ -5025,9 +5054,11 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 		SIZE rtSize = m_windowRect.Size();
 
 		m_StatsBackground.Draw(pRenderTargetView, rtSize);
+        if (editionInformation) DrawEditionTimeline(rtSize);
 
 		hr = m_Font3D.Draw2DText(pRenderTargetView, rtSize, m_StatsTextPoint.x,
 			m_StatsTextPoint.y + m_statsFeatureOffset, m_dwStatsTextColor, m_cachedStatisticsText.c_str());
+        if (!editionInformation) {
 		if (--m_StatsMarkerX < m_StatsRect.left || m_StatsMarkerX > m_StatsRect.right) {
 			m_StatsMarkerX = m_StatsRect.right;
 		}
@@ -5046,6 +5077,7 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget, LONG feat
 			m_SyncLine.UpdateVertexBuffer();
 			m_SyncLine.Draw();
 		}
+        }
 		pRenderTargetView->Release();
 	}
 

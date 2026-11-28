@@ -78,7 +78,7 @@ static_assert(offsetof(Settings_t,iMfgMultiplier)==1264);
 static_assert(offsetof(Settings_t,iMfgProcessingMode)==1268);
 static_assert(offsetof(Settings_t,bShowFeatureBadges)==1272);
 static_assert(offsetof(Settings_t,svdLutStrength)==1273);
-static_assert(offsetof(Settings_t,reservedDlssSRValidateMotion)==1274);
+static_assert(offsetof(Settings_t,bHideEditionOsd)==1274);
 static_assert(offsetof(Settings_t,iDlssSRSourceLimit)==1276);
 static_assert(offsetof(Settings_t,bDlssSRTemporalHistory)==1280);
 static_assert(offsetof(Settings_t,reservedDlssSRMotionQuality)==1284);

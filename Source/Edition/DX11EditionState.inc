@@ -91,7 +91,7 @@
 	int64_t m_mfgRateTick=0;
 	uint64_t m_mfgRateReal=0,m_mfgRateGenerated=0,m_mfgRateFallback=0;
 	unsigned m_mfgRateSkipped=0;
-	double m_mfgActualFps=0.0,m_mfgGeneratedFps=0.0,m_mfgSkippedPerSec=0.0,m_mfgFallbackFps=0.0;
+	double m_mfgActualFps=0.0,m_mfgSkippedPerSec=0.0,m_mfgFallbackFps=0.0;
 	// Present() success counts do not mean the display actually scanned out that image.
 	// DXGI GetFrameStatistics is sampled separately, and is explicitly advisory.
 	bool m_mfgDxgiHasBaseline=false,m_mfgDxgiAvailable=false;
@@ -99,18 +99,8 @@
 	double m_mfgDxgiDisplayFps=0.0;
 	// [MFG-B10 | 2026-11-24 23:56 +08:00] Statistics only, protected by m_mfgRateLock.
 	const wchar_t* m_mfgDxgiStatus = L"baseline";
-	// Wall-clock stage timing includes GPU waits; it is NOT GPU execution time.
-	std::atomic<uint64_t> m_mfgVideoCount{0},m_mfgVideoTicks{0};
-	std::atomic<uint64_t> m_mfgGenerateCount{0},m_mfgGenerateTicks{0};
-	std::atomic<uint64_t> m_mfgComposeCount{0},m_mfgComposeTicks{0};
-	std::atomic<uint64_t> m_mfgLockRetries{0};
 	std::atomic<uint64_t> m_mfgGpuNotReady{0};
 	std::atomic<uint64_t> m_mfgDroppedOnAdd{0},m_mfgDroppedDue{0},m_mfgDroppedInvalid{0};
-	uint64_t m_mfgRateVideoCount=0,m_mfgRateVideoTicks=0;
-	uint64_t m_mfgRateGenerateCount=0,m_mfgRateGenerateTicks=0;
-	uint64_t m_mfgRateComposeCount=0,m_mfgRateComposeTicks=0;
-	uint64_t m_mfgRateLockRetries=0;
-	double m_mfgVideoWallMs=0.0,m_mfgGenerateWallMs=0.0,m_mfgComposeWallMs=0.0,m_mfgLockRetriesPerSec=0.0;
 	std::atomic<bool> m_mfgPresentFailed{false};
 	// Account for missing frames caused by deadlines and reused resource banks.
 	std::atomic<unsigned> m_mfgLostReal{0},m_mfgLostGenerated{0};
@@ -245,32 +235,6 @@
     struct CompletedStatsDrops {
         unsigned ngxLate = 0, composeLate = 0, presentLate = 0, budget = 0, other = 0;
     } m_completedStatsDrops;
-    struct CompletedCadence {
-        struct Range {
-            int64_t low = INT64_MAX, high = INT64_MIN;
-            void Add(int64_t value) {
-                low = (std::min)(low, value);
-                high = (std::max)(high, value);
-            }
-        };
-        unsigned playbackRun = 0;
-        uint64_t lastTick = 0;
-        REFERENCE_TIME lastPts = 0, lastDue = 0;
-        Range submit, media, due;
-        void Observe(unsigned run, uint64_t tick, REFERENCE_TIME pts, REFERENCE_TIME deadline) {
-            if (playbackRun != run) *this = {};
-            if (lastTick && tick > lastTick) {
-                submit.Add(int64_t(tick - lastTick));
-                media.Add(pts - lastPts);
-                due.Add(deadline - lastDue);
-            }
-            playbackRun = run;
-            lastTick = tick;
-            lastPts = pts;
-            lastDue = deadline;
-        }
-        void ClearWindow() { submit = {}; media = {}; due = {}; }
-    } m_completedCadence;
     DXGI_QUERY_VIDEO_MEMORY_INFO m_completedMemoryInfo{};
     bool m_completedBudgetKnown = false;
     bool m_completingSample = false, m_completedFailed = false;
@@ -329,18 +293,47 @@
     void ResetMfgPostVsr();
 
     std::atomic<bool> m_showFeatureStatus{true};
+    std::atomic<bool> m_showEditionOsd{true};
     std::mutex m_featureStatusMutex;
-    uint64_t m_featureStatusLastGenerated = 0;
-    ULONGLONG m_featureStatusGeneratedTick = 0;
-    ULONGLONG m_featureStatusUntil = 0;
-    CSize m_featureStatusSize{0, 0};
-    unsigned m_featureStatusPlaybackRun = 0;
-    bool m_featureStatusMfgActive = false;
+    edition::osd::Notice m_featureNotice;
+    // Independent, lazily created corner-OSD objects; never resize the Statistics atlas.
+    CD3D11Font m_featureOsdFont;
+    CD3D11Rectangle m_featureOsdBackground;
+    HRESULT m_featureOsdResourceStatus = S_FALSE; // pending until first visible notice
+    uint64_t m_featureStatusLastPerceptual = 0;
+    unsigned m_featureStatusOsdRun = 0;
+    bool m_featureProjectionReady = false; // successful projection preparation, RendererLock
     void ResetFeatureStatus();
     LONG DrawFeatureStatus(ID3D11Texture2D* target);
     LONG m_statsFeatureOffset = 0;
     // Rate-limit Statistics text formatting; drawing stays in the existing OSD pass.
     std::wstring m_cachedStatisticsText;
+    uint64_t m_cachedStatisticsEpoch = 0;
+    edition::visual::Timeline m_visualTimeline;
+    // Non-owning, scoped to the existing Completed Presenter call under RendererLock.
+    const edition::visual::PresentClock* m_visualPresentClock = nullptr;
+    std::vector<edition::visual::PixelRect> m_visualRaster, m_visualUploadedRaster;
+    // Reuse the native colour geometry shader / vertex upload implementation.
+    // One opaque triangle-list batch; no new shader compilation or query.
+    class VisualTimelineGeometry final : public CD3D11Dots {
+    protected:
+        bool CheckNumPoints(UINT n) override { return n != 0 && n % 3 == 0; }
+        void DrawPrimitive() override {
+            m_pDeviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            m_pDeviceContext->Draw(static_cast<UINT>(m_Vertices.size()), 0);
+        }
+    public:
+        bool Initialized() const noexcept { return m_pDevice && m_pDeviceContext && m_pInputLayout && m_pVertexShader && m_pPixelShader; }
+        void Rect(LONG l, LONG t, LONG r, LONG b, D3DCOLOR color) {
+            if (r <= l || b <= t) return;
+            POINT points[] = {{l,t},{r,b},{l,b},{l,t},{r,t},{r,b}};
+            AddPoints(points, 6, color);
+        }
+    } m_visualGeometry;
+    SIZE m_visualGeometrySize{};
+    CRect m_visualLayout{};
+    LONG m_visualLine = 0;
+    bool m_visualGeometryValid = false, m_visualGeometryDirty = true;
     ULONGLONG m_cachedStatisticsTick = 0;
     unsigned m_cachedStatisticsRun = 0;
     // Owned by this renderer, never a thread with static-DLL lifetime.
