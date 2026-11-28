@@ -1,7 +1,7 @@
 # MPC Video Renderer Edition
 
 - Based on [MPC Video Renderer 0.11.1.2636](https://github.com/Aleksoid1978/VideoRenderer/releases/tag/0.11.1).
-- Edition source version: **0.3.0**.
+- Edition release: **0.3.1**.
 - **Windows x64 only.**<br>
   Works with players that support MPC Video Renderer.
 
@@ -58,6 +58,8 @@ It gives priority to original frames and can skip late generated frames.
 
 The renderer can skip repeated frames when MFG can fill the gap.
 
+On supported playback paths, Edition can prepare depth, color analysis, and inputs for DLSS SR ahead of presentation. It can reuse prepared inputs when they match the frame being processed.
+
 ### Upscaling and processing order
 
 Use **DLSS SR / DLAA** to choose the largest source resolution eligible for DLSS. The target is the display-fit size. At 1:1 the renderer uses DLAA, and when upscaling it uses DLSS SR.
@@ -87,7 +89,7 @@ Some playback paths resize the video before MFG, even with DLSS SR and RTX VSR o
 - **Disable** (default)<br>
   Keep depth estimation off.
 
-The package can include the model files for non-commercial scientific research or academic development. Read RESEARCH-ONLY.txt and the [Apple model agreement](../licenses/LICENSE-Apple-DepthPro2.txt) before enabling depth. On upgrade to 0.3.0, select a depth mode again for research. DLSS SR, DLAA, and MFG use neutral depth when estimation is disabled or unavailable.
+The package can include the model files for non-commercial scientific research or academic development. Read `RESEARCH-ONLY.txt` and the [Apple model agreement](../licenses/LICENSE-Apple-DepthPro2.txt) before enabling depth. If upgrading from a version before 0.3.0, select a depth mode again for research. DLSS SR, DLAA, and MFG use neutral depth when estimation is disabled or unavailable.
 
 ### Video Enhancement
 
@@ -95,7 +97,7 @@ These controls apply to supported SDR playback paths. Each has a numeric field a
 
 | Control | Effect |
 | --- | --- |
-| **Color Enhancement** | Applies the calibrated SVDLUT color grade. |
+| **Color Enhancement** | Applies the calibrated SVDLUT color grade. With valid depth, it can also dim distant areas by up to 7.5% in linear light at 100% strength. |
 | **Memory Color** | Adjusts colors such as sky and foliage. |
 | **Skin Tone** | Independently adjusts skin tones. |
 | **Adaptive Tone** | Adjusts contrast based on the current shot. |
@@ -104,8 +106,9 @@ Use **Enable video enhancement** to bypass or re-enable all four effects togethe
 
 ### Display Information
 
-- **Show Edition information** adds a compact summary to **Show statistics** or a brief corner badge when statistics are hidden.
-- **Include detailed diagnostics** adds GPU, depth, and buffer diagnostics to the summary.
+- **Show Edition information** switches **Show statistics** in the **Renderer** tab to the compact Edition view. Clear it to use the original MPC-VR statistics. When the playback buffer is available, the Edition view shows a timeline with tracks for Video, Depth, LUT, and SR Input as applicable.
+- **Show debug diagnostics** adds detailed timing and buffer information to the Edition statistics.
+- **Show OSD** independently enables the brief corner notice for playback enhancements. It can show an upscale resolution, the MFG target FPS, or active enhancements. The target FPS is the planned rate. The statistics panel takes priority while visible.
 - **Show depth overlay** displays the current depth map. **Show optical flow** draws MFG motion arrows on the picture.
 
 ### VR Projection
@@ -114,7 +117,7 @@ The **VR Projection** group appears when the renderer finds an `.ini` profile in
 
 ## Build from source
 
-Run **build-x64.cmd** to build incrementally and prepare the depth resources. When the model pair is missing, the native converter reads the pinned Safetensors checkpoint and prepares the pair on the CPU. The build stages the renderer and the optional research resources in **dist/**. Keep the Apple agreement and research notice with the model files when packaging them.
+Run **build-x64.cmd** with the Visual Studio C++ x64 tools installed. The script reuses validated depth resources when available, prepares missing resources with the native CPU converter, and performs a clean rebuild of the renderer. It stages the renderer and research resources in **dist/**. Keep the Apple agreement and research notice with the model files when packaging them.
 
 ## References
 
